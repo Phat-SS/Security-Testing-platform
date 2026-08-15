@@ -1,0 +1,10 @@
+{
+  "_comment": "Multi-user auth. Copy to users.json and set AUTH_ENABLED=true. Only SHA-256 hashes of API keys are stored — generate entries with: python -m app.core.auth add <name> <role>. Roles: viewer < tester < admin. When AUTH_ENABLED is false the app runs open in single-user (local-admin) mode.",
+  "users": [
+    {
+      "name": "example-tester",
+      "role": "tester",
+      "api_key_sha256": "REPLACE-WITH-OUTPUT-OF-app.core.auth-add"
+    }
+  ]
+}

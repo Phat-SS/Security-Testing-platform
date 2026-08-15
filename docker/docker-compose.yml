@@ -1,0 +1,48 @@
+# Sandbox + egress-proxy for running reviewed arbitrary-Python PoCs safely.
+#
+# Topology: the `sandbox` service has NO route to the outside world except via
+# the `egress` proxy on an internal-only network. The proxy default-denies and
+# only forwards to hosts in docker/allowlist. That is the real, network-level
+# scope enforcement the app cannot achieve for arbitrary code on its own.
+#
+# Usage (per PoC):
+#   cp docker/allowlist.example docker/allowlist   # edit to your scope
+#   EGRESS_PROXY=http://egress:8888 \
+#   docker compose -f docker/docker-compose.yml run --rm \
+#     -v "$PWD/poc.py:/home/poc/work/poc.py:ro" sandbox poc.py
+#
+# In the app: set ENABLE_PYTHON_RUNNER=true and EGRESS_PROXY to the proxy URL,
+# and run reviewed PoCs through app/execution/python_runner.py inside this image.
+
+services:
+  egress:
+    image: monokal/tinyproxy:latest
+    command: ANY
+    volumes:
+      - ./tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+      - ./allowlist:/etc/tinyproxy/allowlist:ro
+    networks:
+      - sandbox_net
+
+  sandbox:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.sandbox
+    # No direct internet: all traffic must go through the proxy.
+    environment:
+      HTTP_PROXY: http://egress:8888
+      HTTPS_PROXY: http://egress:8888
+      NO_PROXY: ""
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    depends_on: [egress]
+    networks:
+      - sandbox_net
+
+networks:
+  # internal: no bridge to the host network; the proxy is the only egress.
+  sandbox_net:
+    internal: true

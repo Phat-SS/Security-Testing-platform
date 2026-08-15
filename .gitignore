@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+reports/*.html
+evidence/*
+# real engagement config carries target + test-account tokens — never commit it
+config/engagement.json
+# user API-key hashes and the live egress allowlist are per-deployment secrets
+config/users.json
+docker/allowlist
+.env

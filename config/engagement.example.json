@@ -1,0 +1,27 @@
+{
+  "_comment": "Authorized testing context. Copy to engagement.json and edit. This example points at the bundled demo target on 127.0.0.1 and opts into private ranges (LAB ONLY). For a real engagement, set a public staging host, keep allow_private_ranges false, and put real test-account tokens in personas.",
+  "target_base_url": "http://127.0.0.1:8000",
+  "scope": {
+    "allowed_hosts": ["127.0.0.1"],
+    "blocked_hosts": ["production.company.com"],
+    "allow_private_ranges": true
+  },
+  "attacker": "agent_A",
+  "victim": "agent_B",
+  "personas": [
+    {
+      "name": "agent_A",
+      "auth_headers": { "Authorization": "Bearer tokenA" },
+      "role": "agent",
+      "owns": { "customer_id": "1001" },
+      "secret_markers": ["alice.buyer@example.com"]
+    },
+    {
+      "name": "agent_B",
+      "auth_headers": { "Authorization": "Bearer tokenB" },
+      "role": "agent",
+      "owns": { "customer_id": "2002" },
+      "secret_markers": ["beth.victim@example.com", "555-0202"]
+    }
+  ]
+}

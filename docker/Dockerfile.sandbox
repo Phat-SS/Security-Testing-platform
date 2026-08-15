@@ -1,0 +1,23 @@
+# Isolation image for the arbitrary-Python PoC runner.
+#
+# This is the REAL security boundary the app/execution/python_runner.py docstring
+# refers to. The runner subprocess is only a convenience; production execution of
+# a reviewed PoC should happen inside this container, which:
+#   * runs as a non-root user
+#   * has a read-only root filesystem (set at `docker run`/compose time)
+#   * can ONLY reach the network through the egress-proxy service (see compose),
+#     which enforces the scope allowlist
+#
+# Build:  docker build -f docker/Dockerfile.sandbox -t sectest-sandbox .
+FROM python:3.12-slim
+
+# Minimal deps a typical HTTP PoC needs. Add nothing else.
+RUN pip install --no-cache-dir "httpx>=0.27" "requests>=2.31"
+
+# Non-root, no shell history, no write access to app dirs.
+RUN useradd --create-home --uid 10001 poc
+USER poc
+WORKDIR /home/poc/work
+
+# The PoC is mounted read-only at run time; entrypoint runs it in isolated mode.
+ENTRYPOINT ["python", "-I", "-B"]

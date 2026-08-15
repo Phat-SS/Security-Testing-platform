@@ -1,0 +1,5 @@
+# One approved host per line (regex). This IS the network-level scope for the
+# arbitrary-Python sandbox. Keep it in sync with engagement.json's allowed_hosts.
+# Default-deny is enforced by tinyproxy; anything not listed is refused.
+^api-staging\.company\.com$
+^crm-staging\.company\.com$
