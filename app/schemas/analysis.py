@@ -54,6 +54,10 @@ class IssueAnalysis(BaseModel):
 
     # PoC signals detected in the ticket (references, not executed code).
     detected_pocs: list[str] = Field(default_factory=list)
+    # Raw PoC source extracted from the ticket description, pending a human's
+    # review in the Design step — never transpiled/executed until the tester
+    # looks at it and submits the design form themselves.
+    detected_poc_source: str = ""
 
     def applicable_categories(self) -> list[OwaspApiCategory]:
         return [

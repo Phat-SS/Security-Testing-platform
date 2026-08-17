@@ -19,6 +19,7 @@ from app.schemas.enums import (
     TestSource,
 )
 from app.schemas.testcase import (
+    DESTRUCTIVE_METHODS,
     AuthContext,
     ExpectedResult,
     Mutation,
@@ -143,7 +144,7 @@ class TestDesigner:
         cat_num = category.value.split(":")[0]  # "API1"
         # Any state-changing method is destructive by default — a broken control
         # means the write actually happened. Gate it out of default execution.
-        destructive = destructive or ep.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        destructive = destructive or ep.method.upper() in DESTRUCTIVE_METHODS
         return TestCase(
             test_id=f"{cat_num}-{num:03d}",
             title=title,

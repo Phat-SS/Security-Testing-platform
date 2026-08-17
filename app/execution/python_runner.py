@@ -11,6 +11,15 @@ Layered gates, ALL required before a single line runs:
   3. static validation passes             — no os.system/eval/subprocess/etc.
   4. an egress proxy is configured        — scope can only be enforced at the
      network layer for arbitrary code, so we refuse without one.
+  5. running inside the sandbox container — HTTP_PROXY/HTTPS_PROXY env vars
+     are a convention arbitrary code can trivially ignore (raw sockets,
+     os.environ.clear(), ctypes, ...). A bare subprocess on the host is NOT a
+     security boundary, so gate 4 alone is not load-bearing: this refuses to
+     actually execute unless it detects it is running inside
+     docker/Dockerfile.sandbox (INSIDE_SECURITY_SANDBOX=true), where
+     non-root, a read-only FS, dropped capabilities, and a default-deny
+     egress proxy are real, kernel-enforced boundaries the code cannot opt
+     out of.
 
 Even with all gates passed, execution happens in a separate process with a hard
 timeout and captured, size-capped output.
@@ -49,13 +58,17 @@ class PythonRunResult:
 
 class PythonRunner:
     def __init__(self, settings=None, enabled: bool | None = None,
-                 egress_proxy: str | None = None) -> None:
+                 egress_proxy: str | None = None, sandboxed: bool | None = None) -> None:
         self._settings = settings
         self._enabled = (
             enabled if enabled is not None
             else os.getenv("ENABLE_PYTHON_RUNNER", "false").lower() == "true"
         )
         self._egress_proxy = egress_proxy or os.getenv("EGRESS_PROXY", "")
+        self._sandboxed = (
+            sandboxed if sandboxed is not None
+            else os.getenv("INSIDE_SECURITY_SANDBOX", "false").lower() == "true"
+        )
         self._timeout = float(os.getenv("PYTHON_RUNNER_TIMEOUT_S", "10"))
         self._max_output = int(os.getenv("PYTHON_RUNNER_MAX_OUTPUT", "100000"))
 
@@ -86,6 +99,18 @@ class PythonRunner:
             return PythonRunResult(False, refused_reason=(
                 "No EGRESS_PROXY configured. Scope cannot be enforced for arbitrary "
                 "code without a network egress allowlist; refusing to run."))
+
+        # Gate 5: an egress proxy is a convention, not an enforcement
+        # mechanism, on a bare host — arbitrary code can ignore HTTP_PROXY/
+        # HTTPS_PROXY entirely. Refuse unless this process is itself running
+        # inside the isolated sandbox container, where the boundary is real.
+        if not self._sandboxed:
+            return PythonRunResult(False, refused_reason=(
+                "Not running inside the isolated sandbox container "
+                "(INSIDE_SECURITY_SANDBOX is not set). An egress proxy alone is "
+                "not a security boundary for arbitrary code on a bare host; "
+                "build and run docker/Dockerfile.sandbox (see "
+                "docker/docker-compose.yml) and run the platform from inside it."))
 
         return self._execute(source)
 

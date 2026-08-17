@@ -51,6 +51,23 @@ def test_private_and_loopback_ranges_blocked_by_default(ip):
     assert not v.validate_url("https://h.com/").allowed
 
 
+@pytest.mark.parametrize("mapped_ip", [
+    "::ffff:169.254.169.254",  # cloud metadata, IPv4-mapped
+    "::ffff:127.0.0.1",        # loopback, IPv4-mapped
+    "::ffff:10.1.2.3",         # RFC1918, IPv4-mapped
+])
+def test_ipv4_mapped_ipv6_cannot_bypass_the_ipv4_blocklist(mapped_ip):
+    # A version-matched-only check (ip.version == net.version) would let an
+    # IPv6 AAAA answer of ::ffff:<blocked-ipv4> sail past every IPv4 entry in
+    # _ALWAYS_BLOCK_NETS. This became reachable once the resolver started
+    # returning IPv6 addresses (getaddrinfo instead of gethostbyname).
+    policy = ScopePolicy(allowed_hosts={"h.com"})
+    v = make(policy, {"h.com": mapped_ip})
+    r = v.validate_url("https://h.com/")
+    assert not r.allowed
+    assert "SSRF" in r.reason or "blocked range" in r.reason
+
+
 def test_private_range_allowed_only_with_explicit_optin():
     policy = ScopePolicy(allowed_hosts={"127.0.0.1"}, allow_private_ranges=True)
     v = make(policy, {"127.0.0.1": "127.0.0.1"})

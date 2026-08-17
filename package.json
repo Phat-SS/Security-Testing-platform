@@ -1,0 +1,8 @@
+{
+  "name": "security-testing-platform",
+  "private": true,
+  "description": "Task-runner shim for a Python project — no JS runtime code, just convenience scripts.",
+  "scripts": {
+    "security:ui": "node scripts/security-ui.js"
+  }
+}

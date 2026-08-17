@@ -39,6 +39,62 @@ def test_dashboard_loads(client):
     assert "MOCK-345" in r.text
 
 
+def test_dashboard_has_environments_nav_tab(client):
+    r = client.get("/")
+    assert "/config/environments" in r.text
+    assert client.get("/config/environments").status_code == 200
+
+
+def test_cross_site_post_blocked_by_csrf_guard(client):
+    # A cross-site page cannot forge Origin to match this server's own
+    # origin, so this simulates the CSRF attack the guard exists to stop —
+    # even though AUTH_ENABLED is off here (treats every request as admin).
+    r = client.post("/import", data={"issue_key": "CRM-1234"},
+                    headers={"Origin": "https://evil.example"}, follow_redirects=False)
+    assert r.status_code == 403
+
+
+def test_same_origin_post_allowed_by_csrf_guard(client):
+    r = client.post("/import", data={"issue_key": "CRM-1234"},
+                    headers={"Origin": str(client.base_url).rstrip("/")}, follow_redirects=True)
+    assert r.status_code == 200
+
+
+def test_ticket_url_with_a_dangerous_scheme_is_not_rendered_as_a_link(client):
+    r = client.post("/import", data={"issue_key": "CRM-1234"}, follow_redirects=True)
+    aid = r.url.path.split("/")[-1]
+    r = client.get(f"/assessment/{aid}",
+                   params={"flash": "Posted to Jira", "ticket_url": "javascript:alert(1)"})
+    assert r.status_code == 200
+    assert "javascript:" not in r.text
+
+
+def test_ticket_url_with_https_is_rendered_as_a_link(client):
+    r = client.post("/import", data={"issue_key": "CRM-1234"}, follow_redirects=True)
+    aid = r.url.path.split("/")[-1]
+    r = client.get(f"/assessment/{aid}",
+                   params={"flash": "Posted to Jira", "ticket_url": "https://jira.example.com/browse/CRM-1234"})
+    assert r.status_code == 200
+    assert "https://jira.example.com/browse/CRM-1234" in r.text
+
+
+def test_delete_assessment_removes_it_from_the_dashboard(client):
+    r = client.post("/import", data={"issue_key": "CRM-1234"}, follow_redirects=True)
+    aid = r.url.path.split("/")[-1]
+    assert f"'/assessment/{aid}'" in client.get("/").text
+
+    r = client.post(f"/assessment/{aid}/delete", follow_redirects=True)
+    assert r.status_code == 200
+    assert "Deleted" in r.text
+    assert f"'/assessment/{aid}'" not in r.text
+    assert client.get(f"/assessment/{aid}").text.count("Assessment not found") == 1
+
+
+def test_delete_unknown_assessment_is_a_no_op(client):
+    r = client.post("/assessment/A-doesnotexist/delete", follow_redirects=True)
+    assert r.status_code == 200
+
+
 def test_unknown_issue_is_a_readable_400_not_a_500(client):
     r = client.post("/import", data={"issue_key": "NOPE-1"}, follow_redirects=True)
     assert r.status_code == 400
@@ -113,3 +169,9 @@ def test_full_ui_flow_without_execution(client):
     # report + comment preview render
     assert client.get(f"/assessment/{aid}/report").status_code == 200
     assert "CRM-1234" in client.get(f"/assessment/{aid}/comment").text
+
+    # HTML export downloads the same report as an attachment
+    r = client.get(f"/assessment/{aid}/export.html")
+    assert r.status_code == 200
+    assert r.headers["content-disposition"] == f"attachment; filename={aid}.html"
+    assert "CRM-1234" in r.text

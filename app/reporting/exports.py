@@ -11,6 +11,7 @@ import io
 import json
 from collections import Counter
 
+from app.execution.evidence import verify_chain
 from app.schemas.execution import Execution
 from app.schemas.finding import Finding
 from app.schemas.testcase import TestCase
@@ -109,6 +110,7 @@ def _summary(executions: list[Execution], findings: list[Finding]) -> dict:
                        ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]},
         "total_tests": len(executions),
         "total_findings": len(findings),
+        "evidence_chain_ok": verify_chain(executions) if executions else None,
     }
 
 

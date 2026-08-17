@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 MASK = "********"
 
@@ -69,6 +70,36 @@ def redact_headers(headers: dict[str, str]) -> dict[str, str]:
         else:
             redacted[key] = redact_text(value) or ""
     return redacted
+
+
+def redact_url(url: str) -> str:
+    """Mask sensitive query-parameter values (api_key, token, session, ...)
+    by key name, AND any Bearer/JWT-*shaped* substring anywhere in the URL —
+    including the path, e.g. a PoC hitting `/reset-password/eyJhbGci...` —
+    using the same shape detectors as redact_text for headers/body. Host is
+    left intact. Callers must send the real (unmasked) URL — this is only
+    for what gets persisted/displayed.
+
+    Limitation shared with redact_text: an opaque, non-JWT-shaped secret
+    with no recognizable key name (a bare token as a path segment, e.g.
+    `/reset/ab12cd34`) has no distinguishing signal to match on and cannot
+    be caught by pattern matching alone."""
+    parts = urlsplit(url)
+    query = parts.query
+    if query:
+        pairs = parse_qsl(query, keep_blank_values=True)
+        masked = [
+            (k, MASK if any(s in k.lower() for s in _SENSITIVE_KEYS) else v)
+            for k, v in pairs
+        ]
+        # safe="*": this is a display/evidence string, not a request being
+        # sent — keep MASK ("********") human-readable instead of
+        # percent-encoded ("%2A%2A...").
+        query = urlencode(masked, safe="*")
+    rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    rebuilt = _BEARER_PATTERN.sub(lambda m: f"{m.group(1)} {MASK}", rebuilt)
+    rebuilt = _JWT_PATTERN.sub(MASK, rebuilt)
+    return rebuilt
 
 
 def redact_any(value: Any) -> Any:

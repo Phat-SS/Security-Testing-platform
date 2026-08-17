@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.scope import ScopePolicy, ScopeValidator
@@ -25,6 +25,8 @@ class Engagement:
     vault: PersonaVault
     attacker: str
     victim: str
+    environments: dict[str, str] = field(default_factory=dict)
+    active_environment: str = ""
 
 
 def load_engagement(path: str | None = None) -> Engagement:
@@ -56,10 +58,48 @@ def load_engagement(path: str | None = None) -> Engagement:
         )
         for p in data.get("personas", [])
     ]
+
+    # Named environments: multiple target URLs, one shared scope/persona set (an
+    # environment is just "which host", not a separate authorization context).
+    # A legacy config with only `target_base_url` becomes a single "default"
+    # environment, so old configs keep working with zero migration.
+    legacy_url = data.get("target_base_url", "")
+    environments = dict(data.get("environments") or {})
+    if legacy_url and "default" not in environments:
+        environments = {"default": legacy_url, **environments}
+    active_environment = data.get("active_environment") or next(iter(environments), "")
+
     return Engagement(
-        target_base_url=data.get("target_base_url", ""),
+        target_base_url=environments.get(active_environment, legacy_url),
         scope=ScopeValidator(policy),
         vault=PersonaVault(personas),
         attacker=data.get("attacker", "agent_A"),
         victim=data.get("victim", "agent_B"),
+        environments=environments,
+        active_environment=active_environment,
     )
+
+
+def save_environment(path: str, name: str, url: str, make_active: bool = False) -> None:
+    """Add or update a named environment in the engagement config, preserving
+    every other key (scope, personas, attacker, victim, ...) untouched."""
+    data = json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else {}
+    environments = dict(data.get("environments") or {})
+    environments[name] = url
+    data["environments"] = environments
+    if make_active or not data.get("active_environment"):
+        data["active_environment"] = name
+    Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def delete_environment(path: str, name: str) -> None:
+    """Remove a named environment. A no-op if the file or the name doesn't exist."""
+    if not Path(path).exists():
+        return
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    environments = dict(data.get("environments") or {})
+    environments.pop(name, None)
+    data["environments"] = environments
+    if data.get("active_environment") == name:
+        data["active_environment"] = next(iter(environments), "")
+    Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")

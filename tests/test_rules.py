@@ -36,6 +36,21 @@ def test_auth_triggers_broken_auth():
     assert OwaspApiCategory.API2 in cats(s)
 
 
+def test_debug_keyword_triggers_misconfiguration():
+    s = RequirementSignals(text="Debug mode leaves a stack trace visible on error")
+    assert OwaspApiCategory.API8 in cats(s)
+
+
+def test_deprecated_keyword_triggers_inventory():
+    s = RequirementSignals(text="The deprecated legacy endpoint is still reachable")
+    assert OwaspApiCategory.API9 in cats(s)
+
+
+def test_third_party_keyword_triggers_unsafe_consumption():
+    s = RequirementSignals(text="Integrates with a third-party vendor API for shipping rates")
+    assert OwaspApiCategory.API10 in cats(s)
+
+
 def test_empty_ticket_triggers_nothing():
     assert cats(RequirementSignals(text="Update the button color to blue")) == set()
 

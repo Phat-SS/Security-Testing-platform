@@ -16,7 +16,7 @@ from app.database.models import (
 from app.schemas.analysis import IssueAnalysis
 from app.schemas.execution import Execution
 from app.schemas.finding import Finding
-from app.schemas.testcase import TestCase
+from app.schemas.testcase import DESTRUCTIVE_METHODS, TestCase
 
 
 class Repository:
@@ -57,6 +57,13 @@ class Repository:
         with self._sf() as s:
             return list(s.query(Assessment).order_by(Assessment.created_at.desc()).all())
 
+    def delete_assessment(self, assessment_id: str) -> None:
+        with self._sf() as s:
+            a = s.get(Assessment, assessment_id)
+            if a:
+                s.delete(a)  # cascades to test_cases/executions/findings
+                s.commit()
+
     def previous_assessment_for_issue(self, issue_key: str, exclude_id: str) -> Assessment | None:
         """Most recent *other* assessment of the same issue — the regression baseline."""
         with self._sf() as s:
@@ -85,6 +92,45 @@ class Repository:
         with self._sf() as s:
             rows = s.query(TestCaseRow).filter_by(assessment_id=assessment_id).all()
             return [TestCase.model_validate(r.data_json) for r in rows]
+
+    def get_test_case(self, assessment_id: str, test_id: str) -> TestCase | None:
+        with self._sf() as s:
+            row = (
+                s.query(TestCaseRow)
+                .filter_by(assessment_id=assessment_id, test_id=test_id)
+                .one_or_none()
+            )
+            return TestCase.model_validate(row.data_json) if row else None
+
+    def update_test_request(self, assessment_id: str, test_id: str, request_json: dict) -> bool:
+        """Overwrite a test's request (method/path/headers/query/body/capture)
+        and reset approval to PENDING — an edited request has not been
+        reviewed, so a prior approval no longer means anything."""
+        with self._sf() as s:
+            row = (
+                s.query(TestCaseRow)
+                .filter_by(assessment_id=assessment_id, test_id=test_id)
+                .one_or_none()
+            )
+            if not row:
+                return False
+            data = dict(row.data_json)
+            data["request"] = request_json
+            data["approval_status"] = "PENDING"
+            # Re-derive destructiveness from the (possibly edited) method:
+            # only ever escalate, never downgrade, since a test can also be
+            # flagged destructive for reasons other than its current method.
+            # Without this, editing a GET test's method to DELETE would keep
+            # is_destructive=False and let it run under the default
+            # "non-destructive only" execution path, skipping the
+            # destructive-action confirmation gate entirely.
+            data["is_destructive"] = bool(data.get("is_destructive")) or (
+                str(request_json.get("method", "")).upper() in DESTRUCTIVE_METHODS
+            )
+            row.approval_status = "PENDING"
+            row.data_json = data
+            s.commit()
+            return True
 
     def set_approval(self, assessment_id: str, test_id: str, status: str) -> None:
         with self._sf() as s:
@@ -116,8 +162,14 @@ class Repository:
             s.commit()
 
     def get_executions(self, assessment_id: str) -> list[Execution]:
+        # Ordered by row id (insertion order): callers rely on this to seed
+        # the evidence hash chain from the *last* execution and to verify
+        # the chain end-to-end, both of which require a stable order.
         with self._sf() as s:
-            rows = s.query(ExecutionRow).filter_by(assessment_id=assessment_id).all()
+            rows = (
+                s.query(ExecutionRow).filter_by(assessment_id=assessment_id)
+                .order_by(ExecutionRow.id).all()
+            )
             return [Execution.model_validate(r.data_json) for r in rows]
 
     def save_findings(self, assessment_id: str, findings: list[Finding]) -> None:

@@ -86,8 +86,14 @@ Resolver = "callable(str) -> str"
 
 
 def _default_resolver(host: str) -> str:
-    """Resolve a hostname to a single IP string. Raises socket.gaierror."""
-    return socket.gethostbyname(host)
+    """Resolve a hostname to a single IP string. Raises socket.gaierror.
+
+    Uses getaddrinfo (not gethostbyname) so IPv6-only/AAAA-only hosts are
+    resolved too, not silently treated as unresolvable — gethostbyname is
+    IPv4-only and would let an operator believe an IPv6 host had no address
+    at all rather than correctly evaluating it against the block-list."""
+    infos = socket.getaddrinfo(host, None)
+    return infos[0][4][0]
 
 
 class ScopeValidator:
@@ -130,15 +136,29 @@ class ScopeValidator:
             return ScopeResult(False, host, ip_str, f"Resolver returned invalid IP '{ip_str}'.")
 
         if not self._policy.allow_private_ranges:
-            for net in _ALWAYS_BLOCK_NETS:
-                if ip.version == net.version and ip in net:
-                    return ScopeResult(
-                        False,
-                        host,
-                        ip_str,
-                        f"Host '{host}' resolves to blocked range {net} "
-                        f"({ip_str}). Possible SSRF/metadata target.",
-                    )
+            # An IPv6 answer can be an IPv4-mapped address (::ffff:a.b.c.d) —
+            # the exact same address underneath, just wrapped so a
+            # version-matched-only check (ip.version == net.version) misses
+            # it entirely. Since switching the resolver to getaddrinfo added
+            # IPv6 support, this became reachable: a DNS answer of
+            # ::ffff:169.254.169.254 would otherwise sail past every IPv4
+            # block-list entry. Check the address as resolved AND its
+            # unwrapped IPv4 form, if any.
+            candidates = [ip]
+            mapped = getattr(ip, "ipv4_mapped", None)
+            if mapped is not None:
+                candidates.append(mapped)
+            for candidate in candidates:
+                for net in _ALWAYS_BLOCK_NETS:
+                    if candidate.version == net.version and candidate in net:
+                        return ScopeResult(
+                            False,
+                            host,
+                            ip_str,
+                            f"Host '{host}' resolves to blocked range {net} "
+                            f"({candidate}, from resolved address {ip_str}). "
+                            "Possible SSRF/metadata target.",
+                        )
 
         # Allowed. resolved_ip is returned so the runner can PIN the connection
         # to this exact IP — no second, unvalidated DNS lookup.

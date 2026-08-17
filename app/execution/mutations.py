@@ -28,6 +28,12 @@ class MutationError(Exception):
     pass
 
 
+# Hard ceiling for the oversized_payload mutation, regardless of what a test
+# spec requests. 10 MB is well past what any real API4 resource-limit probe
+# needs and still small enough not to be a meaningful DoS vector on its own.
+_MAX_OVERSIZED_PAYLOAD_BYTES = 10_000_000
+
+
 def apply_mutation(
     base: RequestSpec,
     mutation: Mutation,
@@ -88,9 +94,13 @@ def apply_mutation(
         note = f"injected protected propert(ies): {sorted(extra)}"
 
     elif kind == "oversized_payload":
-        # API4: inflate a field to test resource limits.
+        # API4: inflate a field to test resource limits. Capped so a
+        # misconfigured/hand-edited test spec can't turn this into a
+        # multi-hundred-MB request that DoSes the very target under test —
+        # the point is to *probe* the target's own size limit, not to
+        # exceed what any reasonable API4 test needs to send.
         field = mutation.detail.get("field", "q")
-        size = int(mutation.detail.get("size", 100_000))
+        size = min(int(mutation.detail.get("size", 100_000)), _MAX_OVERSIZED_PAYLOAD_BYTES)
         query[field] = "A" * size
         note = f"sent an oversized '{field}' ({size} bytes)"
 

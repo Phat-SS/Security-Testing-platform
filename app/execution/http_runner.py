@@ -11,13 +11,16 @@ Every outbound request goes through the same gauntlet:
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket as _socket
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 
 from app.core.config import Settings
-from app.core.redaction import redact_headers, redact_text
+from app.core.redaction import redact_headers, redact_text, redact_url
 from app.core.scope import ScopeValidator, ScopeViolation
 from app.execution.evidence import seal
 from app.execution.mutations import MutationError, apply_mutation
@@ -36,6 +39,41 @@ from app.vault.personas import Persona, PersonaVault
 
 class ApprovalRequired(Exception):
     """Execution attempted on a test that a human has not approved."""
+
+
+@contextlib.contextmanager
+def _pin_dns(host: str | None, ip: str | None):
+    """Force DNS resolution of `host` to the exact `ip` ScopeValidator just
+    checked, for the duration of the wrapped connection.
+
+    Without this, scope validation and the actual TCP connect are two
+    independent DNS lookups: an attacker who controls DNS for an approved
+    host (short TTL, split-horizon) can answer with a public IP during
+    validation and a private/metadata IP a moment later (DNS rebinding /
+    TOCTOU). Pinning collapses that window to zero by reusing the exact
+    address already validated, instead of letting httpx/the OS re-resolve.
+
+    This is a process-global monkeypatch of socket.getaddrinfo, safe because
+    HttpRunner sends requests strictly sequentially (see module docstring);
+    two threads pinning the same host to different IPs concurrently could
+    race. A per-connection transport override would remove that caveat
+    entirely and is the natural next hardening step if this runner is ever
+    made concurrent."""
+    if not host or not ip:
+        yield
+        return
+    real_getaddrinfo = _socket.getaddrinfo
+
+    def _pinned(node, *args, **kwargs):
+        if node == host:
+            node = ip
+        return real_getaddrinfo(node, *args, **kwargs)
+
+    _socket.getaddrinfo = _pinned
+    try:
+        yield
+    finally:
+        _socket.getaddrinfo = real_getaddrinfo
 
 
 class HttpRunner:
@@ -59,6 +97,25 @@ class HttpRunner:
         )
 
     # -- public API ---------------------------------------------------------
+
+    def run_safe(self, test: TestCase, execution_id: str, prev_hash: str | None = None) -> Execution:
+        """Like run(), but never lets an unexpected exception (e.g. a persona
+        referenced by the test missing from the vault) escape and abort a
+        whole batch. Expected failure modes are already turned into a
+        BLOCKED/ERROR verdict inside run() itself; this is the backstop for
+        everything else, so one bad test can't discard every execution
+        already computed earlier in the same run. ApprovalRequired is a
+        caller bug (the batch should have been pre-filtered), not a per-test
+        runtime issue, so it still propagates."""
+        try:
+            return self.run(test, execution_id, prev_hash)
+        except ApprovalRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001 - deliberate backstop, see docstring
+            return self._errored(
+                test, execution_id, prev_hash,
+                f"Unexpected error: {type(exc).__name__}: {exc}", [],
+            )
 
     def run(self, test: TestCase, execution_id: str, prev_hash: str | None = None) -> Execution:
         if not test.is_runnable():
@@ -103,7 +160,11 @@ class HttpRunner:
         headers = {k: resolve(str(v), context) for k, v in prepared.headers.items()}
         body = resolve_deep(prepared.body, context)
 
-        url = self._absolute_url(path)
+        try:
+            url = self._absolute_url(path)
+        except ScopeViolation as exc:
+            log.append(f"SCOPE BLOCK: {exc}")
+            return self._blocked(test, execution_id, prev_hash, str(exc), log)
 
         # 4. scope validation — the hard gate. Off-scope → BLOCKED, never sent.
         result = self._scope.validate_url(url)
@@ -113,7 +174,7 @@ class HttpRunner:
         log.append(f"scope ok: {result.host} -> {result.resolved_ip} (pinned)")
 
         # 5. send + capture.
-        captured_req, captured_resp = self._send(
+        captured_req, captured_resp, raw_resp_text = self._send(
             prepared.method, url, headers, query, body, result.resolved_ip
         )
 
@@ -139,10 +200,21 @@ class HttpRunner:
 
         # 6. correlation: did the attacker's response disclose a protected
         #    marker belonging to the victim? This is the anti-false-positive
-        #    signal the verdict relies on.
-        leaked = self._leaked_markers(captured_resp.body, target_markers, test.expected.body_must_not_contain, context)
+        #    signal the verdict relies on. MUST run against the raw,
+        #    pre-redaction text: a leaked marker is often itself a
+        #    session/token/password-shaped string, which redact_text would
+        #    mask to "********" before a substring check ever saw it.
+        leaked = self._leaked_markers(raw_resp_text or "", target_markers, test.expected.body_must_not_contain, context)
         if leaked:
-            log.append(f"DISCLOSURE: response contained protected marker(s): {leaked}")
+            # Never put the raw marker value in the log: `log` is stored,
+            # exported (export.json), and hashed into evidence just like
+            # request/response — but unlike those, it has no redact_*() pass
+            # of its own. A leaked marker is frequently itself a session
+            # token/API key, so only the count goes in the narrative; the
+            # actual value is visible in the response body evidence, which
+            # IS redacted, exactly where a reader should look for it.
+            log.append(f"DISCLOSURE: response body contained {len(leaked)} protected "
+                       "marker(s) belonging to another identity")
 
         verdict = evaluate_verdict(test, captured_resp, leaked)
         log.append(f"verdict: {verdict.result.value} ({verdict.confidence.value})")
@@ -174,16 +246,25 @@ class HttpRunner:
         query = {k: resolve(str(v), context) for k, v in spec.query.items()}
         body = resolve_deep(spec.body, context)
 
-        _, resp = self._send(spec.method, url, headers, query, body, result.resolved_ip)
+        _, resp, raw_text = self._send(spec.method, url, headers, query, body, result.resolved_ip)
         if resp is None:
             raise ScopeViolation(f"{tag}: setup request failed to complete")
 
-        # capture values for later steps
-        parsed = _try_json(resp.body)
+        # capture values for later steps — from the RAW response text, not
+        # the redacted `resp.body`: a captured field (e.g. a victim's token
+        # reused as an Authorization header downstream) would otherwise
+        # silently become the literal string "********".
+        parsed = _try_json(raw_text)
         for name, jpath in spec.capture.items():
             value = extract_json_path(parsed, jpath) if parsed is not None else None
             context[name] = value
-            log.append(f"{tag}: captured {name}={value!r} as {step.as_persona}")
+            # Never log the raw captured value: `log` has no redact_*() pass
+            # of its own (see the DISCLOSURE comment in run()), and a
+            # captured field is commonly a victim's token/session id — the
+            # exact thing that must never end up in evidence/exports in the
+            # clear. Whether it resolved is still useful without the value.
+            log.append(f"{tag}: captured {name} "
+                       f"({'resolved' if value is not None else 'no match'}) as {step.as_persona}")
 
     def _send(
         self,
@@ -193,31 +274,43 @@ class HttpRunner:
         query: dict[str, str],
         body: object | None,
         pinned_ip: str | None,
-    ) -> tuple[CapturedRequest, CapturedResponse | None]:
-        """Send one request. Redacts everything captured. Never follows
-        redirects automatically; a 3xx is returned as-is for the caller to
-        re-validate if it chooses to follow."""
+    ) -> tuple[CapturedRequest, CapturedResponse | None, str | None]:
+        """Send one request. The returned CapturedRequest/CapturedResponse are
+        redacted for storage; the third element is the raw (pre-redaction,
+        still size-capped) response text, for callers that need to see the
+        response as it actually was (leak detection, setup-value capture) —
+        never follows redirects automatically; a 3xx is returned as-is for
+        the caller to re-validate if it chooses to follow."""
 
         req_body_text = _body_to_text(body)
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        # build_request is local/synchronous (no network I/O, can't raise
+        # httpx.HTTPError) and merges `query` into the final URL — building
+        # it before `captured_req` means the STORED url reflects what is
+        # actually sent, including query values a mutation injected
+        # separately (e.g. ssrf_url, oversized_payload write into `query`,
+        # not into `url`/`path`), not just whatever happened to already be
+        # embedded in the `url` string.
+        request = self._client.build_request(
+            method, url, params=query, headers=headers,
+            content=req_body_text.encode("utf-8") if req_body_text is not None else None,
+        )
         captured_req = CapturedRequest(
             method=method,
-            url=url,
+            url=redact_url(str(request.url)),
             resolved_ip=pinned_ip or "",
             headers=redact_headers(headers),
             body=redact_text(req_body_text),
             timestamp=timestamp,
         )
 
+        host = urlparse(url).hostname
         try:
-            request = self._client.build_request(
-                method, url, params=query, headers=headers,
-                content=req_body_text.encode("utf-8") if req_body_text is not None else None,
-            )
-            response = self._client.send(request)
+            with _pin_dns(host, pinned_ip):
+                response = self._client.send(request)
         except httpx.HTTPError:
-            return captured_req, None
+            return captured_req, None, None
 
         raw = response.content[: self._settings.limits.max_response_bytes]
         text = raw.decode(response.encoding or "utf-8", errors="replace")
@@ -229,7 +322,7 @@ class HttpRunner:
             elapsed_ms=int(response.elapsed.total_seconds() * 1000),
             size_bytes=len(response.content),
         )
-        return captured_req, captured_resp
+        return captured_req, captured_resp, text
 
     def _leaked_markers(
         self,
@@ -238,9 +331,11 @@ class HttpRunner:
         must_not_contain: list[str],
         context: dict,
     ) -> list[str]:
-        # NB: body is already redacted for OUR secrets. Victim markers are the
-        # victim's data (e.g. their email), not our credentials, so they still
-        # appear and can be detected here.
+        # NB: `body` is the RAW, pre-redaction response text (see `_send`).
+        # A victim marker is often itself secret-shaped (a session token, an
+        # API key) — checking against the redacted copy would mask it to
+        # "********" before this substring check ever ran, hiding exactly
+        # the disclosure this method exists to catch.
         candidates = list(target_markers)
         for marker in must_not_contain:
             resolved = resolve(marker, context)

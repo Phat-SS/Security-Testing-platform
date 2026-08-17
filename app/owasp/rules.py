@@ -52,6 +52,19 @@ ROLE_KEYWORDS = ("role", "permission", "admin", "manager", "agent", "privilege",
 URL_KEYWORDS = ("url", "callback", "webhook", "redirect", "imageurl", "externalurl", "fetch", "proxy")
 RESOURCE_KEYWORDS = ("search", "export", "upload", "bulk", "pagination", "filter", "batch", "report")
 AUTH_KEYWORDS = ("login", "token", "jwt", "bearer", "session", "oauth", "authenticate", "password")
+MISCONFIG_KEYWORDS = (
+    "debug", "stack trace", "verbose error", "default password", "default credential",
+    "cors", "misconfigur", "directory listing", "swagger ui", "exposed config",
+    "default admin", "sample data", "test endpoint",
+)
+INVENTORY_KEYWORDS = (
+    "deprecated", "legacy", "shadow api", "undocumented", "beta endpoint",
+    "sunset", "decommission", "old version", "staging environment", "internal api",
+)
+THIRD_PARTY_KEYWORDS = (
+    "third-party", "third party", "3rd-party", "external api", "external service",
+    "vendor api", "partner api", "upstream service", "integration partner",
+)
 
 
 def _found(keywords, text: str) -> list[str]:
@@ -151,6 +164,46 @@ def evaluate(signals: RequirementSignals) -> list[RuleHit]:
                 "Potentially sensitive business flow; test for unrestricted "
                 "automation/abuse.",
                 res_hits or ["flow"],
+            )
+        )
+
+    # API8 — misconfiguration signals (debug mode, exposed config, CORS, ...).
+    misconfig_hits = _found(MISCONFIG_KEYWORDS, text)
+    if misconfig_hits:
+        hits.append(
+            RuleHit(
+                OwaspApiCategory.API8,
+                Applicability.APPLICABLE,
+                "Ticket mentions a configuration/debug surface that can leak internals "
+                "if left enabled in a non-production state; verify hardened defaults.",
+                misconfig_hits,
+            )
+        )
+
+    # API9 — inventory signals (deprecated/legacy/shadow/undocumented endpoints).
+    inventory_hits = _found(INVENTORY_KEYWORDS, text)
+    if inventory_hits:
+        hits.append(
+            RuleHit(
+                OwaspApiCategory.API9,
+                Applicability.APPLICABLE,
+                "Ticket references an older/undocumented/shadow API surface; verify "
+                "it is inventoried and enforces the same controls as current endpoints.",
+                inventory_hits,
+            )
+        )
+
+    # API10 — unsafe consumption of a third-party/upstream API's response.
+    third_party_hits = _found(THIRD_PARTY_KEYWORDS, text)
+    if third_party_hits:
+        hits.append(
+            RuleHit(
+                OwaspApiCategory.API10,
+                Applicability.APPLICABLE,
+                "Endpoint integrates with a third-party/upstream API; verify its "
+                "responses (redirects, data, TLS) are validated before being "
+                "trusted, not consumed blindly.",
+                third_party_hits,
             )
         )
 

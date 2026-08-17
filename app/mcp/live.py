@@ -13,6 +13,9 @@ is unit-tested. Configure via env:
     JIRA_MCP_HEADERS Extra headers as a JSON object, for servers that want
                      something other than a bearer token
     JIRA_TOOL_GET / JIRA_TOOL_SEARCH / JIRA_TOOL_COMMENT  (tool-name overrides)
+    JIRA_SITE_URL    Human browse URL, e.g. https://yourcompany.atlassian.net —
+                     JIRA_CLOUD_ID is a UUID the MCP transport uses, not a
+                     hostname, so it can't build a clickable link on its own
 
 The token is read from the environment and never persisted or logged — the
 platform's redaction layer only covers what it stores, so credentials must not
@@ -41,6 +44,7 @@ class LiveJiraMCPClient:
         self._tool_get = os.getenv("JIRA_TOOL_GET", "getJiraIssue")
         self._tool_search = os.getenv("JIRA_TOOL_SEARCH", "searchJiraIssuesUsingJql")
         self._tool_comment = os.getenv("JIRA_TOOL_COMMENT", "addCommentToJiraIssue")
+        self._site_url = os.getenv("JIRA_SITE_URL", "").rstrip("/")
         self._session = None
         self._ctx = None
         self._http_client = None  # only set on SDK 2.x, where we own the client
@@ -140,6 +144,9 @@ class LiveJiraMCPClient:
 
     async def get_attachments(self, issue_key: str) -> list[bytes]:
         return []
+
+    def browse_url(self, issue_key: str) -> str | None:
+        return f"{self._site_url}/browse/{issue_key}" if self._site_url else None
 
     async def close(self) -> None:  # pragma: no cover - live only
         await self._unwind(None)

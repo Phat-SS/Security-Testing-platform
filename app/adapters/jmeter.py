@@ -8,7 +8,10 @@ stripped downstream; scope is enforced at run time.
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+from xml.etree.ElementTree import Element, ParseError
+
+from defusedxml.ElementTree import fromstring
+from defusedxml.common import DefusedXmlException
 
 from app.poc.transpiler import ExtractedRequest, TranspileResult, to_test_cases
 
@@ -18,9 +21,12 @@ __all__ = ["transpile_jmeter", "jmeter_to_test_cases"]
 def transpile_jmeter(xml_text: str) -> TranspileResult:
     result = TranspileResult()
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
+        root = fromstring(xml_text)
+    except ParseError as exc:
         result.unsupported.append(f"invalid JMeter XML: {exc}")
+        return result
+    except DefusedXmlException as exc:
+        result.unsupported.append(f"rejected JMeter XML (unsafe entity construct): {exc}")
         return result
 
     for sampler in root.iter("HTTPSamplerProxy"):
@@ -37,14 +43,14 @@ def jmeter_to_test_cases(xml_text: str, **kwargs):
     return to_test_cases(transpile_jmeter(xml_text), **kwargs)
 
 
-def _prop(el: ET.Element, name: str) -> str:
+def _prop(el: Element, name: str) -> str:
     for p in el.findall("stringProp"):
         if p.get("name") == name:
             return (p.text or "").strip()
     return ""
 
 
-def _extract_sampler(sampler: ET.Element) -> ExtractedRequest | None:
+def _extract_sampler(sampler: Element) -> ExtractedRequest | None:
     domain = _prop(sampler, "HTTPSampler.domain")
     path = _prop(sampler, "HTTPSampler.path") or "/"
     method = (_prop(sampler, "HTTPSampler.method") or "GET").upper()

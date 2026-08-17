@@ -7,6 +7,8 @@ python-multipart>=0.0.9 # form handling for the approval UI
 sqlalchemy>=2.0         # persistence (SQLite by default, Postgres via env)
 openpyxl>=3.1           # XLSX export
 fpdf2>=2.7              # PDF export (pure Python, no native deps)
+psutil>=5.9             # process enumeration for the UI's shutdown-server action
+defusedxml>=0.7          # safe XML parsing for Burp/JMeter imports (entity-expansion DoS)
 
 # --- Dev / test ---
 pytest>=8.0

@@ -19,6 +19,12 @@ from .enums import (
     TestStatus,
 )
 
+# Any state-changing HTTP method makes a test destructive — a broken control
+# means the write actually happened. Shared by the test designer (initial
+# classification) and the repository (re-classification when a test's
+# request is edited), so the two can't silently drift apart.
+DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
 # Placeholders like {victim_id} are resolved at runtime from the persona vault
 # or from values captured in a prior `setup` step. Templating is a fixed,
 # whitelisted syntax — not eval — see execution.templating.

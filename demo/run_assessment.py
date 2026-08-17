@@ -70,7 +70,8 @@ def main() -> None:
         executions.append(ex)
         print(f"[demo] {test.test_id}: {ex.verdict.result.value} - {ex.verdict.reason[:70]}...")
 
-    assert verify_chain(executions), "evidence chain failed to verify!"
+    chain_ok = verify_chain(executions)
+    assert chain_ok, "evidence chain failed to verify!"
     print("[demo] evidence chain verified OK")
 
     findings = build_findings(tests, executions)
@@ -85,6 +86,7 @@ def main() -> None:
         tests=tests,
         executions=executions,
         findings=findings,
+        evidence_chain_ok=chain_ok,
     )
     out = Path(__file__).resolve().parent.parent / "reports" / "assessment_demo.html"
     out.parent.mkdir(exist_ok=True)

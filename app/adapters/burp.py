@@ -9,7 +9,10 @@ method/path/headers/body — treating it strictly as data — and reuse the same
 from __future__ import annotations
 
 import base64
-import xml.etree.ElementTree as ET
+from xml.etree.ElementTree import ParseError
+
+from defusedxml.ElementTree import fromstring
+from defusedxml.common import DefusedXmlException
 
 from app.poc.transpiler import ExtractedRequest, TranspileResult, to_test_cases
 
@@ -19,9 +22,12 @@ __all__ = ["transpile_burp", "burp_to_test_cases", "parse_raw_http"]
 def transpile_burp(xml_text: str) -> TranspileResult:
     result = TranspileResult()
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
+        root = fromstring(xml_text)
+    except ParseError as exc:
         result.unsupported.append(f"invalid Burp XML: {exc}")
+        return result
+    except DefusedXmlException as exc:
+        result.unsupported.append(f"rejected Burp XML (unsafe entity construct): {exc}")
         return result
 
     for item in root.iter("item"):

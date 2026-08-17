@@ -138,9 +138,20 @@ def test_python_runner_refuses_without_egress_proxy():
     assert "EGRESS_PROXY" in r.refused_reason
 
 
+def test_python_runner_refuses_outside_sandbox_even_with_proxy():
+    # Gates 1-4 satisfied, but not actually inside the isolation container —
+    # an egress proxy env var alone must not be treated as a real boundary.
+    r = PythonRunner(enabled=True, egress_proxy="http://127.0.0.1:9999",
+                     sandboxed=False).run(SAFE, reviewed=True)
+    assert not r.ran
+    assert "sandbox" in r.refused_reason.lower()
+
+
 def test_python_runner_runs_safe_code_when_all_gates_pass():
-    # all four gates satisfied → the trivial, statically-clean script runs.
-    r = PythonRunner(enabled=True, egress_proxy="http://127.0.0.1:9999").run(SAFE, reviewed=True)
+    # all five gates satisfied (including running inside the sandbox
+    # container) → the trivial, statically-clean script runs.
+    r = PythonRunner(enabled=True, egress_proxy="http://127.0.0.1:9999",
+                     sandboxed=True).run(SAFE, reviewed=True)
     assert r.ran
     assert r.exit_code == 0
     assert "hello from poc" in r.stdout

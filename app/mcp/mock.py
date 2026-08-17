@@ -127,3 +127,7 @@ class MockJiraMCPClient:
 
     async def get_attachments(self, issue_key: str) -> list[bytes]:
         return []
+
+    def browse_url(self, issue_key: str) -> str | None:
+        # No real Jira site backs these sample tickets — nothing honest to link to.
+        return None

