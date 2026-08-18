@@ -44,6 +44,9 @@ class Assessment(Base):
     findings: Mapped[list["FindingRow"]] = relationship(
         back_populates="assessment", cascade="all, delete-orphan"
     )
+    agent_records: Mapped[list["AgentRecordRow"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan"
+    )
 
 
 class TestCaseRow(Base):
@@ -83,6 +86,33 @@ class FindingRow(Base):
     data_json: Mapped[dict] = mapped_column(JSON)
 
     assessment: Mapped[Assessment] = relationship(back_populates="findings")
+
+
+class AgentRecordRow(Base):
+    """What a reviewing agent said, kept beside the run rather than inside it.
+
+    A new table, deliberately, rather than new columns on `assessments`:
+    `init_db` is `create_all`, which creates a missing *table* on an existing
+    database but never adds a missing *column*. Putting the plan review and the
+    run assessment here means an existing `sectest.db` picks the feature up on
+    the next boot instead of raising OperationalError on every read.
+
+    One row per (assessment, kind, write). History is kept — a plan reviewed
+    before and after an endpoint edit is two opinions about two different plans,
+    and overwriting the first would erase the record of what was said when the
+    tester approved.
+    """
+
+    __tablename__ = "agent_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    # "plan_review" | "run_assessment"
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    data_json: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    assessment: Mapped[Assessment] = relationship(back_populates="agent_records")
 
 
 class AuditLog(Base):

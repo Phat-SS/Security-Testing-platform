@@ -1,5 +1,5 @@
 {
-  "_comment": "Authorized testing context. Copy to engagement.json and edit. This example points at the bundled demo target on 127.0.0.1 and opts into private ranges (LAB ONLY). For a real engagement, set a public staging host, keep allow_private_ranges false, and put real test-account tokens in personas.",
+  "_comment": "Authorized testing context. Copy to engagement.json and edit. This example points at the bundled demo target on 127.0.0.1 and opts into private ranges (LAB ONLY). For a real engagement, set a public staging host, keep allow_private_ranges false, and put real test-account tokens in .env and reference them from personas as ${VAR} (resolved at load time; an unset variable withholds the header and blocks the run rather than sending a credential that cannot authenticate).",
   "target_base_url": "http://127.0.0.1:8000",
   "scope": {
     "allowed_hosts": ["127.0.0.1"],
@@ -11,14 +11,14 @@
   "personas": [
     {
       "name": "agent_A",
-      "auth_headers": { "Authorization": "Bearer tokenA" },
+      "auth_headers": { "Authorization": "Bearer ${PERSONA_A_TOKEN}" },
       "role": "agent",
       "owns": { "customer_id": "1001" },
       "secret_markers": ["alice.buyer@example.com"]
     },
     {
       "name": "agent_B",
-      "auth_headers": { "Authorization": "Bearer tokenB" },
+      "auth_headers": { "Authorization": "Bearer ${PERSONA_B_TOKEN}" },
       "role": "agent",
       "owns": { "customer_id": "2002" },
       "secret_markers": ["beth.victim@example.com", "555-0202"]

@@ -63,7 +63,10 @@ def build_findings(
                 confidence=ex.verdict.confidence,
                 endpoint=endpoint,
                 dedup_key=key,
-                affected_tests=[t.test_id for t, _ in items],
+                # dict.fromkeys, not set(): a test re-run in a later round
+                # appears twice in `items` and must be listed once, in the
+                # order it was first seen rather than a hash order.
+                affected_tests=list(dict.fromkeys(t.test_id for t, _ in items)),
                 correlation=correlation,
                 impact=_impact_for(test.owasp_category, endpoint),
                 reproduction=[

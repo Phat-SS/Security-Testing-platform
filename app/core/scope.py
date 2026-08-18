@@ -101,6 +101,14 @@ class ScopeValidator:
         self._policy = policy
         self._resolve = resolver
 
+    @property
+    def policy(self) -> ScopePolicy:
+        """Read access to the loaded policy, for callers that need to *show* the
+        scope (the config UI, the readiness panel) rather than enforce it. The
+        validator keeps sole responsibility for deciding — this exposes the
+        inputs, not a second copy of the decision logic."""
+        return self._policy
+
     def validate_url(self, url: str) -> ScopeResult:
         parsed = urlparse(url)
         host = parsed.hostname

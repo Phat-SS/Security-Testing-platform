@@ -34,6 +34,12 @@ class ClaudeAnalyzer:
         self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._fallback = HeuristicAnalyzer()
+        # Why the last analyze() did not use the AI, if it didn't. Read by the
+        # orchestrator and written to the audit trail. Falling back silently
+        # meant an operator who deliberately switched USE_AI on could not tell
+        # a working AI path from a broken key — both produced a normal-looking
+        # analysis, just a thinner one.
+        self.last_fallback_reason: str = ""
 
     @staticmethod
     def is_enabled() -> bool:
@@ -42,12 +48,17 @@ class ClaudeAnalyzer:
         )
 
     def analyze(self, issue: NormalizedIssue) -> IssueAnalysis:
+        self.last_fallback_reason = ""
         try:
             import anthropic  # imported lazily so the SDK is an optional dep
         except ImportError:
+            self.last_fallback_reason = (
+                "the `anthropic` package is not installed (pip install anthropic)"
+            )
             return self._fallback.analyze(issue)
 
         if not self._api_key:
+            self.last_fallback_reason = "ANTHROPIC_API_KEY is not set"
             return self._fallback.analyze(issue)
 
         schema = IssueAnalysis.model_json_schema()
@@ -73,8 +84,12 @@ class ClaudeAnalyzer:
             # Never trust the AI's issue_key — pin it.
             analysis.issue_key = issue.issue_key
             return analysis
-        except Exception:
-            # Any API/parse/validation failure → deterministic fallback.
+        except Exception as exc:  # noqa: BLE001 - fall back on anything, but say why
+            # Any API/parse/validation failure → deterministic fallback. The
+            # reason is recorded rather than swallowed: an auth error, a rate
+            # limit and a truncated response all land here and are very
+            # different problems for whoever has to fix one.
+            self.last_fallback_reason = f"{type(exc).__name__}: {exc}"
             return self._fallback.analyze(issue)
 
 

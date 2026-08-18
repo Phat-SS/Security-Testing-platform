@@ -1,4 +1,5 @@
 from .models import (
+    AgentRecordRow,
     Assessment,
     AuditLog,
     ExecutionRow,
@@ -11,6 +12,7 @@ from .models import (
 from .repository import Repository
 
 __all__ = [
+    "AgentRecordRow",
     "Assessment",
     "AuditLog",
     "ExecutionRow",

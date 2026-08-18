@@ -73,12 +73,23 @@ class StagedAnalyzer:
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
         self._fallback = HeuristicAnalyzer()
+        # See ClaudeAnalyzer.last_fallback_reason — same contract, read by the
+        # orchestrator and written to the audit trail.
+        self.last_fallback_reason: str = ""
 
     def analyze(self, issue: NormalizedIssue) -> IssueAnalysis:
+        self.last_fallback_reason = ""
         try:
             extraction = self._extract(issue)
-        except (ValidationError, ValueError, json.JSONDecodeError):
+        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             # AI output invalid → do NOT proceed with garbage; fall back.
+            self.last_fallback_reason = f"extraction stage failed — {type(exc).__name__}: {exc}"
+            return self._fallback.analyze(issue)
+        except Exception as exc:  # noqa: BLE001 - transport/auth failures too
+            # Previously these escaped and broke the whole import. A staged
+            # analyzer whose first stage cannot reach the API should degrade to
+            # the deterministic path like every other AI failure mode.
+            self.last_fallback_reason = f"LLM call failed — {type(exc).__name__}: {exc}"
             return self._fallback.analyze(issue)
 
         # Deterministic OWASP mapping from the extracted surface. The model does

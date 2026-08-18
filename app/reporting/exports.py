@@ -24,7 +24,14 @@ def export_json(
     executions: list[Execution],
     findings: list[Finding],
     coverage: list[dict] | None = None,
+    plan_review=None,
+    run_assessment=None,
 ) -> str:
+    """The machine-readable whole. The two agent artefacts are included under
+    their own keys rather than merged into `executions`: an adjudication is an
+    opinion about an execution, and folding it into the execution record would
+    put an unhashed, model-derived field inside the object whose hash is supposed
+    to make it tamper-evident."""
     payload = {
         "issue_key": issue_key,
         "target": target,
@@ -34,6 +41,10 @@ def export_json(
         "executions": [e.model_dump(mode="json") for e in executions],
         "findings": [f.model_dump(mode="json") for f in findings],
     }
+    if plan_review is not None:
+        payload["plan_review"] = plan_review.model_dump(mode="json")
+    if run_assessment is not None:
+        payload["run_assessment"] = run_assessment.model_dump(mode="json")
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 

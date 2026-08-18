@@ -27,6 +27,11 @@ class Persona:
     owns: dict[str, str] = field(default_factory=dict)  # {"customer_id": "2002"}
     # Known sensitive values that must NOT appear in another persona's response.
     secret_markers: list[str] = field(default_factory=list)  # e.g. B's email
+    # Names of ${VAR} references in the config's auth_headers that the
+    # environment did not supply. The header is withheld rather than sent as a
+    # literal "${VAR}", so this is what tells the readiness panel to block the
+    # run and name the variable to set. Names only, never values.
+    missing_env: tuple[str, ...] = ()
 
 
 class PersonaVault:

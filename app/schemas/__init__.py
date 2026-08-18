@@ -1,5 +1,13 @@
 """Pydantic schemas — the stable contract every other module speaks."""
 
+from .agent import (
+    Adjudication,
+    PlanReview,
+    PlanReviewGap,
+    RequirementCoverage,
+    RequirementItem,
+    RunAssessment,
+)
 from .enums import (
     Applicability,
     ApprovalStatus,
@@ -28,6 +36,12 @@ from .testcase import (
 )
 
 __all__ = [
+    "Adjudication",
+    "PlanReview",
+    "PlanReviewGap",
+    "RequirementCoverage",
+    "RequirementItem",
+    "RunAssessment",
     "Applicability",
     "ApprovalStatus",
     "Confidence",

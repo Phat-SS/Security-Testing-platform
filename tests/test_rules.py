@@ -23,12 +23,27 @@ def test_url_field_triggers_ssrf():
     assert OwaspApiCategory.API7 in cats(s)
 
 
-def test_bulk_triggers_resource_and_business_flow():
+def test_bulk_triggers_resource_consumption_only():
+    """Expensive-to-serve is API4. It is deliberately NOT also API6.
+
+    The two used to share one vocabulary, so every paginated list endpoint
+    claimed a sensitive-business-flow gap. Nothing in the test designer could
+    ever fill that gap — a list endpoint has no flow to automate — so the
+    coverage matrix carried a permanent phantom MISSING that no amount of
+    testing would close.
+    """
     s = RequirementSignals(text="Bulk export with pagination and search filter",
                            bulk_or_expensive=True)
     c = cats(s)
     assert OwaspApiCategory.API4 in c
+    assert OwaspApiCategory.API6 not in c
+
+
+def test_business_flow_keyword_triggers_api6():
+    s = RequirementSignals(text="Customer redeems a coupon during checkout")
+    c = cats(s)
     assert OwaspApiCategory.API6 in c
+    assert OwaspApiCategory.API4 not in c
 
 
 def test_auth_triggers_broken_auth():

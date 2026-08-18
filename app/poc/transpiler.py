@@ -23,14 +23,8 @@ import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from app.schemas.enums import ApprovalStatus, OwaspApiCategory, Severity, TestSource
-from app.schemas.testcase import (
-    AuthContext,
-    ExpectedResult,
-    Mutation,
-    RequestSpec,
-    TestCase,
-)
+from app.schemas.enums import ApprovalStatus, OwaspApiCategory, TestSource
+from app.schemas.testcase import AuthContext, RequestSpec, TestCase
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _DANGEROUS_CALLS = {"system", "popen", "eval", "exec", "compile", "spawn", "call", "run", "check_output"}
@@ -394,7 +388,7 @@ def transpile_curl(command: str) -> TranspileResult:
 
 def to_test_cases(
     result: TranspileResult,
-    owasp_category: OwaspApiCategory = OwaspApiCategory.API1,
+    owasp_category: OwaspApiCategory | None = None,
     attacker: str = "agent_A",
     victim: str = "agent_B",
 ) -> list[TestCase]:
@@ -403,24 +397,62 @@ def to_test_cases(
     The host is stripped: the runner supplies the approved base URL, so a PoC
     that pointed at some hard-coded host cannot re-introduce an off-scope
     target. Only the path/method/body survive.
+
+    Each request is classified by its own shape (see `app.poc.classify`) rather
+    than being labelled API1/BOLA wholesale. Pass `owasp_category` to override
+    when the caller genuinely knows better; leaving it None is the right choice
+    for bulk imports, where a Burp export of forty assorted requests is exactly
+    the case the old fixed label got wrong.
     """
+    from app.poc.classify import classify
+
     tests: list[TestCase] = []
-    for i, req in enumerate(result.requests, start=1):
-        cat_num = owasp_category.value.split(":")[0]
+    counters: dict[str, int] = {}
+    for req in result.requests:
+        path = _relative(req.path)
+        headers = {k: v for k, v in req.headers.items() if k.lower() != "host"}
+        verdict = classify(req.method, path, headers, req.body)
+
+        category = owasp_category or verdict.category
+        cat_num = category.value.split(":")[0]
+        counters[cat_num] = counters.get(cat_num, 0) + 1
+        # A parameterised path is what makes an id substitutable at all: a
+        # recorded request contains a literal id, and there is nothing to
+        # replace in a literal.
+        effective_path = verdict.parameterised_path or path
+
+        objective = (
+            f"Replay of an existing PoC as a controlled, scoped test. Classified as "
+            f"{cat_num} ({verdict.confidence} confidence) because {verdict.reason}."
+        )
+        if verdict.confidence == "LOW":
+            objective += (
+                " Review this classification before approving — the platform could not "
+                "infer the PoC's intent from the request alone."
+            )
+
         tests.append(
             TestCase(
-                test_id=f"POC-{cat_num}-{i:03d}",
-                title=f"Transpiled PoC: {req.method} {req.path}",
-                objective="Replay of an existing PoC as a controlled, scoped test.",
-                owasp_category=owasp_category,
-                severity=Severity.MEDIUM,
-                auth_context=AuthContext(persona=attacker, target_persona=victim),
-                request=RequestSpec(method=req.method, path=_relative(req.path),
-                                    headers={k: v for k, v in req.headers.items()
-                                             if k.lower() != "host"},
-                                    body=req.body),
-                attack_mutation=Mutation(kind="swap_object_id", detail={}),
-                expected=ExpectedResult(status_in=[403, 404]),
+                test_id=f"POC-{cat_num}-{counters[cat_num]:03d}",
+                title=f"Transpiled PoC: {req.method} {effective_path}",
+                objective=objective,
+                owasp_category=category,
+                severity=verdict.severity,
+                auth_context=AuthContext(
+                    persona=attacker,
+                    # Only claim a victim identity when the probe actually
+                    # attacks one; a spurious target_persona makes an unrelated
+                    # test look like a cross-identity check in the report.
+                    target_persona=victim if verdict.needs_target_persona else None,
+                ),
+                request=RequestSpec(method=req.method, path=effective_path,
+                                    headers=headers, body=req.body),
+                attack_mutation=verdict.mutation,
+                verification=verdict.verification,
+                expected=verdict.expected,
+                # A recorded request is not a positive control: we do not know
+                # which identity recorded it, so we cannot assert who is
+                # entitled to it. The tester adds a baseline when approving.
                 source=TestSource.POC,
                 approval_status=ApprovalStatus.PENDING,
             )

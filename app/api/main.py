@@ -12,6 +12,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -22,14 +23,29 @@ from contextlib import asynccontextmanager
 import psutil
 from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from pydantic import ValidationError
 
 from app.analysis import TestDesigner, build_analyzer
+from app.analysis.attack_planner import build_planner
 from app.analysis.claude_analyzer import ClaudeAnalyzer
 from app.api import views
 from app.core.auth import AuthManager, User
-from app.core.config import Settings
-from app.core.engagement import delete_environment, load_engagement, save_environment
+from app.core.config import settings_with_overrides
+from app.core import preflight
+from app.core.engagement import (
+    allow_host,
+    delete_environment,
+    delete_persona,
+    load_engagement,
+    save_environment,
+    save_identities,
+    save_persona,
+    save_runner_limits,
+    save_scope,
+    set_active_environment,
+)
 from app.database import Repository, init_db, make_engine, make_session_factory
+from app.execution.adaptive import AdaptiveBudget
 from app.mcp import (
     MockJiraMCPClient,
     available_issue_keys,
@@ -38,7 +54,7 @@ from app.mcp import (
 )
 from app.mcp.jira import parse_issue_ref
 from app.orchestrator import Orchestrator
-from app.schemas.analysis import IssueAnalysis
+from app.schemas.analysis import Endpoint, IssueAnalysis
 from app.schemas.testcase import RequestSpec
 
 class State:
@@ -54,12 +70,18 @@ class State:
         # auto-loaded on boot, per the default-deny design above).
         self.engagement_path = os.getenv("ENGAGEMENT_CONFIG", "") or "config/engagement.json"
         self.auth = AuthManager()
-        views.configure(auth_enabled=self.auth.enabled)
+        planner = build_planner(self.engagement.vault.names())
+        views.configure(auth_enabled=self.auth.enabled, planner_enabled=planner is not None)
         self.orch = Orchestrator(
             self.repo,
             self.jira,
             analyzer=build_analyzer(),
             designer=TestDesigner(self.engagement.attacker, self.engagement.victim),
+            # The planner validates proposed persona names against the vault, so
+            # it can only be built once the engagement is loaded. Returns None
+            # unless USE_AI + a key are configured, in which case the platform
+            # behaves exactly as it did before.
+            planner=planner,
         )
 
     def _rebind_jira(self, client) -> None:
@@ -71,6 +93,10 @@ class State:
         # just saved through the UI, which is itself the deliberate-configuration
         # step the default-deny design requires.
         self.engagement = load_engagement(self.engagement_path)
+        # The planner rejects persona names it does not know, so a stale one
+        # would reject every proposal referencing a persona added in this very
+        # save — silently, as "not defined in the engagement vault".
+        self.orch.set_planner(build_planner(self.engagement.vault.names()))
 
 
 state: State | None = None
@@ -272,11 +298,11 @@ def _execute_error(base_url: str, exc: Exception) -> tuple[str, str]:
     HttpRunner.run() as a BLOCKED verdict, not an exception — this is mostly a
     backstop for genuinely unexpected errors (e.g. a malformed request the
     transpiler let through). The one *expected* exception is a KeyError from
-    PersonaVault.get(): the Environments page only ever writes `environments`/
-    `active_environment` (see environments_page's own on-page hint), so an
-    engagement.json built purely through that page has no `personas` —
-    HttpRunner.run() resolves the attacker persona before scope is even
-    checked, so this fires before a BLOCKED verdict ever gets a chance to.
+    PersonaVault.get(), which fires when the attacker/victim names point at
+    personas the vault does not hold: HttpRunner.run() resolves the persona
+    before scope is even checked, so it lands here rather than as a BLOCKED
+    verdict. The readiness panel flags exactly this ahead of a run, so this
+    path is now the case where someone ran before looking at it.
     """
     if isinstance(exc, KeyError):
         # str(KeyError("x")) renders as "'x'" (single quotes from repr, not
@@ -284,13 +310,13 @@ def _execute_error(base_url: str, exc: Exception) -> tuple[str, str]:
         detail = str(exc).strip("'\"")
         return (
             f"Running tests against {base_url} failed: {detail}",
-            "The Environments page only manages target URLs. Personas "
-            "(<code>attacker</code>/<code>victim</code> credentials referenced by "
-            "the generated tests) must be added directly to "
-            "<code>config/engagement.json</code> — copy the <code>personas</code> "
-            "section from <code>config/engagement.example.json</code> and fill in "
-            "real test-account tokens, then restart the server (or re-save any "
-            "environment) so it reloads.",
+            "Generated tests reference identities by name, and this one is not "
+            "in the persona vault. Add it under "
+            "<a href='/config?tab=personas'>Configuration &rarr; Personas</a> "
+            "(name, auth headers, and the object ids it owns), or point the "
+            "attacker/victim roles at personas that already exist. "
+            "<a href='/config'>Readiness</a> lists every setting a run needs "
+            "before you start one.",
         )
     return (
         f"Running tests against {base_url} failed: {type(exc).__name__}: {exc}",
@@ -298,23 +324,112 @@ def _execute_error(base_url: str, exc: Exception) -> tuple[str, str]:
     )
 
 
+_DASH_SORTS = {"recent", "oldest", "issue", "findings"}
+
+
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(flash: str = "") -> str:
+async def dashboard(flash: str = "", q: str = "", status: str = "",
+                    sort: str = "recent", page: int = 1, per: int = 24) -> str:
+    everything = state.repo.list_assessments()
+    # Counts per card, from one query each rather than loading every test case of
+    # every assessment: a card that says only "Executed" tells you the one thing
+    # you already knew and nothing about what the run found.
+    rows = [state.repo.assessment_summary(a.id) for a in everything]
+    by_id = {r["id"]: r for r in rows}
+
+    needle = q.strip().lower()
+    shown = [
+        a for a in everything
+        if (not needle or needle in a.issue_key.lower() or needle in a.id.lower())
+        and (not status or a.status == status)
+    ]
+    if sort not in _DASH_SORTS:
+        sort = "recent"
+    if sort == "oldest":
+        shown = list(reversed(shown))
+    elif sort == "issue":
+        shown = sorted(shown, key=lambda a: a.issue_key)
+    elif sort == "findings":
+        shown = sorted(shown, key=lambda a: -by_id[a.id]["n_findings"])
+
+    per = max(1, min(per, 96))
+    page = max(1, page)
+    window = shown[(page - 1) * per: page * per]
+
     return views.dashboard(
-        state.repo.list_assessments(),
+        window,
         state.engagement.target_base_url,
         ai_on=ClaudeAnalyzer.is_enabled(),
         jira_mode=describe_jira_client(state.jira),
         available_keys=available_issue_keys(state.jira),
         warning=state.jira_warning,
         flash=flash,
+        rows=[by_id[a.id] for a in window],
+        q=q,
+        status=status,
+        sort=sort,
+        page_no=page,
+        per=per,
     )
+
+
+# -- configuration ----------------------------------------------------------
+#
+# Everything a run depends on is editable here, because the alternative was a
+# results table full of BLOCKED rows and a README paragraph naming a JSON file.
+# Each writer touches only the keys it owns and then reloads state, so the next
+# run picks the change up without a restart.
+
+
+def _render_config(tab: str = "readiness", flash: str = "", error: str = "") -> str:
+    eng = state.engagement
+    readiness = preflight.evaluate(eng, state.engagement_path)
+    return views.config_page(
+        readiness=readiness,
+        engagement=eng,
+        engagement_path=state.engagement_path,
+        limits=settings_with_overrides(eng.runner).limits,
+        runtime=preflight.runtime_facts(),
+        tab=tab,
+        flash=flash,
+        error=error,
+    )
+
+
+def _config_redirect(tab: str, flash: str) -> RedirectResponse:
+    return RedirectResponse(f"/config?tab={tab}&flash={quote(flash, safe='')}", status_code=303)
+
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_page(tab: str = "readiness", flash: str = "", error: str = "") -> str:
+    return _render_config(tab=tab, flash=flash, error=error)
 
 
 @app.get("/config/environments", response_class=HTMLResponse)
 async def environments_page(flash: str = "") -> str:
-    eng = state.engagement
-    return views.environments_page(eng.environments, eng.active_environment, flash=flash)
+    # Kept as its own URL (it predates the unified page and is linked from
+    # older reports/bookmarks); it just opens the config page on that pane.
+    return _render_config(tab="environments", flash=flash)
+
+
+@app.get("/api/readiness")
+async def api_readiness():
+    """The pre-run checklist as JSON, so a CI job can refuse to start a run for
+    the same reasons the UI would have shown a human."""
+    r = preflight.evaluate(state.engagement, state.engagement_path)
+    return {
+        "can_run": r.can_run,
+        "state": r.state,
+        "checks": [
+            {"key": c.key, "label": c.label, "state": c.state, "detail": c.detail}
+            for c in r.checks
+        ],
+        "environments": [
+            {"name": e.name, "url": e.url, "host": e.host, "active": e.is_active,
+             "allowed": e.state == preflight.OK, "reason": e.reason}
+            for e in r.environments
+        ],
+    }
 
 
 @app.post("/config/environments")
@@ -322,6 +437,7 @@ async def save_environment_route(
     name: str = Form(...),
     url: str = Form(...),
     make_active: bool = Form(False),
+    authorize_host: bool = Form(False),
     user: User = Depends(require("tester")),
 ):
     name = name.strip()
@@ -333,7 +449,7 @@ async def save_environment_route(
                 f"{name!r} is not a valid environment name.",
                 "Use letters, digits, <code>-</code> or <code>_</code> only "
                 "(e.g. <code>dev</code>, <code>staging</code>).",
-                back_href="/config/environments", back_label="← Back to environments",
+                back_href="/config?tab=environments", back_label="← Back to environments",
             ),
             status_code=400,
         )
@@ -343,30 +459,177 @@ async def save_environment_route(
                 "Invalid URL",
                 f"{url!r} is not a valid base URL.",
                 "It must start with <code>http://</code> or <code>https://</code>.",
-                back_href="/config/environments", back_label="← Back to environments",
+                back_href="/config?tab=environments", back_label="← Back to environments",
             ),
             status_code=400,
         )
     save_environment(state.engagement_path, name, url, make_active=make_active)
+    flash = f"Saved {name}"
+    # Adding the URL without authorizing its host is the exact combination that
+    # produces an all-BLOCKED run, so the form offers both in one step — opt-in,
+    # never implied, since this is the authorization boundary.
+    host = preflight.host_of(url)
+    if authorize_host and host:
+        allow_host(state.engagement_path, host)
+        flash += f" and authorized {host}"
     state.reload_engagement()
-    return RedirectResponse(f"/config/environments?flash=Saved+{name}", status_code=303)
+    return RedirectResponse(f"/config/environments?flash={quote(flash, safe='')}", status_code=303)
 
 
 @app.post("/config/environments/{name}/delete")
 async def delete_environment_route(name: str, user: User = Depends(require("tester"))):
     delete_environment(state.engagement_path, name)
     state.reload_engagement()
-    return RedirectResponse(f"/config/environments?flash=Removed+{name}", status_code=303)
+    return RedirectResponse(f"/config/environments?flash=Removed+{quote(name, safe='')}",
+                            status_code=303)
+
+
+@app.post("/config/environments/{name}/activate")
+async def activate_environment_route(name: str, user: User = Depends(require("tester"))):
+    set_active_environment(state.engagement_path, name)
+    state.reload_engagement()
+    return RedirectResponse(f"/config/environments?flash={quote(name + ' is now the default', safe='')}",
+                            status_code=303)
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+@app.post("/config/scope")
+async def save_scope_route(
+    allowed_hosts: str = Form(""),
+    blocked_hosts: str = Form(""),
+    allow_private_ranges: bool = Form(False),
+    user: User = Depends(require("tester")),
+):
+    save_scope(state.engagement_path, _lines(allowed_hosts), _lines(blocked_hosts),
+               allow_private_ranges)
+    state.reload_engagement()
+    return _config_redirect("scope", "Scope saved")
+
+
+@app.post("/config/scope/allow-host")
+async def allow_host_route(host: str = Form(...), user: User = Depends(require("tester"))):
+    allow_host(state.engagement_path, host)
+    state.reload_engagement()
+    return _config_redirect("readiness", f"{host} added to the approved scope")
+
+
+@app.post("/config/personas")
+async def save_persona_route(
+    name: str = Form(...),
+    role: str = Form("user"),
+    auth_headers: str = Form(""),
+    owns: str = Form(""),
+    secret_markers: str = Form(""),
+    user: User = Depends(require("tester")),
+):
+    name = name.strip()
+    # Same character rule as environment names, for the same reason: the name
+    # becomes a path segment in its own delete/edit URL, and it is also the
+    # identifier generated test cases carry instead of a credential.
+    if not name or not all(c.isalnum() or c in "-_." for c in name):
+        return _config_redirect(
+            "personas",
+            f"{name or '(blank)'} is not a valid persona name — letters, digits, - _ . only",
+        )
+    save_persona(
+        state.engagement_path,
+        name=name,
+        auth_headers=_parse_kv_lines(auth_headers, ":"),
+        role=role.strip() or "user",
+        owns=_parse_kv_lines(owns, "="),
+        secret_markers=_lines(secret_markers),
+    )
+    state.reload_engagement()
+    return _config_redirect("personas", f"Saved persona {name}")
+
+
+@app.post("/config/personas/{name}/delete")
+async def delete_persona_route(name: str, user: User = Depends(require("tester"))):
+    delete_persona(state.engagement_path, name)
+    state.reload_engagement()
+    return _config_redirect("personas", f"Removed persona {name}")
+
+
+@app.post("/config/identities")
+async def save_identities_route(
+    attacker: str = Form(...), victim: str = Form(...),
+    user: User = Depends(require("tester")),
+):
+    save_identities(state.engagement_path, attacker.strip(), victim.strip())
+    state.reload_engagement()
+    return _config_redirect("personas", f"Attacker {attacker}, victim {victim}")
+
+
+@app.post("/config/runner")
+async def save_runner_route(
+    timeout_s: str = Form(""),
+    max_response_bytes: str = Form(""),
+    max_redirects: str = Form(""),
+    max_requests_per_test: str = Form(""),
+    reset: str = Form(""),
+    user: User = Depends(require("tester")),
+):
+    if reset:
+        save_runner_limits(state.engagement_path, {})
+        state.reload_engagement()
+        return _config_redirect("runner", "Runner limits reset to the .env defaults")
+    submitted = {
+        "timeout_s": timeout_s,
+        "max_response_bytes": max_response_bytes,
+        "max_redirects": max_redirects,
+        "max_requests_per_test": max_requests_per_test,
+    }
+    limits: dict[str, float] = {}
+    for key, raw in submitted.items():
+        raw = raw.strip()
+        if not raw:
+            continue  # blank means "fall back to the env var", not zero
+        try:
+            value = float(raw) if key == "timeout_s" else int(float(raw))
+        except ValueError:
+            return _config_redirect("runner", f"{key} must be a number — nothing saved")
+        if value < 0:
+            return _config_redirect("runner", f"{key} cannot be negative — nothing saved")
+        limits[key] = value
+    save_runner_limits(state.engagement_path, limits)
+    state.reload_engagement()
+    return _config_redirect("runner", "Runner limits saved")
 
 
 @app.post("/import")
-async def import_issue(issue_key: str = Form(...), user: User = Depends(require("tester"))):
+async def import_issue(issue_key: str = Form(...), plan: str = Form("false"),
+                       depth: str = Form("standard"),
+                       user: User = Depends(require("tester"))):
+    """Import a ticket and, when asked, come back with a plan to approve.
+
+    The default is "false" and the browser form ships the box checked, which is
+    not a contradiction: an unchecked HTML checkbox sends *nothing*, so a default
+    of "true" would make unchecking the box do exactly what checking it does. It
+    also keeps every existing scripted `POST /import` behaving as it always has —
+    analyze only.
+
+    `plan=true` runs the planning agent: analyze the ticket
+    and its embedded PoC, design, let the AI planner add depth, have the
+    reviewing agent audit the result against the ticket's requirements, feed its
+    gaps back for a revision round, and land the tester on step 4 with something
+    to read. Unchecking it keeps the old behaviour — analyze only — which is what
+    you want when the endpoint list needs correcting before any plan is worth
+    generating.
+
+    Nothing about the approval gate moves: every test this produces is PENDING.
+    """
     try:
         # Always validate: a Jira key is PROJECT-123, and parse_issue_ref also
         # accepts a pasted browse URL. Passing unparseable text straight through
         # used to surface as a confusing "issue does not exist".
         _, key = parse_issue_ref(issue_key)
-        aid = await state.orch.import_and_analyze(key)
+        if plan == "true":
+            aid, _review = await state.orch.import_and_plan(key, depth=depth or "standard")
+        else:
+            aid = await state.orch.import_and_analyze(key)
     except Exception as exc:
         headline, hint = _import_error(issue_key, exc)
         return HTMLResponse(views.error_page("Import failed", headline, hint), status_code=400)
@@ -374,20 +637,53 @@ async def import_issue(issue_key: str = Form(...), user: User = Depends(require(
 
 
 @app.get("/assessment/{aid}", response_class=HTMLResponse)
-async def view_assessment(aid: str, flash: str = "", ticket_url: str = "") -> str:
+async def view_assessment(
+    aid: str,
+    flash: str = "",
+    ticket_url: str = "",
+    # The test-plan filter lives in the query string so it survives a redirect,
+    # can be linked to (the coverage table links straight into a category) and is
+    # the same thing a bulk action resolves "all matching" against.
+    q: str = "",
+    cat: str = "",
+    sev: str = "",
+    appr: str = "",
+    dest: str = "",
+    src: str = "",
+    sort: str = "id",
+    page: int = 1,
+    per: int = 25,
+) -> str:
     a = state.repo.get_assessment(aid)
     if not a:
         return views.page("Not found", "<p>Assessment not found.</p>")
-    tests = state.repo.get_test_cases(aid)
+    filters = {"q": q, "cat": cat, "sev": sev, "appr": appr, "dest": dest, "src": src,
+               "sort": sort or "id", "per": per}
+    plan = state.repo.query_test_cases(aid, page=max(1, page), **filters)
+    findings = state.repo.get_findings(aid)
+    # Loaded once and used twice: the execution count and the triage summary both
+    # need every row, and this page is the one a tester leaves open.
+    executions = state.repo.get_executions(aid)
+    # Triage is deterministic, needs no key and costs nothing, so the page can
+    # say "4 of these need you, 2 need re-running" before anyone asks for a
+    # review. The review itself is a POST, because it costs API calls.
+    triage_counts = state.orch.triage_counts(aid, executions=executions)
     return views.assessment_page(
         a,
         a.analysis_json or {},
         a.coverage_json or [],
-        tests,
-        n_executions=len(state.repo.get_executions(aid)),
-        n_findings=len(state.repo.get_findings(aid)),
+        plan=plan,
+        filters=filters,
+        n_executions=len(executions),
+        n_findings=len(findings),
+        findings=findings,
+        verdicts=state.repo.execution_verdicts(aid),
+        plan_review=state.orch.plan_review(aid),
+        run_assessment=state.orch.run_assessment(aid),
+        triage=triage_counts,
         environments=state.engagement.environments,
         active_environment=state.engagement.active_environment,
+        readiness=preflight.evaluate(state.engagement, state.engagement_path),
         flash=flash,
         ticket_url=ticket_url,
     )
@@ -399,25 +695,253 @@ async def delete_assessment(aid: str, user: User = Depends(require("tester"))):
     return RedirectResponse("/?flash=Deleted+assessment", status_code=303)
 
 
+
+# -- editing the attack surface ---------------------------------------------
+#
+# The endpoint list drives the whole plan, and the extractor that produces it is
+# a regex over ticket prose. Before these routes, a missed endpoint or a wrong
+# auth flag could only be fixed by editing the Jira ticket and importing again,
+# which discarded the plan and every approval along with it.
+#
+# The endpoint being edited is identified by a form field, not a path segment:
+# its identity is "METHOD /path", and a path like `POST /orders/delete` put in
+# the URL would be swallowed by the delete route.
+
+
+def _csv(text: str) -> list[str]:
+    """Comma- or space-separated parameter names, de-duplicated, order kept."""
+    parts = [p.strip() for p in (text or "").replace(",", " ").split()]
+    return list(dict.fromkeys(p for p in parts if p))
+
+
+def _endpoints_redirect(aid: str, flash: str) -> RedirectResponse:
+    return RedirectResponse(
+        f"/assessment/{aid}?flash={quote(flash)}#s-endpoints", status_code=303
+    )
+
+
+def _first_error(exc: Exception) -> str:
+    """A pydantic ValidationError reads as a stack of dicts; a form needs one
+    sentence naming the field that was wrong."""
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        detail = errors()
+        if detail:
+            loc = ".".join(str(p) for p in detail[0].get("loc", ())) or "value"
+            return f"{loc}: {detail[0].get('msg', 'invalid')}"
+    return str(exc)
+
+
+@app.post("/assessment/{aid}/endpoints")
+async def save_endpoint(aid: str, method: str = Form("GET"), path: str = Form(""),
+                        replaces: str = Form(""),
+                        auth_required: bool = Form(False),
+                        object_id_params: str = Form(""),
+                        writes_properties: bool = Form(False),
+                        url_fields: str = Form(""),
+                        user: User = Depends(require("tester"))):
+    """Add an endpoint, or replace the one named by `replaces`."""
+    verb = "saved" if replaces else "added"
+    try:
+        endpoint = Endpoint(
+            method=(method or "GET").strip().upper(),
+            path=(path or "").strip(),
+            auth_required=auth_required,
+            object_id_params=_csv(object_id_params),
+            writes_properties=writes_properties,
+            url_fields=_csv(url_fields),
+            manual=True,
+        )
+        if not endpoint.path.startswith("/"):
+            raise ValueError("path must start with '/' — it is joined onto the "
+                             "approved base URL, so it cannot carry its own host")
+        state.orch.upsert_endpoint(aid, endpoint, replaces=replaces, actor=user.name)
+    except Orchestrator.EndpointConflict as exc:
+        return _endpoints_redirect(aid, f"Not {verb}: {exc}")
+    except (ValidationError, ValueError) as exc:
+        return _endpoints_redirect(aid, f"Not {verb}: {_first_error(exc)}")
+    return _endpoints_redirect(aid, f"{verb.capitalize()} {endpoint.signature}")
+
+
+@app.post("/assessment/{aid}/endpoints/delete")
+async def remove_endpoint(aid: str, signature: str = Form(...),
+                          user: User = Depends(require("tester"))):
+    removed = state.orch.delete_endpoint(aid, signature, actor=user.name)
+    return _endpoints_redirect(
+        aid, f"Removed {signature}" if removed else "Endpoint not found"
+    )
+
+
+@app.post("/assessment/{aid}/reanalyze")
+async def reanalyze(aid: str, user: User = Depends(require("tester"))):
+    a = state.repo.get_assessment(aid)
+    if not a:
+        return RedirectResponse("/?flash=Assessment+not+found", status_code=303)
+    try:
+        await state.orch.reanalyze(aid, actor=user.name)
+    except Exception as exc:
+        headline, hint = _import_error(a.issue_key, exc)
+        return HTMLResponse(
+            views.error_page("Re-analysis failed", headline, hint,
+                             back_href=f"/assessment/{aid}", back_label="← Back to assessment"),
+            status_code=400,
+        )
+    return _endpoints_redirect(aid, "Re-analyzed from the ticket")
+
+
 @app.post("/assessment/{aid}/design")
 async def design(aid: str, poc_python: str = Form(""), poc_postman: str = Form(""),
                  burp_xml: str = Form(""), jmeter_xml: str = Form(""),
+                 depth: str = Form("standard"),
                  user: User = Depends(require("tester"))):
+    # Anything other than the two known depths falls back to "standard" inside
+    # TestDesigner rather than erroring: a form value is user input, and the
+    # safe direction for an unrecognised one is the narrower test plan.
     state.orch.design(aid, poc_python=poc_python or None, poc_postman=poc_postman or None,
-                      burp_xml=burp_xml or None, jmeter_xml=jmeter_xml or None)
+                      burp_xml=burp_xml or None, jmeter_xml=jmeter_xml or None,
+                      depth=depth or "standard")
     return RedirectResponse(f"/assessment/{aid}?flash=Test+plan+generated", status_code=303)
+
+
+
+_PLAN_ACTIONS = {
+    "approve": ("approve", "Approved"),
+    "reject": ("reject", "Rejected"),
+    "reset": ("reset_approval", "Reset to PENDING"),
+}
+
+
+def _plan_filters(form) -> dict:
+    """The filter the tester was looking at, echoed back from the form.
+
+    "Approve all 312 matching" has to mean the filter on screen, so the bulk
+    action re-runs the same query server-side rather than trusting a list of ids
+    the page happened to render.
+    """
+    def get(name, default=""):
+        value = form.get(name, default)
+        return value if value is not None else default
+
+    try:
+        per = int(get("per", "25") or 25)
+    except ValueError:
+        per = 25
+    return {"q": get("q"), "cat": get("cat"), "sev": get("sev"), "appr": get("appr"),
+            "dest": get("dest"), "src": get("src"), "sort": get("sort", "id") or "id",
+            "per": per}
+
+
+@app.post("/assessment/{aid}/agent-plan")
+async def agent_plan(aid: str, depth: str = Form("standard"), rounds: int = Form(1),
+                     user: User = Depends(require("tester"))):
+    """Re-run the planning pipeline: design → plan → review → revise → re-review.
+
+    Replaces the plan, exactly as the Design step does, and carries an approval
+    across for any test that comes back byte-for-byte unchanged. Rounds are
+    capped at 2 whatever is posted: each one is another LLM call and another
+    batch a human has to read, and a reviewer that is never satisfied would
+    otherwise loop until the batch cap swallowed the plan.
+    """
+    try:
+        _tests, review = state.orch.agent_plan(
+            aid, depth=depth or "standard", max_rounds=max(0, min(2, rounds)),
+            actor=user.name,
+        )
+    except Exception as exc:  # noqa: BLE001 - report it, do not 500 the page
+        return HTMLResponse(
+            views.error_page(
+                "Planning agent failed",
+                f"The planning agent could not complete: {type(exc).__name__}: {exc}",
+                "<p>The assessment is unchanged. Generate a plan from step 2 to "
+                "continue without the agent.</p>",
+            ),
+            status_code=500,
+        )
+    flash = (f"Plan reviewed: {review.verdict}, {len(review.tests_added)} test(s) added"
+             if review else "Plan generated (no review was recorded)")
+    return RedirectResponse(f"/assessment/{aid}?flash={quote(flash)}#s-plan", status_code=303)
+
+
+@app.post("/assessment/{aid}/adjudicate")
+async def adjudicate(aid: str, user: User = Depends(require("tester"))):
+    """Review the results: triage every undecided one, then answer pass/fail.
+
+    Sends nothing. It reads evidence that already exists, which is why it is safe
+    to run, disagree with, and run again — and why it is a separate button from
+    Execute rather than something that happens automatically at the end of a run.
+    """
+    try:
+        run = state.orch.adjudicate(aid, actor=user.name)
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(str(exc))}#s-results", status_code=303
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            views.error_page(
+                "Result review failed",
+                f"The reviewing agent could not complete: {type(exc).__name__}: {exc}",
+                "<p>Nothing was changed. The sealed verdicts and findings are "
+                "untouched — this pass only ever reads them.</p>",
+            ),
+            status_code=500,
+        )
+    flash = (f"Reviewed: {run.overall}, {run.coverage_pct}% of the ticket covered, "
+             f"{run.n_manual_review} still need you")
+    return RedirectResponse(f"/assessment/{aid}?flash={quote(flash)}#s-results",
+                            status_code=303)
+
+
+@app.post("/assessment/{aid}/plan")
+async def plan_action(request: Request, aid: str, user: User = Depends(require("tester"))):
+    form = await request.form()
+    action = str(form.get("action", "approve"))
+    if action not in _PLAN_ACTIONS:
+        return RedirectResponse(f"/assessment/{aid}?flash=Unknown+action#s-plan", status_code=303)
+    method_name, word = _PLAN_ACTIONS[action]
+
+    if form.get("select_all"):
+        filters = _plan_filters(form)
+        filters.pop("per", None)
+        test_ids = state.repo.query_test_cases(aid, per=500, **filters)["matched_ids"]
+        scope = "matching the current filter"
+    else:
+        test_ids = [str(v) for v in form.getlist("test_ids")]
+        scope = "selected"
+
+    if not test_ids:
+        return RedirectResponse(f"/assessment/{aid}?flash=Nothing+selected#s-plan", status_code=303)
+
+    n = getattr(state.orch, method_name)(aid, test_ids, actor=user.name)
+    flash = f"{word} {n} test(s) {scope}"
+    query = _preserve_plan_query(form)
+    return RedirectResponse(
+        f"/assessment/{aid}?flash={quote(flash)}{query}#s-plan", status_code=303
+    )
+
+
+def _preserve_plan_query(form) -> str:
+    """Keep the filter across the redirect: landing back on an unfiltered page
+    after acting on a filtered one loses the tester's place."""
+    keep = ("q", "cat", "sev", "appr", "dest", "src", "sort", "per", "page")
+    parts = [f"{k}={quote(str(form.get(k)))}" for k in keep if form.get(k)]
+    return ("&" + "&".join(parts)) if parts else ""
 
 
 @app.post("/assessment/{aid}/approve")
 async def approve(request: Request, aid: str, user: User = Depends(require("tester"))):
+    """The plain approve endpoint, kept because scripts and the JSON-ish
+    automation path post to it. Bulk actions go through /plan."""
     form = await request.form()
-    test_ids = form.getlist("test_ids")
+    test_ids = [str(v) for v in form.getlist("test_ids")]
     if test_ids:
-        state.orch.approve(aid, test_ids, actor=user.name)
-        flash = f"Approved {len(test_ids)} test(s)"
+        n = state.orch.approve(aid, test_ids, actor=user.name)
+        flash = f"Approved {n} test(s)"
     else:
         flash = "No tests selected"
-    return RedirectResponse(f"/assessment/{aid}?flash={flash.replace(' ', '+')}", status_code=303)
+    return RedirectResponse(
+        f"/assessment/{aid}?flash={quote(flash)}#s-plan", status_code=303
+    )
 
 
 def _parse_kv_lines(text: str, sep: str) -> dict[str, str]:
@@ -482,15 +1006,22 @@ async def test_detail_save(
 
 @app.post("/assessment/{aid}/execute")
 async def execute(aid: str, environment: str = Form(""), include_destructive: bool = Form(False),
+                  adaptive: bool = Form(False),
                   user: User = Depends(require("tester"))):
     eng = state.engagement
     base_url = eng.environments.get(environment or eng.active_environment, eng.target_base_url)
     if not base_url:
         return RedirectResponse(f"/assessment/{aid}?flash=Execution+disabled:+no+engagement+configured",
                                 status_code=303)
+    # Adaptive follow-ups are generated and run without a human reading them,
+    # so the destructive exclusion is inherited from this run's setting rather
+    # than being independently switchable: a tester who kept write probes out
+    # of a reviewed plan did not thereby consent to unreviewed ones.
+    budget = AdaptiveBudget(allow_destructive=include_destructive) if adaptive else None
     try:
-        execs = state.orch.execute(aid, base_url, eng.scope, eng.vault, Settings.from_env(),
-                                   include_destructive=include_destructive)
+        execs = state.orch.execute(aid, base_url, eng.scope, eng.vault,
+                                   settings_with_overrides(eng.runner),
+                                   include_destructive=include_destructive, adaptive=budget)
     except Exception as exc:
         headline, hint = _execute_error(base_url, exc)
         return HTMLResponse(
@@ -510,6 +1041,162 @@ async def execute(aid: str, environment: str = Form(""), include_destructive: bo
         flash += f", {n_error} ERROR (open a test's detail page for the reason)"
     flash = flash.replace(" ", "+")
     return RedirectResponse(f"/assessment/{aid}?flash={flash}", status_code=303)
+
+
+
+# -- re-running a single execution -------------------------------------------
+#
+# Called by fetch() from the report's Execution Log, so it answers JSON: the
+# report is a standalone document that must not navigate away to settle one
+# undecided row. The execution id travels in the form body rather than the path
+# because it contains "#" (the run tag), which is a fragment delimiter in a URL
+# and never reaches the server intact from a hand-built link.
+
+
+@app.post("/assessment/{aid}/execution/rerun")
+async def rerun_execution(aid: str, execution_id: str = Form(...),
+                          environment: str = Form(""), confirm: str = Form(""),
+                          user: User = Depends(require("tester"))):
+    assessment = state.repo.get_assessment(aid)
+    if not assessment:
+        return JSONResponse({"ok": False, "error": "Assessment not found."}, status_code=404)
+
+    eng = state.engagement
+    # Default to the target this assessment actually ran against — re-running a
+    # request against a different environment answers a different question. A
+    # name that is not configured is refused rather than quietly falling back:
+    # silently sending to a different host than the caller named is the one
+    # outcome worse than not sending at all.
+    base_url = ""
+    if environment:
+        base_url = eng.environments.get(environment, "")
+        if not base_url:
+            return JSONResponse(
+                {"ok": False, "error": f"No environment named {environment!r} is configured."},
+                status_code=409,
+            )
+
+    # The destructive speed bump is a UI policy (type the issue key), so it is
+    # checked here where the issue key lives; the orchestrator keeps the hard
+    # gate and refuses without an explicit confirmation either way.
+    confirmed = confirm.strip() == assessment.issue_key
+
+    try:
+        original, replay = state.orch.rerun_execution(
+            aid, execution_id, eng.scope, eng.vault,
+            settings_with_overrides(eng.runner),
+            base_url=base_url, confirm_destructive=confirmed, actor=user.name,
+        )
+    except Orchestrator.RerunRefused as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc), "issue_key": assessment.issue_key},
+            status_code=409,
+        )
+    except Exception as exc:
+        headline, hint = _execute_error(base_url or assessment.target_base_url, exc)
+        return JSONResponse(
+            {"ok": False, "error": f"{headline} {html.unescape(_strip_tags(hint))}".strip()},
+            status_code=400,
+        )
+
+    response = replay.response
+    return JSONResponse({
+        "ok": True,
+        "test_id": replay.test_id,
+        "execution_id": replay.execution_id,
+        "previous_result": original.verdict.result.value,
+        "result": replay.verdict.result.value,
+        "confidence": replay.verdict.confidence.value,
+        "reason": replay.verdict.reason,
+        "status_code": response.status_code if response else None,
+        "elapsed_ms": response.elapsed_ms if response else None,
+        "changed": replay.verdict.result.value != original.verdict.result.value,
+    })
+
+
+def _strip_tags(markup: str) -> str:
+    """The error hints in this module are small HTML fragments; a JSON client
+    wants the sentence, not the <a href>."""
+    return re.sub(r"<[^>]+>", "", markup)
+
+
+
+# -- re-running --------------------------------------------------------------
+#
+# "Run it again" is a new assessment of the same issue, not a second pass over
+# the old one: regression only exists between assessments, and re-running in
+# place would rewrite the conclusions attached to evidence that was already
+# reported. Two modes, because they answer different questions:
+#
+#   same     — did anything change on the target? Same plan, same approvals.
+#   reimport — the ticket changed; re-read it and analyze from scratch.
+
+
+@app.post("/assessment/{aid}/rerun")
+async def rerun(aid: str, mode: str = Form("same"), environment: str = Form(""),
+                user: User = Depends(require("tester"))):
+    source = state.repo.get_assessment(aid)
+    if not source:
+        return RedirectResponse("/?flash=Assessment+not+found", status_code=303)
+
+    if mode == "reimport":
+        try:
+            new_id = await state.orch.import_and_analyze(source.issue_key)
+        except Exception as exc:
+            headline, hint = _import_error(source.issue_key, exc)
+            return HTMLResponse(views.error_page("Re-import failed", headline, hint),
+                                status_code=400)
+        return RedirectResponse(
+            f"/assessment/{new_id}?flash={quote('Re-imported ' + source.issue_key + ' — design a plan')}",
+            status_code=303,
+        )
+
+    new_id = state.orch.clone_for_rerun(aid, actor=user.name)
+    eng = state.engagement
+    base_url = eng.environments.get(environment or eng.active_environment, eng.target_base_url)
+
+    # A re-run stops short of executing when it would be pointless or unsafe, and
+    # says why on the new assessment rather than reporting a run that never
+    # happened. The new plan is already sitting there for the tester to fix and
+    # run themselves.
+    approved = state.repo.query_test_cases(new_id, appr="APPROVED", per=1)["total"]
+    readiness = preflight.evaluate(eng, state.engagement_path)
+    if not base_url:
+        return _rerun_landing(new_id, "Cloned the plan. Execution is disabled: no "
+                                      "environment is configured.")
+    if not approved:
+        return _rerun_landing(new_id, "Cloned the plan. Nothing ran: no test in it was "
+                                      "approved.")
+    if readiness.n_blocking:
+        return _rerun_landing(new_id, f"Cloned the plan. Nothing ran: "
+                                      f"{readiness.n_blocking} blocking configuration "
+                                      f"issue(s).")
+
+    try:
+        # Destructive tests are never carried into an automatic re-run. Approving a
+        # write probe once, for a run you watched, is not consent to it firing
+        # again from a button on a list page.
+        execs = state.orch.execute(new_id, base_url, eng.scope, eng.vault,
+                                   settings_with_overrides(eng.runner),
+                                   include_destructive=False)
+    except Exception as exc:
+        headline, hint = _execute_error(base_url, exc)
+        return HTMLResponse(
+            views.error_page("Re-run failed", headline, hint,
+                             back_href=f"/assessment/{new_id}",
+                             back_label="← Back to the new assessment"),
+            status_code=400,
+        )
+
+    n_fail = sum(1 for ex in execs if ex.verdict.result.value == "FAIL")
+    flash = f"Re-ran {len(execs)} test(s), {n_fail} FAIL"
+    return RedirectResponse(
+        f"/assessment/{new_id}/regression?flash={quote(flash)}", status_code=303
+    )
+
+
+def _rerun_landing(new_id: str, message: str) -> RedirectResponse:
+    return RedirectResponse(f"/assessment/{new_id}?flash={quote(message)}", status_code=303)
 
 
 @app.get("/assessment/{aid}/report", response_class=HTMLResponse)
@@ -553,13 +1240,15 @@ async def export_postman(aid: str):
 
 
 @app.get("/assessment/{aid}/regression", response_class=HTMLResponse)
-async def regression(aid: str) -> str:
+async def regression(aid: str, flash: str = "") -> str:
     from app.pipeline.history import render_diff_comment
 
     diff, prev_id = state.orch.regression_diff(aid)
     a = state.repo.get_assessment(aid)
+    # A re-run lands here rather than on the assessment page: "what changed since
+    # last time" is the question it was started to answer.
     return views.regression_page(aid, a.issue_key, prev_id, diff,
-                                 render_diff_comment(a.issue_key, diff))
+                                 render_diff_comment(a.issue_key, diff), flash=flash)
 
 
 @app.get("/assessment/{aid}/comment", response_class=HTMLResponse)

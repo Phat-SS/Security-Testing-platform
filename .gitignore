@@ -11,3 +11,5 @@ config/engagement.json
 config/users.json
 docker/allowlist
 .env
+# backups of .env are secrets too - the bare ".env" rule does not match them
+.env.bak*

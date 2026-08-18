@@ -15,13 +15,45 @@ from typing import Any
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z0-9_.]+)\}")
 
 
+def _normalize(name: str) -> str:
+    """`customerId`, `customer_id` and `CUSTOMER-ID` name the same thing."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 def resolve(template: str, context: dict[str, Any]) -> str:
+    """Substitute `{name}` placeholders from `context`.
+
+    Exact key first, then a case- and separator-insensitive match. The fallback
+    is not cosmetic: endpoint paths are written in a ticket's style
+    (`/customers/{customerId}`) while persona ids are configured in the
+    engagement's style (`customer_id`). Without it those never met, so every
+    test on a parameterised path sent the literal string `{customerId}` as a
+    path segment, collected a 404, and was recorded as PASS — a false negative
+    on every non-BOLA test that touched an object route. (BOLA escaped only
+    because its mutation writes the key it is about to read.)
+
+    An ambiguous fallback is refused rather than guessed, for the same reason
+    the BOLA id resolver refuses: aiming a probe at the wrong object tests
+    nothing while looking like a clean result.
+    """
+
+    normalized: dict[str, list[Any]] = {}
+    for key, value in context.items():
+        normalized.setdefault(_normalize(key), []).append(value)
+
     def _sub(match: re.Match[str]) -> str:
         key = match.group(1)
         if key in context:
             return str(context[key])
-        # Unknown placeholder: leave it untouched rather than raising, so a
-        # partially-specified template degrades visibly instead of crashing.
+        candidates = normalized.get(_normalize(key), [])
+        # Deduplicate: two spellings of the same id carrying the same value is
+        # agreement, not ambiguity.
+        distinct = {str(c) for c in candidates if c is not None}
+        if len(distinct) == 1:
+            return distinct.pop()
+        # Unknown or ambiguous placeholder: leave it untouched rather than
+        # raising, so a partially-specified template degrades visibly instead
+        # of crashing.
         return match.group(0)
 
     return _PLACEHOLDER.sub(_sub, template)

@@ -51,6 +51,15 @@ ID_KEYWORDS = re.compile(r"\b(\w*id)\b", re.IGNORECASE)  # customerId, orderId, 
 ROLE_KEYWORDS = ("role", "permission", "admin", "manager", "agent", "privilege", "scope")
 URL_KEYWORDS = ("url", "callback", "webhook", "redirect", "imageurl", "externalurl", "fetch", "proxy")
 RESOURCE_KEYWORDS = ("search", "export", "upload", "bulk", "pagination", "filter", "batch", "report")
+# API6 is about *business* flows worth automating, which is a different question
+# from API4's "is this expensive to serve". Sharing one vocabulary made every
+# paginated list endpoint claim a sensitive-business-flow gap the test designer
+# could never fill, so the coverage matrix showed a permanent phantom MISSING.
+FLOW_KEYWORDS = (
+    "purchase", "order", "checkout", "payment", "transfer", "booking", "reserve",
+    "signup", "sign up", "register", "invite", "coupon", "redeem", "claim",
+    "withdraw", "vote", "refund", "subscribe", "business flow", "workflow",
+)
 AUTH_KEYWORDS = ("login", "token", "jwt", "bearer", "session", "oauth", "authenticate", "password")
 MISCONFIG_KEYWORDS = (
     "debug", "stack trace", "verbose error", "default password", "default credential",
@@ -145,7 +154,7 @@ def evaluate(signals: RequirementSignals) -> list[RuleHit]:
             )
         )
 
-    # API4 / API6 — expensive or sensitive flows.
+    # API4 — expensive or bulk operations (cost to serve).
     res_hits = _found(RESOURCE_KEYWORDS, text)
     if res_hits or signals.bulk_or_expensive:
         hits.append(
@@ -157,13 +166,17 @@ def evaluate(signals: RequirementSignals) -> list[RuleHit]:
                 res_hits or ["bulk"],
             )
         )
+
+    # API6 — business flows whose value comes from being hard to automate.
+    flow_hits = _found(FLOW_KEYWORDS, text)
+    if flow_hits:
         hits.append(
             RuleHit(
                 OwaspApiCategory.API6,
                 Applicability.APPLICABLE,
-                "Potentially sensitive business flow; test for unrestricted "
-                "automation/abuse.",
-                res_hits or ["flow"],
+                "Sensitive business flow present; test for unrestricted "
+                "automation/abuse (bulk execution, race on the commit window).",
+                flow_hits,
             )
         )
 

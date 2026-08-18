@@ -7,10 +7,14 @@ implementation's output is validated before anything downstream trusts it.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .agent import RequirementItem
 from .enums import Applicability, OwaspApiCategory
 
 CoverageState = Literal["COVERED", "PARTIAL", "MISSING", "NOT_APPLICABLE", "UNKNOWN"]
@@ -26,6 +30,11 @@ class Endpoint(BaseModel):
     writes_properties: bool = False
     # Fields that carry a server-consumed URL (SSRF surface).
     url_fields: list[str] = Field(default_factory=list)
+    # True when a human typed this endpoint in the UI rather than the analyzer
+    # extracting it from the ticket. Re-analyzing the ticket rebuilds the
+    # extracted rows and would otherwise silently discard hand-entered ones,
+    # which are exactly the rows the analyzer's regex was unable to find.
+    manual: bool = False
 
     @property
     def signature(self) -> str:
@@ -52,6 +61,14 @@ class IssueAnalysis(BaseModel):
     endpoints: list[Endpoint] = Field(default_factory=list)
     owasp_mappings: list[OwaspMapping] = Field(default_factory=list)
 
+    # The discrete things the ticket asks for, extracted from its acceptance
+    # criteria and security-relevant bullets. The denominator of the "% of the
+    # ticket covered" figure, and one of the inputs the planning and reviewing
+    # agents read — so a requirement that only ever appears in prose still gets
+    # a test aimed at it. Defaulted, so an analysis blob stored by an earlier
+    # version still validates.
+    requirements: list[RequirementItem] = Field(default_factory=list)
+
     # PoC signals detected in the ticket (references, not executed code).
     detected_pocs: list[str] = Field(default_factory=list)
     # Raw PoC source extracted from the ticket description, pending a human's
@@ -59,9 +76,51 @@ class IssueAnalysis(BaseModel):
     # looks at it and submits the design form themselves.
     detected_poc_source: str = ""
 
+    # The ticket text the analysis was derived from (summary + description +
+    # acceptance criteria + comments, as joined by the analyzer). Kept so that
+    # editing the endpoint list can re-derive the text-based OWASP signals
+    # without re-fetching the issue from Jira — the alternative was to
+    # recompute mappings from endpoints alone, which silently loses every
+    # signal that lives in prose ("bulk export", "admin role", "JWT").
+    source_text: str = ""
+
+    # Fingerprint of the endpoint list at the moment the current test plan was
+    # generated. Compared against the live endpoints to tell a tester their
+    # plan no longer matches the endpoints it was derived from, instead of
+    # letting them approve and run a plan built for a stale surface.
+    plan_fingerprint: str = ""
+
+    def endpoints_fingerprint(self) -> str:
+        return endpoints_fingerprint(self.endpoints)
+
+    def plan_is_stale(self) -> bool:
+        """True when a plan exists but was generated from a different endpoint
+        list than the one now stored."""
+        return bool(self.plan_fingerprint) and self.plan_fingerprint != self.endpoints_fingerprint()
+
     def applicable_categories(self) -> list[OwaspApiCategory]:
         return [
             m.category
             for m in self.owasp_mappings
             if m.applicability == Applicability.APPLICABLE
         ]
+
+
+def endpoints_fingerprint(endpoints: list[Endpoint]) -> str:
+    """A stable hash of everything about an endpoint list that changes what the
+    designer would generate. Method/path alone is not enough: flipping
+    `auth_required` or adding an `object_id_param` changes the test plan without
+    changing any signature."""
+    payload = [
+        [
+            ep.method.upper(),
+            ep.path,
+            ep.auth_required,
+            sorted(ep.object_id_params),
+            ep.writes_properties,
+            sorted(ep.url_fields),
+        ]
+        for ep in endpoints
+    ]
+    payload.sort(key=lambda row: (row[0], row[1]))
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]

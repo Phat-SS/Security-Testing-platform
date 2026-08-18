@@ -4,7 +4,7 @@ same binary is safe in a lab and in a locked-down engagement."""
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -36,3 +36,38 @@ class Settings:
             default_allow_private_ranges=os.getenv("ALLOW_PRIVATE_RANGES", "false").lower()
             == "true",
         )
+
+
+def settings_with_overrides(overrides: dict) -> Settings:
+    """Env-var settings with per-engagement runner limits layered on top.
+
+    The .env file stays the machine-wide default; the Config UI writes the
+    `runner` block in engagement.json for the knobs a tester wants to tune for
+    one target (a slow staging host needing a longer timeout, say) without
+    editing .env and restarting the server. An absent or unparseable value
+    falls back to the env default rather than to zero — a zero timeout or a
+    zero request cap would silently disable execution entirely.
+    """
+    base = Settings.from_env()
+    if not overrides:
+        return base
+    fields = {
+        "timeout_s": float,
+        "max_response_bytes": int,
+        "max_redirects": int,
+        "max_requests_per_test": int,
+    }
+    applied = {}
+    for key, cast in fields.items():
+        if key not in overrides or overrides[key] in (None, ""):
+            continue
+        try:
+            value = cast(overrides[key])
+        except (TypeError, ValueError):
+            continue
+        if value < 0 or (key != "max_redirects" and value == 0):
+            continue
+        applied[key] = value
+    if not applied:
+        return base
+    return replace(base, limits=replace(base.limits, **applied))

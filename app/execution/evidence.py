@@ -1,9 +1,25 @@
 """Tamper-evident evidence hashing.
 
-Each execution is hashed over its (request, response, verdict) and chained to
-the previous execution's hash. If anyone edits an evidence record after the
-fact, the chain breaks and verification fails. Cheap to compute, expensive to
-forge — exactly what a security report needs to be defensible.
+Each execution is hashed over its full content and chained to the previous
+execution's hash. Editing any stored record after the fact breaks the chain and
+verification fails.
+
+What this does and does not prove, stated plainly because the difference
+matters in a dispute:
+
+  * It DOES detect edits made without recomputing the chain — a row changed
+    directly in the database, an exported record altered before it was filed,
+    a verdict flipped in storage. That is the realistic tampering case and it
+    is caught reliably.
+  * It does NOT resist an adversary who can write to the database *and* run
+    this code. The chain is self-referential and unkeyed: recompute every hash
+    from the head and it verifies clean. This is tamper-EVIDENT, not
+    tamper-PROOF, and "expensive to forge" would be an overstatement.
+
+Closing that second gap needs a key this process does not hold: sign the head
+hash with an external key, or anchor it to append-only storage outside the
+application's own trust boundary. Until then, the chain's guarantee is exactly
+as strong as the access control on the database.
 """
 
 from __future__ import annotations
@@ -19,6 +35,18 @@ def compute_hash(execution: Execution) -> str:
     # `log`/`scope_validated` narrate what happened and are exactly what an
     # attacker editing the DB post-hoc would target, so they must be inside
     # the hash, not just request/response/verdict.
+    #
+    # `supporting` (baseline / verification exchanges) and `repeat` are hashed
+    # unconditionally — NOT "only when present". Omitting an empty value would
+    # make a record with its baseline deleted hash identically to one that
+    # never had a baseline, which is precisely the edit an attacker would make
+    # to turn an INCONCLUSIVE-because-the-control-was-never-exercised into a
+    # clean PASS. Coverage of a field cannot be optional.
+    #
+    # Consequence, accepted deliberately: adding these fields changes the
+    # payload shape, so evidence sealed by an older version of this module no
+    # longer verifies. That is the correct failure direction — a hash whose
+    # definition silently varies proves nothing at all.
     payload = {
         "execution_id": execution.execution_id,
         "test_id": execution.test_id,
@@ -27,6 +55,9 @@ def compute_hash(execution: Execution) -> str:
         "request": execution.request.model_dump(),
         "response": execution.response.model_dump() if execution.response else None,
         "verdict": execution.verdict.model_dump(),
+        "attack_note": execution.attack_note,
+        "supporting": [s.model_dump() for s in execution.supporting],
+        "repeat": execution.repeat.model_dump() if execution.repeat else None,
         "log": execution.log,
         "prev_hash": execution.prev_hash,
     }

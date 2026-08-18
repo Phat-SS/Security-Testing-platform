@@ -65,7 +65,11 @@ class Mutation(BaseModel):
     """The security-relevant transformation applied to a baseline request.
 
     `kind` is a controlled vocabulary the runner understands, so a finding can
-    be classified by *what was changed*, not guessed from a status code.
+    be classified by *what was changed*, not guessed from a status code. The
+    authoritative list lives in `app.execution.mutations.MUTATION_KINDS`; an
+    unknown kind is rejected by the runner rather than improvised, which is
+    also what keeps an AI planner from inventing an attack the trusted runner
+    has never been reviewed to perform.
     """
 
     kind: str = Field(
@@ -82,6 +86,47 @@ class Mutation(BaseModel):
     detail: dict = Field(default_factory=dict)
 
 
+class VerificationStep(BaseModel):
+    """A follow-up request that proves the attack actually changed server state.
+
+    Mass assignment is the motivating case: injecting `role=admin` and getting
+    HTTP 200 proves nothing on its own — the property may have been silently
+    dropped. Re-reading the object and finding the injected value is what turns
+    a guess into evidence. Without this the verdict can only ever be
+    INCONCLUSIVE, which is honest but not useful.
+    """
+
+    as_persona: str = Field(alias="as")
+    request: RequestSpec
+    # If any of these strings appears in the verification response body, the
+    # attack's effect persisted → confirmed exploit (not merely 'accepted').
+    proves_exploit_if_contains: list[TemplateStr] = Field(default_factory=list)
+    description: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
+class BaselineSpec(BaseModel):
+    """Positive control — run the *same* request as an identity that legitimately
+    should succeed, before concluding the attack was 'correctly rejected'.
+
+    Why this exists: a BOLA test whose victim object id is stale/nonexistent
+    returns 404, which the verdict would otherwise read as "authorization
+    enforced — PASS, high confidence". That is a false negative wearing a
+    confident label. If the legitimate owner *also* gets 404, the test never
+    exercised the control at all and the only honest answer is INCONCLUSIVE.
+    """
+
+    as_persona: str = Field(alias="as")
+    # None → reuse the test's own request (the common case: same object, but
+    # requested by the identity that actually owns it).
+    request: RequestSpec | None = None
+    success_status_in: list[int] = Field(default_factory=lambda: [200, 201, 202, 204])
+    description: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
 class ExpectedResult(BaseModel):
     """What a SECURE system should do. Deviation is what we flag."""
 
@@ -95,6 +140,20 @@ class ExpectedResult(BaseModel):
         "(e.g. the victim's email captured during setup).",
     )
     max_response_ms: int | None = None
+
+    # -- response-header assertions (API8 hardening / CORS probes) -----------
+    # {header_name: substring}. If the response carries that header AND its
+    # value contains the substring, the control failed. Header names are
+    # matched case-insensitively. e.g. {"access-control-allow-origin":
+    # "evil.example"} catches an origin-reflecting CORS policy.
+    forbidden_response_headers: dict[str, TemplateStr] = Field(default_factory=dict)
+    # Header names that MUST be present on a hardened response.
+    required_response_headers: list[str] = Field(default_factory=list)
+
+    # -- multi-request assertions (API4 rate limits / API6 flow abuse) -------
+    # When the mutation sends N requests, at most this many may succeed before
+    # throttling is expected to kick in. None → no limit asserted.
+    max_successful_repeats: int | None = None
 
 
 class AuthContext(BaseModel):
@@ -117,8 +176,15 @@ class TestCase(BaseModel):
     auth_context: AuthContext
     preconditions: list[str] = Field(default_factory=list)
     setup: list[SetupStep] = Field(default_factory=list)
+    # Positive control, run BEFORE the attack. Establishes that the thing being
+    # protected is actually reachable by someone entitled to it, so a rejection
+    # of the attack means "the control worked" rather than "nothing was there".
+    baseline: BaselineSpec | None = None
     request: RequestSpec
     attack_mutation: Mutation
+    # Read-back, run AFTER the attack. Turns "the server accepted it" into
+    # "the server persisted it" — the difference between a lead and a finding.
+    verification: VerificationStep | None = None
     expected: ExpectedResult
     evidence_required: list[str] = Field(default_factory=list)
 

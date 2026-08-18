@@ -132,6 +132,12 @@ class TestSource(str, Enum):
     RULE_ENGINE = "rule_engine"
     POC = "poc"  # transpiled from an existing PoC
     MANUAL = "manual"
+    # Proposed AND authorised by the adaptive loop mid-run, under policy rather
+    # than by a person. Distinct from AI (which the planner proposes at design
+    # time and a human still approves) because "a policy permitted this" and "a
+    # human approved this" are different assurances, and anything that copies or
+    # reports a plan has to be able to tell them apart.
+    ADAPTIVE_PLANNER = "adaptive_planner"
 
 
 class Environment(str, Enum):

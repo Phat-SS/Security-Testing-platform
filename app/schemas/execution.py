@@ -7,6 +7,8 @@ dispute. Secrets are redacted *before* anything is stored here.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from .enums import Confidence, TestStatus
@@ -40,6 +42,36 @@ class Verdict(BaseModel):
     reason: str
 
 
+class SupportingExchange(BaseModel):
+    """A non-attack request/response pair that gives the attack result meaning.
+
+    `baseline` is the positive control (an entitled identity doing the same
+    thing successfully, proving the target exists); `verification` is the
+    read-back that proves the attack's effect persisted. Both are captured as
+    first-class evidence because a verdict that depends on them is only as
+    defensible as the exchange it depends on — an auditor must be able to see
+    the baseline, not just be told it passed.
+    """
+
+    kind: Literal["baseline", "verification"]
+    as_persona: str
+    request: CapturedRequest
+    response: CapturedResponse | None
+    note: str = ""
+
+
+class RepeatStats(BaseModel):
+    """Aggregate of a multi-request mutation (rate-limit probe, flow abuse,
+    race window). The individual responses are not all stored — the shape of
+    the distribution is what the verdict reasons about."""
+
+    sent: int
+    succeeded: int
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    throttled: bool = False  # any 429 / 503 observed
+    concurrent: bool = False  # sent in parallel (race probe) vs sequentially
+
+
 class Execution(BaseModel):
     execution_id: str
     test_id: str
@@ -51,6 +83,18 @@ class Execution(BaseModel):
     request: CapturedRequest
     response: CapturedResponse | None  # None if BLOCKED before sending
     verdict: Verdict
+
+    # What the mutation actually did to this request, in plain language, as the
+    # runner computed it ("targeted object id 2002 owned by another identity").
+    # A first-class field rather than a line scraped out of `log`: every report
+    # and every Jira comment has to answer "what was the attack?", and deriving
+    # that by string-matching our own log prefixes would silently render blank
+    # the day someone rewords a log line.
+    attack_note: str = ""
+
+    # Evidence supporting the verdict beyond the single attack exchange.
+    supporting: list[SupportingExchange] = Field(default_factory=list)
+    repeat: RepeatStats | None = None
 
     # Tamper-evidence: sha256 over (request, response, verdict); chained to the
     # previous execution's hash so the evidence log cannot be silently edited.

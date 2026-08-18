@@ -39,9 +39,12 @@ def test_dashboard_loads(client):
     assert "MOCK-345" in r.text
 
 
-def test_dashboard_has_environments_nav_tab(client):
+def test_dashboard_has_config_nav_tab(client):
     r = client.get("/")
-    assert "/config/environments" in r.text
+    assert 'href="/config"' in r.text
+    assert client.get("/config").status_code == 200
+    # The pre-unification URL still resolves — it opens the same page on the
+    # Environments pane rather than 404ing an old bookmark or report link.
     assert client.get("/config/environments").status_code == 200
 
 
