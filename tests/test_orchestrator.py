@@ -252,3 +252,123 @@ def test_embedded_poc_in_description_is_detected_not_auto_designed():
 
 def orch_tests(repo, aid):
     return repo.get_test_cases(aid)
+
+
+class _ScriptedLLM:
+    """Would-be AttackPlanner input — used only to prove it never gets asked."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+    def complete(self, system: str, user: str) -> str:
+        return self.reply
+
+
+_AI_PROPOSAL = """{"tests": [{
+  "title": "AI-invented probe that ticket_poc mode must never run",
+  "owasp_category": "API2:2023",
+  "persona": "anonymous",
+  "method": "GET",
+  "path": "/internal/ai-invented-probe",
+  "mutation_kind": "drop_auth",
+  "expected_status_in": [401]
+}]}"""
+
+
+def test_ticket_poc_mode_runs_only_the_embedded_poc():
+    """Option 1: the ticket's own PoC becomes the whole plan. The AI planner is
+    attached (so it *could* add tests) but must never be asked to, and the plan
+    reviewer must still run — read-only, no revision round."""
+    from app.analysis.attack_planner import AttackPlanner
+
+    repo, _ = _setup()
+    planner = AttackPlanner(_ScriptedLLM(_AI_PROPOSAL), known_personas=["anonymous"])
+    orch = Orchestrator(repo, _FakeJiraWithEmbeddedPoc(), planner=planner)
+
+    aid, review, poc_found = asyncio.run(orch.import_and_run_poc_plan("AUTO-2"))
+    assert poc_found is True
+
+    tests = orch_tests(repo, aid)
+    assert tests, "the ticket's embedded PoC should have produced at least one test"
+    assert all(t.source.value == "poc" for t in tests), \
+        "ticket_poc mode must not mix in AI-planner or rule-engine tests"
+    assert not any(t.request.path == "/internal/ai-invented-probe" for t in tests), \
+        "the AI planner must never be asked to add tests in this mode"
+
+    # The host embedded in the PoC script must never survive into the test's
+    # own request — execution always targets the tool's configured base URL.
+    assert not any("api-staging.company.com" in t.request.path for t in tests)
+
+    # Sent verbatim — no classify()-guessed mutation on top of the PoC's own
+    # request, and no {victim_id}-style path rewrite nothing then resolves.
+    assert all(t.attack_mutation.kind == "verbatim_replay" for t in tests)
+    assert not any("{" in t.request.path for t in tests)
+
+    assert review is not None, "the plan reviewer must still run, read-only"
+    assert review.rounds == 0, "no revision round: the AI planner must not answer gaps"
+
+
+class _FakeJiraDescriptiveTicketWithEmbeddedPoc:
+    """A ticket that reads like a real BH-xxx one: prose describing an
+    endpoint (which the heuristic extractor/rule engine can act on) *and* a
+    PoC embedded as a fenced code block. Exercises the case
+    `_FakeJiraWithEmbeddedPoc` above cannot: its description has no
+    endpoint-describing prose at all, so the rule engine never had anything
+    to generate tests from regardless of whether ticket_poc mode suppressed
+    it — a rule-engine leak would have passed silently against that fixture."""
+
+    async def get_issue(self, issue_key: str) -> NormalizedIssue:
+        return NormalizedIssue(
+            issue_key=issue_key,
+            project_key=issue_key.split("-", 1)[0],
+            summary="Report intake",
+            description='''
+GET /reports/{reportId} returns a submitted report. Bearer JWT required.
+
+PoC scripts:
+
+01_test.py
+
+```python
+import requests
+BASE = "https://api-staging.company.com"
+requests.get(BASE + "/reports/2002")
+```
+''',
+        )
+
+
+def test_ticket_poc_mode_does_not_leak_rule_engine_tests_for_endpoints_the_ticket_describes():
+    """A ticket whose prose describes an endpoint (so the rule engine would
+    normally generate BOLA/broken-auth tests for it) must still end up with
+    only the PoC's own test in ticket_poc mode — not the PoC test plus a full
+    rule-engine sweep of every endpoint the ticket happens to mention."""
+    repo, _ = _setup()
+    orch = Orchestrator(repo, _FakeJiraDescriptiveTicketWithEmbeddedPoc())
+
+    aid, _review, poc_found = asyncio.run(orch.import_and_run_poc_plan("AUTO-3"))
+    assert poc_found is True
+
+    tests = orch_tests(repo, aid)
+    assert tests, "the embedded PoC should have produced a test"
+    assert all(t.source.value == "poc" for t in tests), \
+        f"expected only PoC-sourced tests, got sources: {[t.source.value for t in tests]}"
+    # /reports/2002 is exactly the id-shaped path classify() would otherwise
+    # parameterise to /reports/{victim_id} for a swap_object_id mutation —
+    # verbatim mode must keep the literal id since nothing resolves it back.
+    assert all(t.request.path == "/reports/2002" for t in tests)
+    assert all(t.attack_mutation.kind == "verbatim_replay" for t in tests)
+
+
+def test_ticket_poc_mode_with_no_embedded_poc_is_reported_not_silently_skipped():
+    repo, _ = _setup()
+    orch = Orchestrator(repo, MockJiraMCPClient())
+
+    aid, review, poc_found = asyncio.run(orch.import_and_run_poc_plan("CRM-1234"))
+    assert poc_found is False
+    assert review is None
+    assert not orch_tests(repo, aid)
+
+    actions = {a.action for a in repo.get_audit(aid)}
+    assert "ticket_poc_missing" in actions
+    assert "design_tests" not in actions

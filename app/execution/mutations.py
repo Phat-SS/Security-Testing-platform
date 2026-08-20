@@ -189,6 +189,33 @@ def _mutate_bearer(req: _Req, transform) -> str:
     return name
 
 
+# --- verbatim replay ---------------------------------------------------------
+# Not an attack transformation — the opposite case the module docstring warns
+# about, deliberately. Every other mutation exists to change something and
+# raises if it cannot; this one exists to change *nothing*, for a PoC that is
+# already a complete, working exploit (a ticket's embedded script) rather than
+# a captured "normal" request waiting to be turned into one. Injecting a
+# generic mass-assignment/BOLA mutation on top of an exploit a researcher
+# already hand-crafted (specific ids, specific body, specific missing header)
+# would send different bytes than the ones they proved worked. Used only by
+# `to_test_cases(..., verbatim=True)` (ticket_poc mode) — never proposed by the
+# AI planner or picked by `classify()` for any other import path.
+
+
+def _verbatim_replay(req: _Req, m: Mutation, env: _Env) -> None:
+    # `req.headers` already carries the attacker persona's own auth_headers
+    # merged in as a default (apply_mutation sets that up before any handler
+    # runs) — exactly the thing a PoC proving "no credential needed" must NOT
+    # gain. `detail["headers"]` is the PoC's own extracted headers, stashed
+    # there by to_test_cases(verbatim=True) for exactly this reason; force
+    # back to precisely that set, discarding whatever the persona would
+    # otherwise have contributed.
+    headers = m.detail.get("headers")
+    if headers is not None:
+        req.headers = dict(headers)
+    req.note = "replayed verbatim — no mutation applied, sent exactly as extracted"
+
+
 # --- API1: object-level authorization ---------------------------------------
 
 
@@ -436,6 +463,30 @@ def _rate_probe(req: _Req, m: Mutation, env: _Env) -> None:
     req.note = f"sent the same request {req.repeat}x in sequence to probe for rate limiting"
 
 
+def _graphql_batching_abuse(req: _Req, m: Mutation, env: _Env) -> None:
+    """Batch one GraphQL operation N times into a single HTTP request.
+
+    GraphQL's own array-batching (supported by Apollo Server, graphql-http
+    and most reference implementations) lets one HTTP call carry many
+    operations. A rate limiter or resource cap written in terms of requests
+    per second never sees the difference between 1 operation and N batched
+    into one request — the resource cost this actually asks the server to
+    do scales with N, but `rate_probe`'s repeat-the-HTTP-request approach
+    cannot exercise this path at all, which is why it is a distinct kind
+    rather than a `rate_probe` variant. Capped the same as every other
+    multi-request-shaped probe in this registry, even though it is
+    mechanically a single HTTP request.
+    """
+    count = _capped_int(m.detail, "count", 20, _MAX_REPEAT)
+    query = str(m.detail.get("query", "{ __typename }"))
+    req.method = str(m.detail.get("method", "POST")).upper()
+    req.body = [{"query": query} for _ in range(count)]
+    req.note = (
+        f"batched {count} GraphQL operations into one HTTP request to test whether "
+        "rate/cost limiting accounts for batching, not just request count"
+    )
+
+
 # --- API5: function level authorization --------------------------------------
 
 
@@ -445,8 +496,15 @@ def _escalate_persona(req: _Req, m: Mutation, env: _Env) -> None:
     Also strips client-supplied scoping headers the server may be trusting: if
     authorization is decided by a header the client controls, removing or
     keeping it changes the answer, and either way the control is not server-side.
+
+    The default list is generic guesses. A real target's scoping header
+    (e.g. "entity-context") is rarely one of them, so it is unioned with
+    whatever the attacker persona declares in `scoping_headers` — configured
+    once on the persona rather than repeated in every test case's
+    `detail["strip_headers"]`.
     """
-    strip = m.detail.get("strip_headers", ["X-Role", "X-Scope", "X-Tenant-Id", "X-Is-Admin"])
+    strip = list(m.detail.get("strip_headers", ["X-Role", "X-Scope", "X-Tenant-Id", "X-Is-Admin"]))
+    strip += env.attacker.scoping_headers
     lowered = {str(h).lower() for h in strip}
     removed = [k for k in req.headers if k.lower() in lowered]
     for k in removed:
@@ -564,7 +622,54 @@ def _security_headers_probe(req: _Req, m: Mutation, env: _Env) -> None:
     req.note = "sent an unmodified authenticated request to inspect response hardening headers"
 
 
+def _host_header_injection(req: _Req, m: Mutation, env: _Env) -> None:
+    """Send an attacker-controlled Host / X-Forwarded-Host.
+
+    A framework that builds an absolute URL — a password-reset link, a
+    redirect, a cache key — from whichever of these the client supplied,
+    rather than from a server-configured origin, lets an attacker plant a
+    phishing link inside an otherwise legitimate email or poison a shared
+    cache entry. The assertion lives entirely in the response body/headers
+    (does a reset link or Location echo the injected host back?), so nothing
+    here touches where the request actually connects: TCP still goes to the
+    scope-validated, DNS-pinned address: this only changes what the header
+    claims, the same way `escalate_persona` changes a claimed role without
+    changing who is asking.
+    """
+    evil_host = str(m.detail.get("host", "evil.attacker.example"))
+    headers = m.detail.get("headers") or ["Host", "X-Forwarded-Host"]
+    for header in headers:
+        req.headers[str(header)] = evil_host
+    req.note = (
+        f"set {', '.join(headers)} to '{evil_host}' to probe whether an absolute URL in "
+        "the response (reset link, redirect, cache key) trusts a client-supplied host"
+    )
+
+
 # --- API9: inventory management ----------------------------------------------
+
+_GRAPHQL_INTROSPECTION_QUERY = (
+    "query IntrospectionProbe { __schema { queryType { name } "
+    "mutationType { name } types { name kind } } }"
+)
+
+
+def _graphql_introspection_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    """Ask a GraphQL endpoint to describe its own schema.
+
+    Introspection ships ON by default in most GraphQL frameworks. Left
+    enabled in production it hands an attacker the full, authoritative map of
+    every query, mutation and type the API exposes — self-reported by the
+    target rather than reconstructed from documentation or guesswork, which
+    is precisely the "attack surface the operator does not know is exposed"
+    failure API9 (Improper Inventory Management) names. The request replaces
+    the body outright, the same way `undocumented_path_probe` replaces the
+    path: the point is this exact query, not a mutation of whatever the
+    ticket's endpoint normally sends.
+    """
+    req.method = str(m.detail.get("method", "POST")).upper()
+    req.body = {"query": str(m.detail.get("query", _GRAPHQL_INTROSPECTION_QUERY))}
+    req.note = "sent a GraphQL introspection query to check whether schema disclosure is enabled"
 
 
 _VERSION_RE = re.compile(r"/v(\d+)(?=/|$)", re.IGNORECASE)
@@ -628,6 +733,28 @@ def _unsafe_redirect_url(req: _Req, m: Mutation, env: _Env) -> None:
     )
 
 
+def _oauth_redirect_uri_bypass(req: _Req, m: Mutation, env: _Env) -> None:
+    """Replace an OAuth/OIDC `redirect_uri` with an unregistered destination.
+
+    Distinct from `unsafe_redirect_url`: that mutation tests a server-side
+    fetch following an attacker URL (SSRF-shaped — the API's own backend is
+    the one making the request). This tests the authorization endpoint's
+    validation of where it redirects the USER's browser after login — if it
+    accepts any `redirect_uri` rather than one from a registered allowlist,
+    the authorization code or token in that redirect goes straight to
+    whatever host the attacker named, the open-redirect-via-OAuth-flow
+    variant of unsafe consumption.
+    """
+    field_name = m.detail.get("field", "redirect_uri")
+    payload = str(m.detail.get("value", "https://evil.attacker.example/callback"))
+    _place_url_payload(req, field_name, payload)
+    req.note = (
+        f"set OAuth parameter '{field_name}' to an unregistered redirect target "
+        f"({payload}) to test whether the authorization endpoint validates it "
+        "against a registered allowlist before redirecting the user's browser"
+    )
+
+
 # --- registry ----------------------------------------------------------------
 
 _A = OwaspApiCategory
@@ -640,6 +767,10 @@ def _register(spec: MutationSpec, handler) -> None:
 
 
 for _spec, _handler in [
+    # Verbatim replay — not tied to one OWASP category (the TestCase's own
+    # owasp_category always comes from classify(), not from here); filed
+    # under API1 only so the registry entry has somewhere to live.
+    (MutationSpec("verbatim_replay", _A.API1, "Send the request exactly as extracted from a PoC — no attack transformation, for replaying an already-complete exploit"), _verbatim_replay),
     # API1
     (MutationSpec("swap_object_id", _A.API1, "Use another identity's object id in the path", needs_target_persona=True), _swap_object_id),
     (MutationSpec("swap_id_in_query", _A.API1, "Move the victim's object id into a query parameter", needs_target_persona=True), _swap_id_in_query),
@@ -664,6 +795,7 @@ for _spec, _handler in [
     (MutationSpec("pagination_abuse", _A.API4, "Request an unbounded page size"), _pagination_abuse),
     (MutationSpec("json_depth_bomb", _A.API4, "Send deeply nested JSON to probe parser cost"), _json_depth_bomb),
     (MutationSpec("rate_probe", _A.API4, "Repeat the request to detect missing rate limiting", multi_request=True), _rate_probe),
+    (MutationSpec("graphql_batching_abuse", _A.API4, "Batch N GraphQL operations into one HTTP request to bypass per-request rate limiting"), _graphql_batching_abuse),
     # API5
     (MutationSpec("escalate_persona", _A.API5, "Invoke a privileged function as a low-privileged identity"), _escalate_persona),
     (MutationSpec("method_override", _A.API5, "Smuggle a privileged verb via an override header"), _method_override),
@@ -678,11 +810,14 @@ for _spec, _handler in [
     (MutationSpec("cors_probe", _A.API8, "Test whether the CORS policy reflects arbitrary origins"), _cors_probe),
     (MutationSpec("debug_probe", _A.API8, "Request verbose/debug output"), _debug_probe),
     (MutationSpec("security_headers_probe", _A.API8, "Inspect response hardening headers"), _security_headers_probe),
+    (MutationSpec("host_header_injection", _A.API8, "Test whether an absolute URL in the response trusts a client-supplied Host"), _host_header_injection),
     # API9
     (MutationSpec("version_downgrade", _A.API9, "Re-aim at a superseded API version"), _version_downgrade),
     (MutationSpec("undocumented_path_probe", _A.API9, "Probe for spec dumps / actuators / admin surfaces"), _undocumented_path_probe),
+    (MutationSpec("graphql_introspection_probe", _A.API9, "Check whether GraphQL schema introspection is exposed"), _graphql_introspection_probe),
     # API10
     (MutationSpec("unsafe_redirect_url", _A.API10, "Test validation of third-party responses and redirects"), _unsafe_redirect_url),
+    (MutationSpec("oauth_redirect_uri_bypass", _A.API10, "Test whether the OAuth authorization endpoint validates redirect_uri"), _oauth_redirect_uri_bypass),
 ]:
     _register(_spec, _handler)
 

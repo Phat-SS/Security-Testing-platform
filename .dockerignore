@@ -1,0 +1,14 @@
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+node_modules/
+*.db
+reports/*.html
+evidence/*
+config/engagement.json
+config/users.json
+.env
+.env.bak*
+docker/allowlist

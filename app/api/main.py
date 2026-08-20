@@ -9,10 +9,14 @@ Run:  uvicorn app.api.main:app --reload
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
+import logging
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -31,7 +35,9 @@ from app.analysis.claude_analyzer import ClaudeAnalyzer
 from app.api import views
 from app.core.auth import AuthManager, User
 from app.core.config import settings_with_overrides
-from app.core import preflight
+from app.core import i18n, preflight
+from app.core.i18n import normalize_lang
+from app.core.logging_config import configure_error_tracking, configure_logging
 from app.core.engagement import (
     allow_host,
     delete_environment,
@@ -54,8 +60,11 @@ from app.mcp import (
 )
 from app.mcp.jira import parse_issue_ref
 from app.orchestrator import Orchestrator
-from app.schemas.analysis import Endpoint, IssueAnalysis
+from app.schemas.analysis import Endpoint
 from app.schemas.testcase import RequestSpec
+
+logger = logging.getLogger(__name__)
+
 
 class State:
     def __init__(self) -> None:
@@ -79,8 +88,8 @@ class State:
             designer=TestDesigner(self.engagement.attacker, self.engagement.victim),
             # The planner validates proposed persona names against the vault, so
             # it can only be built once the engagement is loaded. Returns None
-            # unless USE_AI + a key are configured, in which case the platform
-            # behaves exactly as it did before.
+            # unless USE_AI is set and the claude CLI is available, in which
+            # case the platform behaves exactly as it did before.
             planner=planner,
         )
 
@@ -104,6 +113,8 @@ state: State | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
+    configure_error_tracking()
     global state
     state = State()
     try:
@@ -122,6 +133,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI-assisted API Security Testing Platform", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception) -> Response:
+    """FastAPI's own default for an unhandled exception is an opaque 500 with
+    the traceback going wherever uvicorn's logger happens to be pointed —
+    unredacted, unstructured, and easy to lose in production. This puts it
+    through the same configured (and redacting — see logging_config.py)
+    logger as everything else, then re-raises so Starlette's own
+    ServerErrorMiddleware still produces the standard response; this handler
+    only adds visibility, it does not change what the client receives.
+    """
+    logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+    raise exc
 
 
 # -- CSRF guard --------------------------------------------------------------
@@ -165,6 +190,29 @@ async def csrf_guard(request: Request, call_next):
             status_code=403,
         )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def lang_middleware(request: Request, call_next):
+    """Resolve the page language once per request, from `?lang=` if the
+    toggle was just clicked (see ui.LANG_TOGGLE_HTML), else the `lang` cookie,
+    else English. views.py/views_assessment.py read it back via
+    `app.core.i18n.get_lang()` rather than taking it as a parameter — see the
+    ContextVar's docstring in i18n.py for why.
+
+    A `?lang=` on the request is also the one signal that the user just chose
+    a language, which is the only time this needs to (re-)set the cookie —
+    every other request just carries the existing cookie forward unchanged.
+    """
+    query_lang = request.query_params.get("lang")
+    lang = normalize_lang(query_lang or request.cookies.get(i18n.COOKIE_NAME))
+    i18n.set_lang(lang)
+    response = await call_next(request)
+    if query_lang:
+        response.set_cookie(
+            i18n.COOKIE_NAME, lang, samesite="lax", max_age=365 * 24 * 3600,
+        )
+    return response
 
 
 # -- auth dependency --------------------------------------------------------
@@ -390,6 +438,11 @@ def _render_config(tab: str = "readiness", flash: str = "", error: str = "") -> 
         engagement_path=state.engagement_path,
         limits=settings_with_overrides(eng.runner).limits,
         runtime=preflight.runtime_facts(),
+        jira_mode=describe_jira_client(state.jira),
+        jira_live=not isinstance(state.jira, MockJiraMCPClient),
+        jira_warning=state.jira_warning,
+        jira_env=preflight.jira_env_facts(),
+        jira_keys=available_issue_keys(state.jira),
         tab=tab,
         flash=flash,
         error=error,
@@ -523,6 +576,7 @@ async def save_persona_route(
     auth_headers: str = Form(""),
     owns: str = Form(""),
     secret_markers: str = Form(""),
+    scoping_headers: str = Form(""),
     user: User = Depends(require("tester")),
 ):
     name = name.strip()
@@ -541,6 +595,7 @@ async def save_persona_route(
         role=role.strip() or "user",
         owns=_parse_kv_lines(owns, "="),
         secret_markers=_lines(secret_markers),
+        scoping_headers=_lines(scoping_headers),
     )
     state.reload_engagement()
     return _config_redirect("personas", f"Saved persona {name}")
@@ -567,7 +622,6 @@ async def save_identities_route(
 async def save_runner_route(
     timeout_s: str = Form(""),
     max_response_bytes: str = Form(""),
-    max_redirects: str = Form(""),
     max_requests_per_test: str = Form(""),
     reset: str = Form(""),
     user: User = Depends(require("tester")),
@@ -579,7 +633,6 @@ async def save_runner_route(
     submitted = {
         "timeout_s": timeout_s,
         "max_response_bytes": max_response_bytes,
-        "max_redirects": max_redirects,
         "max_requests_per_test": max_requests_per_test,
     }
     limits: dict[str, float] = {}
@@ -599,25 +652,126 @@ async def save_runner_route(
     return _config_redirect("runner", "Runner limits saved")
 
 
+async def _reconnect_jira() -> RedirectResponse:
+    # Re-read .env first: a running process's os.environ is fixed at spawn
+    # time, so a token refreshed on disk (npm run jira:token, or the
+    # refresh-token route below) is otherwise invisible until a full restart.
+    # This is the one thing a restart would have done that a plain
+    # build_jira_client() call here would not.
+    preflight.reload_dotenv()
+    new_client = build_jira_client()
+    try:
+        await new_client.connect()
+    except Exception as exc:
+        if isinstance(new_client, MockJiraMCPClient):
+            raise
+        state.jira_warning = f"Live Jira MCP unavailable ({type(exc).__name__}: {exc}) — using the offline mock."
+        fallback = MockJiraMCPClient()
+        await fallback.connect()
+        state._rebind_jira(fallback)
+        return RedirectResponse(
+            f"/config?tab=mcp&error={quote(state.jira_warning, safe='')}", status_code=303
+        )
+    state.jira_warning = ""
+    state._rebind_jira(new_client)
+    return _config_redirect("mcp", f"Reconnected — {describe_jira_client(new_client)}")
+
+
+@app.post("/config/mcp/jira/reconnect")
+async def mcp_jira_reconnect_route(user: User = Depends(require("tester"))):
+    return await _reconnect_jira()
+
+
+@app.post("/config/mcp/jira/refresh-token")
+async def mcp_jira_refresh_token_route(user: User = Depends(require("tester"))):
+    """Package the manual refresh dance (npx mcp-remote -> npm run jira:token ->
+    Reconnect) into one click: open the Atlassian OAuth login in the user's
+    browser, wait for the token it writes, save it, then reconnect.
+
+    Only works where this process itself runs with Node.js and a browser
+    available — the same requirement the manual flow already has. Degrades to
+    a clear `error=` redirect rather than hanging or 500ing when npx is
+    missing, the login times out, or the token file is unusable.
+    """
+    mcp_url = os.getenv("JIRA_MCP_URL", "").strip() or "https://mcp.atlassian.com/v1/mcp"
+    npx = shutil.which("npx")
+    if not npx:
+        return RedirectResponse(
+            "/config?tab=mcp&error=" + quote(
+                "npx not found on PATH — install Node.js, or refresh the token "
+                "manually (see below).", safe=""),
+            status_code=303,
+        )
+
+    started_at = time.time()
+    mcp_auth_dir = Path.home() / ".mcp-auth"
+    try:
+        # shell=True is deliberate here, not a shortcut: Windows cannot exec a
+        # .cmd shim (npx) via CreateProcess without going through the shell,
+        # and both interpolated values are the operator's own server-side
+        # config (JIRA_MCP_URL from .env, npx resolved from PATH) — never
+        # request-supplied — so there is nothing here for a caller to inject.
+        proc = subprocess.Popen(
+            f'"{npx}" -y mcp-remote "{mcp_url}"',
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return RedirectResponse(
+            "/config?tab=mcp&error=" + quote(f"Could not start mcp-remote: {exc}", safe=""),
+            status_code=303,
+        )
+
+    token_path = None
+    try:
+        while time.time() < started_at + 90:
+            token_path = preflight.newest_mcp_auth_token(mcp_auth_dir, newer_than=started_at)
+            if token_path:
+                break
+            await asyncio.sleep(1.5)
+    finally:
+        proc.terminate()  # its job (writing the token file) is done either way
+
+    if not token_path:
+        return RedirectResponse(
+            "/config?tab=mcp&error=" + quote(
+                "Timed out waiting for the Atlassian login in your browser — try "
+                "again and finish it there within 90s.", safe=""),
+            status_code=303,
+        )
+
+    token = json.loads(token_path.read_text(encoding="utf-8")).get("access_token", "")
+    if not token:
+        return RedirectResponse(
+            "/config?tab=mcp&error=" + quote(f"{token_path} had no access_token", safe=""),
+            status_code=303,
+        )
+    preflight.write_dotenv_value("JIRA_MCP_URL", mcp_url)
+    preflight.write_dotenv_value("JIRA_MCP_TOKEN", token)
+    return await _reconnect_jira()
+
+
 @app.post("/import")
-async def import_issue(issue_key: str = Form(...), plan: str = Form("false"),
-                       depth: str = Form("standard"),
+async def import_issue(issue_key: str = Form(...), mode: str = Form(""),
+                       plan: str = Form("false"), depth: str = Form("standard"),
                        user: User = Depends(require("tester"))):
-    """Import a ticket and, when asked, come back with a plan to approve.
+    """Import a ticket and, depending on `mode`, come back with a plan to approve.
 
-    The default is "false" and the browser form ships the box checked, which is
-    not a contradiction: an unchecked HTML checkbox sends *nothing*, so a default
-    of "true" would make unchecking the box do exactly what checking it does. It
-    also keeps every existing scripted `POST /import` behaving as it always has —
-    analyze only.
+    `mode` is one of:
+    - "analyze" (default, and what an empty/missing `mode` falls back to): analyze
+      only. What you want when the endpoint list needs correcting before any plan
+      is worth generating.
+    - "auto_plan": the planning agent runs — analyze the ticket and its embedded
+      PoC, design, let the AI planner add depth, have the reviewing agent audit
+      the result against the ticket's requirements, feed its gaps back for a
+      revision round, and land the tester on step 4 with something to read.
+    - "ticket_poc": run exactly the PoC embedded in the ticket as the test plan —
+      no invented attacks. The plan reviewer still runs once (read-only); the
+      result adjudicator still runs at the assess step. If the ticket has no
+      embedded PoC, redirects with a flash telling the tester to use auto_plan or
+      paste one by hand instead.
 
-    `plan=true` runs the planning agent: analyze the ticket
-    and its embedded PoC, design, let the AI planner add depth, have the
-    reviewing agent audit the result against the ticket's requirements, feed its
-    gaps back for a revision round, and land the tester on step 4 with something
-    to read. Unchecking it keeps the old behaviour — analyze only — which is what
-    you want when the endpoint list needs correcting before any plan is worth
-    generating.
+    `plan=true` with no `mode` is kept working exactly as before (maps to
+    "auto_plan") so any existing scripted `POST /import` behaves as it always has.
 
     Nothing about the approval gate moves: every test this produces is PENDING.
     """
@@ -626,7 +780,16 @@ async def import_issue(issue_key: str = Form(...), plan: str = Form("false"),
         # accepts a pasted browse URL. Passing unparseable text straight through
         # used to surface as a confusing "issue does not exist".
         _, key = parse_issue_ref(issue_key)
-        if plan == "true":
+        effective_mode = mode or ("auto_plan" if plan == "true" else "analyze")
+        if effective_mode == "ticket_poc":
+            aid, _review, poc_found = await state.orch.import_and_run_poc_plan(key)
+            if not poc_found:
+                flash = ("No PoC script found in this ticket description — "
+                         "use Auto-plan or paste one manually in Design.")
+                return RedirectResponse(
+                    f"/assessment/{aid}?flash={quote(flash, safe='')}", status_code=303
+                )
+        elif effective_mode == "auto_plan":
             aid, _review = await state.orch.import_and_plan(key, depth=depth or "standard")
         else:
             aid = await state.orch.import_and_analyze(key)
@@ -736,6 +899,7 @@ def _first_error(exc: Exception) -> str:
 async def save_endpoint(aid: str, method: str = Form("GET"), path: str = Form(""),
                         replaces: str = Form(""),
                         auth_required: bool = Form(False),
+                        expected_public: bool = Form(False),
                         object_id_params: str = Form(""),
                         writes_properties: bool = Form(False),
                         url_fields: str = Form(""),
@@ -747,6 +911,7 @@ async def save_endpoint(aid: str, method: str = Form("GET"), path: str = Form(""
             method=(method or "GET").strip().upper(),
             path=(path or "").strip(),
             auth_required=auth_required,
+            expected_public=expected_public,
             object_id_params=_csv(object_id_params),
             writes_properties=writes_properties,
             url_fields=_csv(url_fields),
@@ -1120,6 +1285,32 @@ def _strip_tags(markup: str) -> str:
     return re.sub(r"<[^>]+>", "", markup)
 
 
+# -- copying one execution as a curl command ----------------------------------
+#
+# Deliberately live, never baked into the static report: the report's stored
+# request is redacted (see redaction.py), so a curl command that actually
+# authenticates has to have the persona's real credential resolved from the
+# vault at the moment someone clicks Copy — same trust boundary as re-run
+# (requires this endpoint, i.e. the running platform, not a saved copy of the
+# report). execution_id travels in the form body for the same reason it does
+# on rerun: it contains "#", a URL fragment delimiter.
+
+
+@app.post("/assessment/{aid}/execution/curl")
+async def execution_curl(aid: str, execution_id: str = Form(...),
+                         user: User = Depends(require("tester"))):
+    assessment = state.repo.get_assessment(aid)
+    if not assessment:
+        return JSONResponse({"ok": False, "error": "Assessment not found."}, status_code=404)
+
+    try:
+        curl = state.orch.build_curl(aid, execution_id, state.engagement.vault, actor=user.name)
+    except Orchestrator.RerunRefused as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+
+    return JSONResponse({"ok": True, "curl": curl})
+
+
 
 # -- re-running --------------------------------------------------------------
 #
@@ -1201,12 +1392,15 @@ def _rerun_landing(new_id: str, message: str) -> RedirectResponse:
 
 @app.get("/assessment/{aid}/report", response_class=HTMLResponse)
 async def report(aid: str) -> str:
-    return state.orch.build_report_html(aid)
+    return state.orch.build_report_html(aid, lang=i18n.get_lang())
 
 
 @app.get("/assessment/{aid}/export.html")
 async def export_html(aid: str):
-    return Response(state.orch.build_report_html(aid), media_type="text/html",
+    # Exported/downloaded copy: freeze it in whichever language the operator
+    # was viewing, same as the live report at the moment they clicked export.
+    html = state.orch.build_report_html(aid, lang=i18n.get_lang())
+    return Response(html, media_type="text/html",
                     headers={"Content-Disposition": f"attachment; filename={aid}.html"})
 
 

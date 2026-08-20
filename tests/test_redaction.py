@@ -33,6 +33,22 @@ def test_client_secret_masked():
     assert "grant_type" in out
 
 
+def test_aws_imds_credential_fields_masked_in_json():
+    # A whole-key-only match (the old _KV_PATTERN) missed these entirely:
+    # "AccessKeyId"/"SecretAccessKey" are the exact field names an SSRF probe
+    # against a cloud metadata endpoint (ssrf_url) would come back with.
+    out = redact_text(
+        '{"Code": "Success", "AccessKeyId": "ASIAABCDEF1234567890", '
+        '"SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCY", '
+        '"Token": "IQoJb3JpZ2luX2VjEA", "Expiration": "2026-01-01T00:00:00Z"}'
+    )
+    assert "ASIAABCDEF1234567890" not in out
+    assert "wJalrXUtnFEMI" not in out
+    assert "IQoJb3JpZ2luX2VjEA" not in out
+    assert "Success" in out
+    assert "2026-01-01" in out
+
+
 def test_redact_any_nested():
     data = {"api_key": "K123", "nested": {"token": "T456", "safe": "ok"}}
     out = redact_any(data)

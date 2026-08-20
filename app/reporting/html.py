@@ -10,6 +10,7 @@ import html
 import json
 from collections import Counter
 
+from app.core.i18n import DEFAULT_LANG, VI, t
 from app.execution.mutations import MUTATION_KINDS
 from app.schemas.execution import Execution
 from app.schemas.finding import Finding
@@ -37,7 +38,7 @@ def _e(v) -> str:
     return html.escape(str(v))
 
 
-def _evidence_chain_banner(chain_ok: bool | None) -> str:
+def _evidence_chain_banner(chain_ok: bool | None, lang: str) -> str:
     if chain_ok is None:
         # Caller didn't check (e.g. a report built without going through
         # Orchestrator.build_report_html). Absence of a check is not the
@@ -46,17 +47,20 @@ def _evidence_chain_banner(chain_ok: bool | None) -> str:
     if chain_ok:
         return (
             '<p style="margin:0 0 18px"><span style="color:#2f855a;font-weight:600">'
-            "&#10003; Evidence chain verified</span> — every execution's SHA-256 hash "
-            "recomputes and links to the previous one; nothing below has been edited "
-            "since it was recorded.</p>"
+            f'&#10003; {t("Evidence chain verified", lang)}</span> — '
+            + t("every execution's SHA-256 hash recomputes and links to the previous "
+                "one; nothing below has been edited since it was recorded.", lang)
+            + "</p>"
         )
     return (
         '<p style="margin:0 0 18px;padding:10px 14px;border:1px solid #b4232a;'
         'border-radius:8px;background:rgba(180,35,42,.08)"><span style="color:#b4232a;'
-        'font-weight:700">&#9888; Evidence chain FAILED verification</span> — at least '
-        "one execution record's hash no longer matches its content, or the chain link to "
-        "the previous record is broken. This report's evidence may have been altered "
-        "after it was recorded; treat it as non-authoritative until investigated.</p>"
+        f'font-weight:700">&#9888; {t("Evidence chain FAILED verification", lang)}</span> — '
+        + t("at least one execution record's hash no longer matches its content, or the "
+            "chain link to the previous record is broken. This report's evidence may have "
+            "been altered after it was recorded; treat it as non-authoritative until "
+            "investigated.", lang)
+        + "</p>"
     )
 
 
@@ -72,6 +76,7 @@ def render_report(
     evidence_chain_ok: bool | None = None,
     plan_review=None,
     run_assessment=None,
+    lang: str = DEFAULT_LANG,
 ) -> str:
     """The full document. This is where the *explanation* lives.
 
@@ -80,30 +85,36 @@ def render_report(
     and response it refers to. `plan_review` and `run_assessment` are the two
     reviewing agents' output and are both optional — a report of a run nobody
     asked an agent about simply omits those sections.
+
+    `lang`: "en" or "vi". Chosen per-request (see the language toggle in the
+    report itself, `_lang_switch`) and threaded through every section — this
+    function never touches a cookie or request object itself, so it stays
+    callable from the CLI/demo scripts with no web context at all.
     """
     result_counts = Counter(e.verdict.result.value for e in executions)
     sev_counts = Counter(f.severity.value for f in findings)
-    coverage_html = _coverage_section(coverage_rows) if coverage_rows else ""
-    assessment_html = _run_assessment_section(run_assessment)
-    review_html = _plan_review_section(plan_review)
+    coverage_html = _coverage_section(coverage_rows, lang) if coverage_rows else ""
+    assessment_html = _run_assessment_section(run_assessment, lang)
+    review_html = _plan_review_section(plan_review, lang)
     adjudications = ({a.execution_id: a for a in run_assessment.adjudications}
                      if run_assessment is not None else {})
-    jira_bar = _jira_bar(assessment_id, issue_key) if assessment_id and issue_key else ""
-    chain_banner = _evidence_chain_banner(evidence_chain_ok) if executions else ""
+    jira_bar = _jira_bar(assessment_id, issue_key, lang) if assessment_id and issue_key else ""
+    chain_banner = _evidence_chain_banner(evidence_chain_ok, lang) if executions else ""
+    lang_switch = _lang_switch(lang)
 
     summary_cells = "".join(
         f'<div class="stat"><div class="num">{result_counts.get(k, 0)}</div>'
-        f'<div class="lbl">{k}</div></div>'
+        f'<div class="lbl">{t(k, lang)}</div></div>'
         for k in ["PASS", "FAIL", "INCONCLUSIVE", "BLOCKED", "ERROR"]
     )
     sev_cells = "".join(
-        f'<span class="pill" style="background:{_SEV_COLOR[k]}">{k}: '
+        f'<span class="pill" style="background:{_SEV_COLOR[k]}">{t(k, lang)}: '
         f'{sev_counts.get(k, 0)}</span>'
         for k in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     )
 
-    findings_html = "\n".join(_finding_block(f) for f in findings) or (
-        '<p class="ok">No confirmed findings.</p>'
+    findings_html = "\n".join(_finding_block(f, lang) for f in findings) or (
+        f'<p class="ok">{t("No confirmed findings.", lang)}</p>'
     )
 
     # The re-run control only exists when the report knows which assessment it
@@ -111,26 +122,31 @@ def render_report(
     # or a demo script has no server to post back to, and a button that silently
     # 404s is worse than no button at all.
     rerun_enabled = bool(assessment_id and issue_key)
+    # Copying a curl command needs only the assessment (it posts to
+    # /assessment/{aid}/execution/curl), not the issue key rerun also needs.
+    curl_enabled = bool(assessment_id)
+    colspan = 8 if rerun_enabled else 7
     # Executions accumulate, so a test can appear more than once. Only the most
     # recent attempt is re-runnable: an older row is history, and offering to
     # re-run it would send the same request a newer row has already answered.
     latest = {ex.test_id: i for i, ex in enumerate(executions)}
     exec_rows = "\n".join(
-        _exec_row(tests.get(e.test_id), e, i, rerun_enabled,
+        _exec_row(tests.get(e.test_id), e, i, rerun_enabled, curl_enabled, colspan, lang,
                   superseded_by=(None if latest[e.test_id] == i
                                  else executions[latest[e.test_id]]),
                   adjudication=adjudications.get(e.execution_id))
         for i, e in enumerate(executions)
     )
-    rerun_head = "<th>Re-run</th>" if rerun_enabled else ""
-    rerun_js = _rerun_js(assessment_id, issue_key) if rerun_enabled else ""
+    rerun_head = f"<th>{t('Re-run', lang)}</th>" if rerun_enabled else ""
+    rerun_js = _rerun_js(assessment_id, issue_key, lang) if rerun_enabled else ""
+    exchange_js = _exchange_js(assessment_id if curl_enabled else None, lang)
     rerun_note = (
-        _RERUN_NOTE if rerun_enabled and
+        _rerun_note(lang) if rerun_enabled and
         any(e.verdict.result.value == "INCONCLUSIVE" for e in executions) else ""
     )
 
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="{lang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_e(title)}</title>
 <style>
@@ -142,10 +158,15 @@ def render_report(
   * {{ box-sizing:border-box; }}
   body {{ font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;
           margin:0; background:var(--bg); color:var(--fg); }}
-  .wrap {{ max-width:960px; margin:0 auto; padding:28px 20px 80px; }}
+  .wrap {{ max-width:1600px; margin:0 auto; padding:28px 20px 80px; }}
   h1 {{ font-size:24px; margin:0 0 4px; }} h2 {{ font-size:19px; margin:32px 0 12px;
         border-bottom:1px solid var(--border); padding-bottom:6px; }}
+  .titlebar {{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }}
   .sub {{ color:var(--muted); margin:0 0 20px; }}
+  .langswitch {{ font-size:12.5px; color:var(--muted); white-space:nowrap; margin-top:4px; }}
+  .langswitch a {{ color:var(--muted); text-decoration:none; padding:2px 6px; border-radius:5px; }}
+  .langswitch a.active {{ color:#fff; background:#0d6e6e; font-weight:600; }}
+  .langswitch a:not(.active):hover {{ background:var(--card); }}
   .stats {{ display:flex; gap:10px; flex-wrap:wrap; }}
   .stat {{ background:var(--card); border:1px solid var(--border); border-radius:10px;
            padding:12px 18px; min-width:96px; text-align:center; }}
@@ -179,6 +200,29 @@ def render_report(
   .respbody {{ max-height:180px; overflow:auto; background:var(--code); padding:8px 10px;
                border-radius:6px; margin:2px 0 8px; white-space:pre-wrap; word-break:break-word;
                font-size:12px; }}
+  /* The exchange itself (request/response for the attack row) gets its own,
+     much roomier presentation: a full-width panel under the row instead of a
+     collapsible sliver squeezed into one table cell next to five others. */
+  .exchange-toggle {{ background:var(--card); color:inherit; border:1px solid var(--border);
+                       border-radius:7px; padding:5px 11px; font:inherit; font-size:12.5px;
+                       font-weight:600; cursor:pointer; white-space:nowrap; }}
+  .exchange-toggle:hover {{ border-color:#0d6e6e; color:#0d6e6e; }}
+  tr.exchange-row td {{ padding:0; border-bottom:1px solid var(--border); }}
+  .exchange-panes {{ display:grid; grid-template-columns:1fr 1fr; }}
+  @media (max-width:900px) {{ .exchange-panes {{ grid-template-columns:1fr; }} }}
+  .exchange-pane {{ padding:16px 20px; border-right:1px solid var(--border); min-width:0; }}
+  .exchange-pane:last-child {{ border-right:none; }}
+  .exchange-pane h4 {{ margin:0 0 10px; font-size:12.5px; text-transform:uppercase;
+                       letter-spacing:.04em; color:var(--muted); font-weight:700;
+                       display:flex; justify-content:space-between; align-items:center; gap:10px; }}
+  .exbody {{ max-height:55vh; overflow:auto; background:var(--code); padding:10px 12px;
+             border-radius:8px; margin:2px 0 14px; white-space:pre-wrap; word-break:break-word;
+             font-size:13px; line-height:1.55; }}
+  .curlbtn {{ background:#0d6e6e; color:#fff; border:0; border-radius:7px; padding:6px 13px;
+              font:inherit; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }}
+  .curlbtn:hover {{ opacity:.88; }} .curlbtn:disabled {{ opacity:.6; cursor:default; }}
+  .curlnote {{ font-size:12px; color:var(--muted); min-height:1.4em; margin:0 0 8px; }}
+  .curlnote.err {{ color:#b4232a; }}
   td.rerun {{ white-space:nowrap; vertical-align:top; }}
   .rerunbtn {{ background:var(--card); color:inherit; border:1px solid var(--border);
                border-radius:7px; padding:5px 11px; font:inherit; font-size:12.5px;
@@ -200,31 +244,48 @@ def render_report(
   @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
   @media (prefers-reduced-motion:reduce) {{ .spin {{ animation:none; }} }}
 </style></head><body><div class="wrap">
-<h1>{_e(title)}</h1>
-<p class="sub">Target: <code>{_e(target)}</code> · Baseline: OWASP API Security Top 10 (2023)</p>
+<div class="titlebar">
+<div><h1>{_e(title)}</h1>
+<p class="sub">{t("Target", lang)}: <code>{_e(target)}</code> &middot; {t("Baseline", lang)}: OWASP API Security Top 10 (2023)</p></div>
+{lang_switch}
+</div>
 {jira_bar}
 {chain_banner}
-<h2>Executive Summary</h2>
+<h2>{t("Executive Summary", lang)}</h2>
 <div class="stats">{summary_cells}</div>
 <div class="pills">{sev_cells}</div>
 {assessment_html}
 {coverage_html}
 {review_html}
-<h2>Findings</h2>
+<h2>{t("Findings", lang)}</h2>
 {findings_html}
 
-<h2>Execution Log</h2>
+<h2>{t("Execution Log", lang)}</h2>
 {rerun_note}
 <div class="tblwrap"><table>
-<tr><th>Test</th><th>OWASP</th><th>Result</th><th>Confidence</th><th>Status</th>
-<th>Exchange</th><th>Reason</th>{rerun_head}</tr>
+<tr><th>{t("Test", lang)}</th><th>OWASP</th><th>{t("Result", lang)}</th><th>{t("Confidence", lang)}</th><th>{t("Status", lang)}</th>
+<th>{t("Exchange", lang)}</th><th>{t("Reason", lang)}</th>{rerun_head}</tr>
 {exec_rows}
 </table></div>
 {rerun_js}
+{exchange_js}
 </div></body></html>"""
 
 
-def _jira_bar(assessment_id: str, issue_key: str) -> str:
+def _lang_switch(lang: str) -> str:
+    """EN/VI toggle for a report opened on its own (its own tab, a saved file,
+    a link from Jira) — the report cannot rely on the main app's nav bar, so it
+    carries its own switch. Reloads the SAME report with `?lang=..`; the route
+    serving it (see app/api/main.py) also sets the `lang` cookie from this
+    query param, so the choice carries over to the next report/page too."""
+    def _link(code: str, label: str) -> str:
+        cls = "active" if lang == code else ""
+        return f'<a class="{cls}" href="?lang={code}">{label}</a>'
+
+    return f'<div class="langswitch">{_link("en", "EN")} &middot; {_link("vi", "VI")}</div>'
+
+
+def _jira_bar(assessment_id: str, issue_key: str, lang: str) -> str:
     """A one-click 'post this exact report's summary as a Jira comment' action.
     Uses fetch so the report — a standalone document, possibly opened in its
     own tab — never has to navigate away to post. Posts to the same endpoint
@@ -236,8 +297,13 @@ def _jira_bar(assessment_id: str, issue_key: str) -> str:
     # happens to be safe here today because assessment_id is always a
     # server-generated UUID hex, never attacker-influenced text).
     aid_js = json.dumps(assessment_id)
+    btn_label = t("Post this report to Jira ({key})", lang).format(key=key)
+    posting = t("Posting…", lang)
+    posted = t("Posted to Jira", lang)
+    failed = t("Failed to post — open the assessment page for details.", lang)
+    net_err = t("Network error — try again.", lang)
     return f"""<div class="jirabar">
-<button id="jira-btn" onclick="postToJira()">Post this report to Jira ({key})</button>
+<button id="jira-btn" onclick="postToJira()">{btn_label}</button>
 <span id="jira-status" class="jira-status"></span>
 </div>
 <script>
@@ -246,24 +312,24 @@ function postToJira() {{
   var status = document.getElementById('jira-status');
   var original = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Posting…';
+  btn.textContent = {json.dumps(posting)};
   status.className = 'jira-status';
   status.textContent = '';
   fetch('/assessment/' + {aid_js} + '/comment', {{ method: 'POST' }})
     .then(function (r) {{
       if (r.ok) {{
-        btn.textContent = 'Posted to Jira';
+        btn.textContent = {json.dumps(posted)};
       }} else {{
         btn.disabled = false;
         btn.textContent = original;
-        status.textContent = 'Failed to post — open the assessment page for details.';
+        status.textContent = {json.dumps(failed)};
         status.className = 'jira-status err';
       }}
     }})
     .catch(function () {{
       btn.disabled = false;
       btn.textContent = original;
-      status.textContent = 'Network error — try again.';
+      status.textContent = {json.dumps(net_err)};
       status.className = 'jira-status err';
     }});
 }}
@@ -286,7 +352,7 @@ def _status_color(status_code: int) -> str:
     return "#b4232a"
 
 
-def _coverage_section(rows: list[dict]) -> str:
+def _coverage_section(rows: list[dict], lang: str) -> str:
     applicable = [r for r in rows if r.get("applicable")]
     body = ""
     for r in rows:
@@ -298,40 +364,42 @@ def _coverage_section(rows: list[dict]) -> str:
             f"<tr><td><b>{_e(r.get('category'))}</b></td>"
             f"<td>{_e(r.get('existing_tests', 0))}</td>"
             f"<td>{_e(r.get('generated_tests', 0))}</td>"
-            f"<td style='color:{color};font-weight:700'>{_e(state)}</td>"
+            f"<td style='color:{color};font-weight:700'>{t(state, lang)}</td>"
             f"<td><div class='bar'><div class='fill' style='width:{bar_w}%;"
             f"background:{color}'></div></div></td></tr>"
         )
-    return f"""<h2>OWASP API Security Coverage ({len(applicable)} applicable)</h2>
+    heading = t("OWASP API Security Coverage ({n} applicable)", lang).format(n=len(applicable))
+    return f"""<h2>{heading}</h2>
 <div class="tblwrap"><table>
-<tr><th>Category</th><th>Existing PoC</th><th>Generated</th><th>State</th><th>Coverage</th></tr>
+<tr><th>{t("Category", lang)}</th><th>{t("Existing PoC", lang)}</th><th>{t("Generated", lang)}</th><th>{t("State", lang)}</th><th>{t("Coverage", lang)}</th></tr>
 {body}</table></div>"""
 
 
-def _finding_block(f: Finding) -> str:
+def _finding_block(f: Finding, lang: str) -> str:
     color = _SEV_COLOR[f.severity.value]
     repro = "".join(f"<li>{_e(s)}</li>" for s in f.reproduction)
     refs = " · ".join(f'<a href="{_e(r)}">{_e(r)}</a>' if r.startswith("http") else _e(r)
                       for r in f.references)
     return f"""<div class="finding" style="border-left-color:{color}">
 <h3>{_e(f.finding_id)} — {_e(f.title)}
- <span class="pill" style="background:{color}">{_e(f.severity.value)}</span></h3>
+ <span class="pill" style="background:{color}">{t(f.severity.value, lang)}</span></h3>
 <div class="kv">
 <b>OWASP</b><span>{_e(f.owasp_category.value)}</span>
-<b>Endpoint</b><span><code>{_e(f.endpoint)}</code></span>
-<b>Confidence</b><span>{_e(f.confidence.value)}</span>
-<b>Affected tests</b><span>{_e(', '.join(f.affected_tests))}</span>
-<b>Expected</b><span>{_e(f.correlation.expected)}</span>
-<b>Actual</b><span>{_e(f.correlation.actual)}</span>
-<b>Impact</b><span>{_e(f.impact)}</span>
-<b>Recommendation</b><span>{_e(f.recommendation)}</span>
-<b>Reproduction</b><span><ol>{repro}</ol></span>
-<b>References</b><span>{refs}</span>
+<b>{t("Endpoint", lang)}</b><span><code>{_e(f.endpoint)}</code></span>
+<b>{t("Confidence", lang)}</b><span>{t(f.confidence.value, lang)}</span>
+<b>{t("Affected tests", lang)}</b><span>{_e(', '.join(f.affected_tests))}</span>
+<b>{t("Expected", lang)}</b><span>{_e(f.correlation.expected)}</span>
+<b>{t("Actual", lang)}</b><span>{_e(f.correlation.actual)}</span>
+<b>{t("Impact", lang)}</b><span>{_e(f.impact)}</span>
+<b>{t("Recommendation", lang)}</b><span>{_e(f.recommendation)}</span>
+<b>{t("Reproduction", lang)}</b><span><ol>{repro}</ol></span>
+<b>{t("References", lang)}</b><span>{refs}</span>
 </div></div>"""
 
 
 def _exec_row(test: TestCase | None, e: Execution, index: int = 0,
-              rerun_enabled: bool = False,
+              rerun_enabled: bool = False, curl_enabled: bool = False,
+              colspan: int = 7, lang: str = DEFAULT_LANG,
               superseded_by: Execution | None = None,
               adjudication=None) -> str:
     color = _RESULT_COLOR.get(e.verdict.result.value, "#4a5568")
@@ -344,27 +412,8 @@ def _exec_row(test: TestCase | None, e: Execution, index: int = 0,
             f"<br><span class='muted mono' style='font-size:11px'>"
             f"{r.elapsed_ms} ms &middot; {r.size_bytes} B</span>"
         )
-        headers_text = "\n".join(f"{k}: {v}" for k, v in r.headers.items())
-        body_text = r.body if r.body else "(empty body)"
-        response_cell = (
-            "<details class='resp'><summary>response</summary>"
-            f"<div class='glabel' style='margin-top:8px'>Headers</div>"
-            f"<pre class='respbody'>{_e(headers_text) or '(none)'}</pre>"
-            f"<div class='glabel'>Body</div>"
-            f"<pre class='respbody'>{_e(body_text)}</pre>"
-            "</details>"
-        )
     else:
         status_cell = "<span class='muted'>&mdash;</span>"
-        response_cell = "<span class='muted'>blocked before send</span>"
-
-    # The request sits next to the response, not just summarised in the reason.
-    # Offering "send this one again" is only defensible if a reader can first
-    # see exactly what would be sent — method, URL with its query, every header,
-    # the body — and the report is also where someone reproduces a result by
-    # hand. Second panel, not first: the response is what a reader scans, the
-    # request is what they open when they want to reproduce it.
-    request_cell = _request_details(e)
 
     # A verdict that leans on a positive control or a read-back is only as
     # defensible as the exchange it leaned on. Rendering the conclusion while
@@ -377,51 +426,100 @@ def _exec_row(test: TestCase | None, e: Execution, index: int = 0,
     # per test; it belongs here, where the request and response it describes are
     # one click away instead of being described in prose in a ticket.
     reason_cell = (
-        _attack_html(test, e)
-        + _expectation_html(e)
+        _attack_html(test, e, lang)
+        + _expectation_html(e, lang)
         + f"<p style='margin:6px 0'>{_e(e.verdict.reason)}</p>"
-        + _adjudication_html(adjudication)
-        + _supporting_html(e)
+        + _adjudication_html(adjudication, lang)
+        + _supporting_html(e, lang)
     )
-    rerun_cell = _rerun_cell(test, e, index, superseded_by) if rerun_enabled else ""
-    return (
+    rerun_cell = _rerun_cell(test, e, index, lang, superseded_by) if rerun_enabled else ""
+    summary_row = (
         f"<tr><td><b>{_e(e.test_id)}</b><br><span class='mono'>{title}</span></td>"
         f"<td>{_e(e.owasp_category)}</td>"
-        f"<td class='res' style='color:{color}'>{_e(e.verdict.result.value)}</td>"
-        f"<td>{_e(e.verdict.confidence.value)}</td>"
+        f"<td class='res' style='color:{color}'>{t(e.verdict.result.value, lang)}</td>"
+        f"<td>{t(e.verdict.confidence.value, lang)}</td>"
         f"<td>{status_cell}</td>"
-        f"<td>{response_cell}{request_cell}</td>"
+        f"<td><button type='button' class='exchange-toggle' "
+        f"data-exchange-toggle='{index}' aria-expanded='false' "
+        f"data-label-view=\"{_e(t('View exchange', lang))}\" "
+        f"data-label-hide=\"{_e(t('Hide exchange', lang))}\">"
+        f"{t('View exchange', lang)} &#9662;</button></td>"
         f"<td>{reason_cell}</td>{rerun_cell}</tr>"
     )
+    # A full-width panel under the row, not a sliver squeezed into one table
+    # cell next to five others — request and response each get real room to
+    # read, side by side, independently scrollable.
+    return summary_row + "\n" + _exchange_row(e, index, colspan, curl_enabled, lang)
 
 
-def _request_details(e: Execution) -> str:
-    """The attack request exactly as it was recorded — URL (query included),
-    every header, the body.
+def _exchange_row(e: Execution, index: int, colspan: int, curl_enabled: bool, lang: str) -> str:
+    if e.response is not None:
+        r = e.response
+        resp_headers = "\n".join(f"{k}: {v}" for k, v in r.headers.items())
+        resp_body = r.body if r.body else t("(empty body)", lang)
+        response_pane = (
+            "<div class='exchange-pane'>"
+            f"<h4>{t('Response', lang)} <span class='muted' style='font-weight:400;text-transform:none;"
+            f"letter-spacing:normal'>HTTP {r.status_code} &middot; {r.elapsed_ms} ms &middot; "
+            f"{r.size_bytes} B</span></h4>"
+            f"<div class='glabel'>{t('Headers', lang)}</div>"
+            f"<pre class='exbody'>{_e(resp_headers) or t('(none)', lang)}</pre>"
+            f"<div class='glabel'>{t('Body', lang)}</div>"
+            f"<pre class='exbody'>{_e(resp_body)}</pre>"
+            "</div>"
+        )
+    else:
+        response_pane = (
+            f"<div class='exchange-pane'><h4>{t('Response', lang)}</h4>"
+            f"<p class='muted'>{t('Blocked before send.', lang)}</p></div>"
+        )
 
-    Says plainly that credentials are masked. A reader who did not know that
-    would read `Authorization: ********` as "the runner sent no credential" and
-    conclude the test never authenticated at all — the opposite of what
-    happened, and enough to make every verdict here look unsound.
-    """
-    r = e.request
-    headers_text = "\n".join(f"{k}: {v}" for k, v in r.headers.items())
-    body_text = r.body if r.body else "(no body)"
-    note = (f"<p class='muted' style='margin:6px 0'>{_e(e.attack_note)}</p>"
+    # The attack request exactly as it was recorded — URL (query included),
+    # every header, the body.
+    #
+    # Says plainly that credentials are masked. A reader who did not know that
+    # would read `Authorization: ********` as "the runner sent no credential" and
+    # conclude the test never authenticated at all — the opposite of what
+    # happened, and enough to make every verdict here look unsound.
+    rq = e.request
+    req_headers = "\n".join(f"{k}: {v}" for k, v in rq.headers.items())
+    req_body = rq.body if rq.body else t("(no body)", lang)
+    note = (f"<p class='muted' style='margin:0 0 10px'>{_e(e.attack_note)}</p>"
             if e.attack_note else "")
-    return (
-        "<details class='resp' style='margin-top:6px'><summary>request</summary>"
+    curl_button = (
+        f"<button type='button' class='curlbtn' data-curl='{_e(e.execution_id)}' "
+        f"data-curl-slot='{index}'>{t('Copy cURL', lang)}</button>"
+        if curl_enabled else ""
+    )
+    curl_note = f"<p class='curlnote' id='curl-note-{index}'></p>" if curl_enabled else ""
+    credentials_note = t(
+        "Credentials are masked (<code>********</code>) above before anything is stored.", lang
+    )
+    copy_curl_note = (
+        " " + t(
+            "<b>Copy cURL</b> resolves the real credential from the persona vault live "
+            "when clicked — it is never written into this report, and only works from a "
+            "report the platform is currently serving, not a saved copy of it.", lang
+        )
+        if curl_enabled else ""
+    )
+    request_pane = (
+        "<div class='exchange-pane'>"
+        f"<h4>{t('Request', lang)}{curl_button}</h4>"
         f"{note}"
-        f"<div class='glabel' style='margin-top:8px'>{_e(r.method)}</div>"
-        f"<pre class='respbody'>{_e(r.url)}</pre>"
-        "<div class='glabel'>Headers</div>"
-        f"<pre class='respbody'>{_e(headers_text) or '(none)'}</pre>"
-        "<div class='glabel'>Body</div>"
-        f"<pre class='respbody'>{_e(body_text)}</pre>"
-        "<p class='muted' style='margin:0'>Credentials are masked "
-        "(<code>********</code>) before anything is stored. The live values come "
-        "from the persona vault at send time and are never written here.</p>"
-        "</details>"
+        f"<div class='glabel'>{_e(rq.method)}</div>"
+        f"<pre class='exbody' style='max-height:80px'>{_e(rq.url)}</pre>"
+        f"<div class='glabel'>{t('Headers', lang)}</div>"
+        f"<pre class='exbody'>{_e(req_headers) or t('(none)', lang)}</pre>"
+        f"<div class='glabel'>{t('Body', lang)}</div>"
+        f"<pre class='exbody'>{_e(req_body)}</pre>"
+        f"{curl_note}"
+        f"<p class='muted' style='margin:0'>{credentials_note}{copy_curl_note}</p></div>"
+    )
+    return (
+        f"<tr class='exchange-row' id='exchange-row-{index}' style='display:none'>"
+        f"<td colspan='{colspan}'><div class='exchange-panes'>{response_pane}{request_pane}"
+        "</div></td></tr>"
     )
 
 
@@ -433,18 +531,21 @@ def _request_details(e: Execution) -> str:
 # disclosure. Re-running a whole plan to settle one row is disproportionate, so
 # each undecided row can be sent again on its own.
 
-_RERUN_NOTE = (
-    '<p class="muted" style="margin:0 0 12px">Rows judged <b>INCONCLUSIVE</b> can be sent '
-    "again on their own. A re-run replays the <b>test</b> through the trusted runner &mdash; "
-    "the same method, path, query, headers and body, with the persona's real credential "
-    "resolved from the vault at send time, because the headers and body recorded here are "
-    "redacted and cannot be replayed byte-for-byte. Nothing below is overwritten: the result "
-    "is appended to this log as a new execution, chained onto the previous one's evidence "
-    "hash, so both attempts stay on the record. Reload the report to see the new row.</p>"
-)
+
+def _rerun_note(lang: str) -> str:
+    body = t(
+        "Rows judged <b>INCONCLUSIVE</b> can be sent again on their own. A re-run replays "
+        "the <b>test</b> through the trusted runner &mdash; the same method, path, query, "
+        "headers and body, with the persona's real credential resolved from the vault at "
+        "send time, because the headers and body recorded here are redacted and cannot be "
+        "replayed byte-for-byte. Nothing below is overwritten: the result is appended to "
+        "this log as a new execution, chained onto the previous one's evidence hash, so "
+        "both attempts stay on the record. Reload the report to see the new row.", lang
+    )
+    return f'<p class="muted" style="margin:0 0 12px">{body}</p>'
 
 
-def _rerun_cell(test: TestCase | None, e: Execution, index: int,
+def _rerun_cell(test: TestCase | None, e: Execution, index: int, lang: str,
                 superseded_by: Execution | None = None) -> str:
     if e.verdict.result.value != "INCONCLUSIVE":
         return "<td class='rerun'><span class='muted'>&mdash;</span></td>"
@@ -454,24 +555,25 @@ def _rerun_cell(test: TestCase | None, e: Execution, index: int,
         # do not restate the row's own verdict as if it were still open.
         later = superseded_by.verdict.result.value
         color = _RESULT_COLOR.get(later, "#4a5568")
-        return ("<td class='rerun'><span class='muted' style='font-size:12px'>re-run below: "
-                f"<b style='color:{color}'>{_e(later)}</b></span></td>")
+        label = t("re-run below:", lang)
+        return (f"<td class='rerun'><span class='muted' style='font-size:12px'>{label} "
+                f"<b style='color:{color}'>{t(later, lang)}</b></span></td>")
     if test is None:
         # The plan no longer holds this test, so there is nothing to send. Say
         # so here rather than offering a button the server would only refuse.
         return ("<td class='rerun'><span class='muted' style='font-size:12px'>"
-                "no longer in the plan</span></td>")
+                f"{t('no longer in the plan', lang)}</span></td>")
     destructive = "1" if test.is_destructive else "0"
     return (
         "<td class='rerun'><button type='button' class='rerunbtn' "
         f"data-rerun=\"{_e(e.execution_id)}\" data-test=\"{_e(e.test_id)}\" "
         f"data-destructive=\"{destructive}\" data-slot=\"{index}\">"
-        "&#8635; Re-run</button>"
+        f"&#8635; {t('Re-run', lang)}</button>"
         f"<div class='rerunout' id='rerun-out-{index}'></div></td>"
     )
 
 
-def _rerun_js(assessment_id: str, issue_key: str) -> str:
+def _rerun_js(assessment_id: str, issue_key: str, lang: str) -> str:
     """Post one execution back to the platform and report the new verdict in place.
 
     fetch, not a form: the report is a standalone document that may be open in
@@ -481,9 +583,28 @@ def _rerun_js(assessment_id: str, issue_key: str) -> str:
     aid_js = json.dumps(assessment_id)
     key_js = json.dumps(issue_key)
     colors_js = json.dumps(_RESULT_COLOR)
+    strings_js = json.dumps({
+        "was": t("was", lang),
+        "unchanged": t("unchanged", lang),
+        "reload": t("Reload the log", lang),
+        "refused": t("The platform refused this re-run.", lang),
+        "destructive_confirm": t(
+            "Re-running {test} sends a real state-changing request that can create, "
+            "modify or delete data on the target. Type {issue} to confirm.", lang),
+        "mismatch": t("Issue key did not match — cancelled, nothing was sent.", lang),
+        "confirm_rerun": t(
+            "Re-run {test} on its own?\n\nSends the same request again through the "
+            "trusted runner, with live persona credentials. This record is kept exactly "
+            "as it is; the result is appended to the log as a new execution.", lang),
+        "sending": t("Sending…", lang),
+        "rerun_again": t("Re-run again", lang),
+        "unreachable": t(
+            "Could not reach the platform. Re-running works from a report served by the "
+            "app, not from a saved copy.", lang),
+    })
     return f"""<script>
 (function () {{
-  var AID = {aid_js}, ISSUE = {key_js}, COLOR = {colors_js};
+  var AID = {aid_js}, ISSUE = {key_js}, COLOR = {colors_js}, STR = {strings_js};
 
   function esc(text) {{
     var d = document.createElement('div');
@@ -501,13 +622,13 @@ def _rerun_js(assessment_id: str, issue_key: str) -> str:
       meta.push(data.elapsed_ms + ' ms');
     }}
     out.innerHTML =
-      '<b style="color:' + color + '">' + esc(data.result) + '</b> \u00b7 ' +
-      esc(meta.join(' \u00b7 ')) +
+      '<b style="color:' + color + '">' + esc(data.result) + '</b> · ' +
+      esc(meta.join(' · ')) +
       (data.changed
-        ? '<div class="muted">was ' + esc(data.previous_result) + '</div>'
-        : '<div class="muted">unchanged</div>') +
+        ? '<div class="muted">' + STR.was + ' ' + esc(data.previous_result) + '</div>'
+        : '<div class="muted">' + STR.unchanged + '</div>') +
       '<div class="muted">' + esc(data.reason) + '</div>' +
-      '<a href="#" onclick="location.reload();return false;">Reload the log</a>';
+      '<a href="#" onclick="location.reload();return false;">' + STR.reload + '</a>';
   }}
 
   document.querySelectorAll('button[data-rerun]').forEach(function (btn) {{
@@ -522,25 +643,20 @@ def _rerun_js(assessment_id: str, issue_key: str) -> str:
         // tests: this sends a real write, and clicking OK out of habit is not
         // the deliberate consent that needs.
         var typed = prompt(
-          'Re-running ' + testId + ' sends a real state-changing request that can create, ' +
-          'modify or delete data on the target. Type ' + ISSUE + ' to confirm.'
+          STR.destructive_confirm.replace('{{test}}', testId).replace('{{issue}}', ISSUE)
         );
         if (typed === null) return;
         if (typed.trim() !== ISSUE) {{
-          alert('Issue key did not match \u2014 cancelled, nothing was sent.');
+          alert(STR.mismatch);
           return;
         }}
         confirmToken = typed.trim();
-      }} else if (!confirm(
-          'Re-run ' + testId + ' on its own?\n\n' +
-          'Sends the same request again through the trusted runner, with live persona ' +
-          'credentials. This record is kept exactly as it is; the result is appended to ' +
-          'the log as a new execution.')) {{
+      }} else if (!confirm(STR.confirm_rerun.replace('{{test}}', testId))) {{
         return;
       }}
 
       btn.disabled = true;
-      out.innerHTML = '<span class="spin"></span> Sending\u2026';
+      out.innerHTML = '<span class="spin"></span> ' + STR.sending;
 
       var payload = new URLSearchParams();
       payload.set('execution_id', execId);
@@ -558,16 +674,132 @@ def _rerun_js(assessment_id: str, issue_key: str) -> str:
           btn.disabled = false;
           if (res.ok && res.data.ok) {{
             render(out, res.data);
-            btn.innerHTML = '&#8635; Re-run again';
+            btn.innerHTML = '&#8635; ' + STR.rerun_again;
             return;
           }}
           out.innerHTML = '<span class="err">' +
-            esc(res.data.error || 'The platform refused this re-run.') + '</span>';
+            esc(res.data.error || STR.refused) + '</span>';
         }})
         .catch(function () {{
           btn.disabled = false;
-          out.innerHTML = '<span class="err">Could not reach the platform. Re-running ' +
-            'works from a report served by the app, not from a saved copy.</span>';
+          out.innerHTML = '<span class="err">' + STR.unreachable + '</span>';
+        }});
+    }});
+  }});
+}})();
+</script>"""
+
+
+# -- viewing and copying the exchange -----------------------------------------
+#
+# Two independent behaviours, always present regardless of rerun_enabled:
+#   * the toggle is pure client-side (no server round trip, works from any
+#     saved copy of the report) — every row can open its full-width panel.
+#   * Copy cURL needs the live platform (AID is null in a report rendered
+#     without an assessment_id, e.g. by the CLI) because building a command
+#     that actually authenticates means resolving a real credential from the
+#     persona vault at click time — see build_curl in orchestrator.py.
+
+
+def _exchange_js(assessment_id: str | None, lang: str) -> str:
+    aid_js = json.dumps(assessment_id) if assessment_id else "null"
+    strings_js = json.dumps({
+        "fetching": t("Fetching…", lang),
+        "no_curl": t("Could not build a curl command.", lang),
+        "copied": t("Copied — includes a live credential, handle it like one.", lang),
+        "copy_failed": t("Could not copy automatically — command is in the console (F12).", lang),
+        "unreachable": t(
+            "Could not reach the platform — this only works from a report the app is "
+            "serving, not a saved copy.", lang),
+    })
+    return f"""<script>
+(function () {{
+  var AID = {aid_js}, STR = {strings_js};
+
+  document.querySelectorAll('[data-exchange-toggle]').forEach(function (btn) {{
+    btn.addEventListener('click', function () {{
+      var row = document.getElementById('exchange-row-' + btn.getAttribute('data-exchange-toggle'));
+      if (!row) return;
+      var open = row.style.display !== 'none';
+      row.style.display = open ? 'none' : 'table-row';
+      btn.setAttribute('aria-expanded', String(!open));
+      btn.innerHTML = (open ? btn.getAttribute('data-label-view') : btn.getAttribute('data-label-hide'))
+        + (open ? ' &#9662;' : ' &#9652;');
+    }});
+  }});
+
+  function copyText(text) {{
+    if (navigator.clipboard && window.isSecureContext) {{
+      return navigator.clipboard.writeText(text);
+    }}
+    // Secure-context clipboard API is unavailable (e.g. plain http://) —
+    // fall back to the classic hidden-textarea + execCommand trick.
+    return new Promise(function (resolve, reject) {{
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = false;
+      try {{ ok = document.execCommand('copy'); }} catch (e) {{ ok = false; }}
+      document.body.removeChild(ta);
+      if (ok) resolve(); else reject(new Error('execCommand failed'));
+    }});
+  }}
+
+  document.querySelectorAll('[data-curl]').forEach(function (btn) {{
+    btn.addEventListener('click', function () {{
+      if (!AID) return;
+      var execId = btn.getAttribute('data-curl');
+      var note = document.getElementById('curl-note-' + btn.getAttribute('data-curl-slot'));
+      var original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = STR.fetching;
+      if (note) {{ note.textContent = ''; note.className = 'curlnote'; }}
+
+      var payload = new URLSearchParams();
+      payload.set('execution_id', execId);
+
+      fetch('/assessment/' + encodeURIComponent(AID) + '/execution/curl', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+        body: payload.toString()
+      }})
+        .then(function (r) {{
+          return r.json().then(function (d) {{ return {{ ok: r.ok, data: d }}; }});
+        }})
+        .then(function (res) {{
+          btn.disabled = false;
+          btn.textContent = original;
+          if (!res.ok || !res.data.ok) {{
+            if (note) {{
+              note.textContent = (res.data && res.data.error) || STR.no_curl;
+              note.className = 'curlnote err';
+            }}
+            return;
+          }}
+          copyText(res.data.curl).then(function () {{
+            if (note) {{
+              note.textContent = STR.copied;
+              note.className = 'curlnote';
+            }}
+          }}).catch(function () {{
+            if (note) {{
+              note.textContent = STR.copy_failed;
+              note.className = 'curlnote err';
+            }}
+            console.log(res.data.curl);
+          }});
+        }})
+        .catch(function () {{
+          btn.disabled = false;
+          btn.textContent = original;
+          if (note) {{
+            note.textContent = STR.unreachable;
+            note.className = 'curlnote err';
+          }}
         }});
     }});
   }});
@@ -581,25 +813,25 @@ _SUPPORTING_LABEL = {
 }
 
 
-def _supporting_html(e) -> str:
+def _supporting_html(e, lang: str) -> str:
     """Render baseline / verification exchanges and multi-request statistics."""
     blocks: list[str] = []
 
     for exchange in getattr(e, "supporting", []) or []:
-        label = _SUPPORTING_LABEL.get(exchange.kind, exchange.kind)
+        label = t(_SUPPORTING_LABEL.get(exchange.kind, exchange.kind), lang)
         response = exchange.response
-        status = f"HTTP {response.status_code}" if response else "no response"
+        status = f"HTTP {response.status_code}" if response else t("no response", lang)
         headers_text = "\n".join(f"{k}: {v}" for k, v in response.headers.items()) if response else ""
-        body_text = (response.body or "(empty body)") if response else "(request did not complete)"
+        body_text = (response.body or t("(empty body)", lang)) if response else t("(request did not complete)", lang)
         blocks.append(
             f"<details class='resp' style='margin-top:8px'>"
-            f"<summary>{_e(label)} &middot; as <b>{_e(exchange.as_persona)}</b> &middot; {_e(status)}</summary>"
+            f"<summary>{_e(label)} &middot; {t('as', lang)} <b>{_e(exchange.as_persona)}</b> &middot; {_e(status)}</summary>"
             f"<p class='muted' style='margin:6px 0'>{_e(exchange.note)}</p>"
-            f"<div class='glabel'>Request</div>"
+            f"<div class='glabel'>{t('Request', lang)}</div>"
             f"<pre class='respbody'>{_e(exchange.request.method)} {_e(exchange.request.url)}</pre>"
-            f"<div class='glabel'>Response headers</div>"
-            f"<pre class='respbody'>{_e(headers_text) or '(none)'}</pre>"
-            f"<div class='glabel'>Response body</div>"
+            f"<div class='glabel'>{t('Response headers', lang)}</div>"
+            f"<pre class='respbody'>{_e(headers_text) or t('(none)', lang)}</pre>"
+            f"<div class='glabel'>{t('Response body', lang)}</div>"
             f"<pre class='respbody'>{_e(body_text)}</pre>"
             f"</details>"
         )
@@ -607,14 +839,14 @@ def _supporting_html(e) -> str:
     repeat = getattr(e, "repeat", None)
     if repeat is not None:
         spread = ", ".join(f"{status}&times;{count}" for status, count in sorted(repeat.status_counts.items()))
-        blocks.append(
-            "<p class='muted' style='margin:8px 0 0'>"
-            f"Multi-request probe: {repeat.sent} sent "
-            f"{'concurrently' if repeat.concurrent else 'in sequence'}, "
-            f"{repeat.succeeded} succeeded, throttling "
-            f"{'observed' if repeat.throttled else 'not observed'}. Status spread: {spread}."
-            "</p>"
-        )
+        sent_word = t("concurrently", lang) if repeat.concurrent else t("in sequence", lang)
+        throttle_word = t("observed", lang) if repeat.throttled else t("not observed", lang)
+        text = t(
+            "Multi-request probe: {sent} sent {mode}, {ok} succeeded, throttling {throttle}. "
+            "Status spread: {spread}.", lang
+        ).format(sent=repeat.sent, mode=sent_word, ok=repeat.succeeded,
+                 throttle=throttle_word, spread=spread)
+        blocks.append(f"<p class='muted' style='margin:8px 0 0'>{text}</p>")
 
     return "".join(blocks)
 
@@ -629,7 +861,7 @@ def _supporting_html(e) -> str:
 # was the copy nobody updated.
 
 
-def _attack_html(test: TestCase | None, e: Execution) -> str:
+def _attack_html(test: TestCase | None, e: Execution, lang: str) -> str:
     """What the mutation did, and with which parameters.
 
     The runtime note is the specific one ("targeted object id 2002 owned by
@@ -647,7 +879,7 @@ def _attack_html(test: TestCase | None, e: Execution) -> str:
         parts.append(f"<code>{_e(kind)}</code>")
     if description:
         parts.append(_e(description))
-    out = (f"<div class='glabel'>Attack performed</div>"
+    out = (f"<div class='glabel'>{t('Attack performed', lang)}</div>"
            f"<p style='margin:2px 0 6px'>{' &mdash; '.join(parts)}</p>")
     detail = test.attack_mutation.detail if test else None
     if detail:
@@ -655,12 +887,12 @@ def _attack_html(test: TestCase | None, e: Execution) -> str:
             rendered = json.dumps(detail, sort_keys=True, default=str)
         except (TypeError, ValueError):
             rendered = str(detail)
-        out += (f"<div class='glabel'>Attack parameters</div>"
+        out += (f"<div class='glabel'>{t('Attack parameters', lang)}</div>"
                 f"<pre class='respbody'>{_e(rendered)}</pre>")
     return out
 
 
-def _expectation_html(e: Execution) -> str:
+def _expectation_html(e: Execution, lang: str) -> str:
     """Expected versus observed, side by side.
 
     A verdict is a comparison, and printing only its conclusion asks the reader
@@ -673,14 +905,14 @@ def _expectation_html(e: Execution) -> str:
         return ""
     rows = ""
     if expected:
-        rows += f"<b>Expected</b><span>{_e(expected)}</span>"
+        rows += f"<b>{t('Expected', lang)}</b><span>{_e(expected)}</span>"
     if observed:
-        rows += f"<b>Observed</b><span>{_e(observed)}</span>"
+        rows += f"<b>{t('Observed', lang)}</b><span>{_e(observed)}</span>"
     return (f"<div class='kv' style='font-size:12.5px;margin:0 0 6px;"
             f"grid-template-columns:74px 1fr'>{rows}</div>")
 
 
-def _adjudication_html(adjudication) -> str:
+def _adjudication_html(adjudication, lang: str) -> str:
     """The reviewing agent's reading of an undecided row.
 
     Rendered as an aside, visually distinct from the verdict above it, and it
@@ -694,27 +926,28 @@ def _adjudication_html(adjudication) -> str:
         return ""
     result = adjudication.assessed_result
     color = _RESULT_COLOR.get(result, "#4a5568")
-    who = "AI reviewer" if adjudication.adjudicator == "ai" else "deterministic triage"
+    who = t("AI reviewer", lang) if adjudication.adjudicator == "ai" else t("deterministic triage", lang)
     decided = result in ("PASS", "FAIL")
     if adjudication.needs_manual_review:
-        headline, color = "Needs manual review", "#b8860b"
+        headline, color = t("Needs manual review", lang), "#b8860b"
     elif decided:
-        headline = f"Reviewed as {result}"
+        headline = t("Reviewed as {result}", lang).format(result=t(result, lang))
     else:
         # Nobody has to read this one and nobody decided it either. "Reviewed as
         # INCONCLUSIVE" claimed a reading that did not happen, and next to it a
         # confidence inherited from the sealed verdict read as confidence in that
         # non-reading.
-        headline, color = "Still undecided — re-run this one", "#b8860b"
+        headline, color = t("Still undecided — re-run this one", lang), "#b8860b"
     # Confidence is only meaningful about a decision. Printed beside a row that
     # decided nothing, it is noise at best and false assurance at worst.
-    confidence = (f"{_e(adjudication.confidence.value)} confidence &middot; "
+    confidence = (f"{t(adjudication.confidence.value, lang)} {t('confidence', lang)} &middot; "
                   if decided else "")
+    advisory = t("advisory, does not change the sealed verdict or create a finding", lang)
     cited = "".join(f"<li>{_e(c)}</li>" for c in adjudication.evidence_cited)
-    cited_html = (f"<div class='glabel'>Evidence cited</div>"
+    cited_html = (f"<div class='glabel'>{t('Evidence cited', lang)}</div>"
                   f"<ul style='margin:2px 0 6px;padding-left:18px'>{cited}</ul>"
                   if cited else "")
-    action = (f"<p class='muted' style='margin:4px 0 0'><b>Next:</b> "
+    action = (f"<p class='muted' style='margin:4px 0 0'><b>{t('Next:', lang)}</b> "
               f"{_e(adjudication.recommended_action)}</p>"
               if adjudication.recommended_action else "")
     degraded = (f"<p class='muted' style='margin:4px 0 0'>{_e(adjudication.degraded_reason)}</p>"
@@ -723,15 +956,14 @@ def _adjudication_html(adjudication) -> str:
         f"<div class='adj' style='border-left-color:{color}'>"
         f"<p style='margin:0 0 4px'><b style='color:{color}'>{_e(headline)}</b> "
         f"<span class='muted'>&middot; {_e(who)} &middot; "
-        f"{confidence}advisory, does not change "
-        f"the sealed verdict or create a finding</span></p>"
+        f"{confidence}{advisory}</span></p>"
         f"<p style='margin:0 0 4px'>{_e(adjudication.triage_reason)}</p>"
         f"<p style='margin:0 0 4px'>{_e(adjudication.rationale)}</p>"
         f"{cited_html}{action}{degraded}</div>"
     )
 
 
-def _run_assessment_section(run) -> str:
+def _run_assessment_section(run, lang: str) -> str:
     """Passed or failed, and how much of the ticket the run actually covered.
 
     The percentage is computed by the platform over the requirement list, never
@@ -750,44 +982,48 @@ def _run_assessment_section(run) -> str:
             f"<tr><td class='mono'>{_e(item.item_id)}</td>"
             f"<td>{_e(item.text)}</td>"
             f"<td style='color:{color};font-weight:700;white-space:nowrap'>"
-            f"{_e(item.state.replace('_', ' '))}</td>"
+            f"{t(item.state.replace('_', ' '), lang)}</td>"
             f"<td class='mono' style='font-size:11.5px'>{_e(', '.join(item.tests)) or '&mdash;'}</td>"
             f"<td class='muted'>{_e(item.note)}</td></tr>"
         )
     items_table = (
         "<div class='tblwrap'><table>"
-        "<tr><th>Item</th><th>Requirement</th><th>State</th><th>Tests</th><th>Note</th></tr>"
+        f"<tr><th>{t('Item', lang)}</th><th>{t('Requirement', lang)}</th><th>{t('State', lang)}</th>"
+        f"<th>{t('Tests', lang)}</th><th>{t('Note', lang)}</th></tr>"
         f"{rows}</table></div>"
-        if rows else "<p class='muted'>No requirement items were extracted from the ticket.</p>"
+        if rows else f"<p class='muted'>{t('No requirement items were extracted from the ticket.', lang)}</p>"
     )
-    who = "AI reviewer" if run.reviewer == "ai" else "deterministic triage only"
+    who = t("AI reviewer", lang) if run.reviewer == "ai" else t("deterministic triage only", lang)
     degraded = (f"<p class='muted' style='margin:6px 0 0'>{_e(run.degraded_reason)}</p>"
                 if run.degraded_reason else "")
-    return f"""<h2>Assessment of this run</h2>
+    reviewed_by = t("Reviewed by: {who}.", lang).format(who=_e(who))
+    advisory_note = t(
+        "A reviewed result is <b>advisory</b>: it never overwrites the verdict the runner "
+        "sealed into the evidence chain, and never creates a finding. Coverage counts a "
+        "requirement as covered only when a test for it reached a decisive result &mdash; a "
+        "plan that touches everything and decides nothing scores zero here, deliberately.", lang
+    )
+    return f"""<h2>{t("Assessment of this run", lang)}</h2>
 <div class="stats">
-<div class="stat"><div class="num" style="color:{tone}">{_e(run.overall)}</div>
-<div class="lbl">Overall</div></div>
+<div class="stat"><div class="num" style="color:{tone}">{t(run.overall, lang)}</div>
+<div class="lbl">{t("Overall", lang)}</div></div>
 <div class="stat"><div class="num">{run.coverage_pct}%</div>
-<div class="lbl">Ticket requirements covered</div>
-<div class="lbl">{run.n_items_decided}/{run.n_items_scored} decided</div></div>
+<div class="lbl">{t("Ticket requirements covered", lang)}</div>
+<div class="lbl">{run.n_items_decided}/{run.n_items_scored} {t("decided", lang)}</div></div>
 <div class="stat"><div class="num">{run.decided_pct}%</div>
-<div class="lbl">Executions decided</div></div>
+<div class="lbl">{t("Executions decided", lang)}</div></div>
 <div class="stat"><div class="num">{run.n_manual_review}</div>
-<div class="lbl">Need a person</div></div>
+<div class="lbl">{t("Need a person", lang)}</div></div>
 <div class="stat"><div class="num">{run.n_auto_resolved}</div>
-<div class="lbl">Settled by review</div></div>
+<div class="lbl">{t("Settled by review", lang)}</div></div>
 </div>
 <p style="margin:14px 0 4px">{_e(run.summary)}</p>
-<p class="muted" style="margin:0 0 12px">Reviewed by: {_e(who)}. A reviewed result is
-<b>advisory</b>: it never overwrites the verdict the runner sealed into the evidence chain,
-and never creates a finding. Coverage counts a requirement as covered only when a test for
-it reached a decisive result &mdash; a plan that touches everything and decides nothing
-scores zero here, deliberately.</p>
+<p class="muted" style="margin:0 0 12px">{reviewed_by} {advisory_note}</p>
 {degraded}
 {items_table}"""
 
 
-def _plan_review_section(review) -> str:
+def _plan_review_section(review, lang: str) -> str:
     """What the reviewing agent said about the plan before it was approved.
 
     Kept in the report because it is part of why this run tested what it tested.
@@ -799,13 +1035,13 @@ def _plan_review_section(review) -> str:
         return ""
     tone = {"APPROVE": "#2f855a", "REVISE": "#b8860b", "INSUFFICIENT": "#b4232a"}.get(
         review.verdict, "#4a5568")
-    who = "AI reviewer" if review.reviewer == "ai" else "structural review (no AI)"
+    who = t("AI reviewer", lang) if review.reviewer == "ai" else t("structural review (no AI)", lang)
 
     def _gap_list(gaps) -> str:
         if not gaps:
-            return "<p class='ok' style='margin:4px 0'>None.</p>"
+            return f"<p class='ok' style='margin:4px 0'>{t('None.', lang)}</p>"
         return ("<ul style='margin:4px 0 0;padding-left:18px'>"
-                + "".join(f"<li><b>{_e(g.severity)}</b> &middot; {_e(g.label())}</li>"
+                + "".join(f"<li><b>{t(g.severity, lang)}</b> &middot; {_e(g.label())}</li>"
                           for g in gaps)
                 + "</ul>")
 
@@ -814,30 +1050,197 @@ def _plan_review_section(review) -> str:
                  if review.strengths else "")
     degraded = (f"<p class='muted' style='margin:6px 0 0'>{_e(review.degraded_reason)}</p>"
                 if review.degraded_reason else "")
-    return f"""<h2>Plan review</h2>
+    reviewed_by = t("Reviewed by {who}; {n} test(s) reviewed over {rounds} revision round(s).", lang).format(
+        who=_e(who), n=review.tests_before, rounds=review.rounds)
+    return f"""<h2>{t("Plan review", lang)}</h2>
 <div class="stats">
-<div class="stat"><div class="num" style="color:{tone}">{_e(review.verdict)}</div>
-<div class="lbl">Review verdict</div></div>
+<div class="stat"><div class="num" style="color:{tone}">{t(review.verdict, lang)}</div>
+<div class="lbl">{t("Review verdict", lang)}</div></div>
 <div class="stat"><div class="num">{review.coverage_score}%</div>
-<div class="lbl">Plan coverage</div></div>
+<div class="lbl">{t("Plan coverage", lang)}</div></div>
 <div class="stat"><div class="num">{review.quality_score}%</div>
-<div class="lbl">Decidable tests</div></div>
+<div class="lbl">{t("Decidable tests", lang)}</div></div>
 <div class="stat"><div class="num">{len(review.tests_added)}</div>
-<div class="lbl">Added after review</div></div>
+<div class="lbl">{t("Added after review", lang)}</div></div>
 </div>
-<p style="margin:14px 0 4px">{_e(review.headline())} <span class="muted">Reviewed by
-{_e(who)}; {review.tests_before} test(s) reviewed over {review.rounds} revision
-round(s).</span></p>
+<p style="margin:14px 0 4px">{_e(review.headline())} <span class="muted">{reviewed_by}</span></p>
 <p class="muted" style="margin:0 0 10px">{_e(review.notes)}</p>
 {degraded}
-<div class="glabel">Gaps found at review time</div>
+<div class="glabel">{t("Gaps found at review time", lang)}</div>
 {_gap_list(review.gaps)}
-<div class="glabel" style="margin-top:10px">Still unresolved</div>
+<div class="glabel" style="margin-top:10px">{t("Still unresolved", lang)}</div>
 {_gap_list(review.unresolved_gaps)}
-{f'<div class="glabel" style="margin-top:10px">Strengths</div>{strengths}' if strengths else ''}"""
+{f'<div class="glabel" style="margin-top:10px">{t("Strengths", lang)}</div>{strengths}' if strengths else ''}"""
 
 
 _ITEM_COLOR = {
     "COVERED_PASS": "#2f855a", "COVERED_FAIL": "#b4232a", "PARTIAL": "#b8860b",
     "NOT_COVERED": "#b8860b", "NOT_TESTED": "#718096",
 }
+
+
+VI.update({
+    # -- headings / structure --
+    "Executive Summary": "Tổng quan",
+    "Findings": "Phát hiện",
+    "Execution Log": "Nhật ký thực thi",
+    "Assessment of this run": "Đánh giá lượt chạy này",
+    "Plan review": "Đánh giá kế hoạch",
+    "Target": "Mục tiêu",
+    "Baseline": "Chuẩn tham chiếu",
+    "Evidence chain verified": "Chuỗi bằng chứng đã xác minh",
+    "every execution's SHA-256 hash recomputes and links to the previous "
+    "one; nothing below has been edited since it was recorded.":
+        "hash SHA-256 của mọi lượt thực thi đều tính lại khớp và nối đúng với "
+        "hash trước đó; không có gì bên dưới bị chỉnh sửa kể từ khi ghi nhận.",
+    "Evidence chain FAILED verification": "Chuỗi bằng chứng KHÔNG xác minh được",
+    "at least one execution record's hash no longer matches its content, or the "
+    "chain link to the previous record is broken. This report's evidence may have "
+    "been altered after it was recorded; treat it as non-authoritative until "
+    "investigated.":
+        "ít nhất một bản ghi thực thi có hash không còn khớp với nội dung, hoặc "
+        "liên kết chuỗi tới bản ghi trước đó đã bị đứt. Bằng chứng trong báo cáo này "
+        "có thể đã bị thay đổi sau khi ghi nhận; coi là không đáng tin cho đến khi "
+        "được điều tra.",
+    "No confirmed findings.": "Không có phát hiện nào được xác nhận.",
+    # -- result / severity / confidence enum labels --
+    "PASS": "ĐẠT", "FAIL": "LỖI", "INCONCLUSIVE": "CHƯA RÕ", "BLOCKED": "BỊ CHẶN",
+    "ERROR": "LỖI HỆ THỐNG", "SKIPPED": "BỎ QUA", "TIMEOUT": "HẾT GIỜ",
+    "CRITICAL": "NGHIÊM TRỌNG", "HIGH": "CAO", "MEDIUM": "TRUNG BÌNH",
+    "LOW": "THẤP", "INFO": "THÔNG TIN",
+    "HIGH confidence": "độ tin cậy CAO",
+    "confidence": "độ tin cậy",
+    # -- coverage section --
+    "OWASP API Security Coverage ({n} applicable)": "Độ phủ OWASP API Security ({n} áp dụng)",
+    "Category": "Danh mục", "Existing PoC": "PoC hiện có", "Generated": "Đã tạo",
+    "State": "Trạng thái", "Coverage": "Độ phủ",
+    "COVERED": "ĐÃ PHỦ", "PARTIAL": "MỘT PHẦN", "MISSING": "THIẾU",
+    "NOT_APPLICABLE": "KHÔNG ÁP DỤNG",
+    # -- findings block --
+    "Endpoint": "Endpoint", "Affected tests": "Test bị ảnh hưởng",
+    "Expected": "Kỳ vọng", "Actual": "Thực tế", "Impact": "Tác động",
+    "Recommendation": "Khuyến nghị", "Reproduction": "Cách tái hiện",
+    "References": "Tham chiếu",
+    # -- execution log table --
+    "Test": "Test", "Result": "Kết quả", "Confidence": "Độ tin cậy",
+    "Status": "Trạng thái HTTP", "Exchange": "Trao đổi", "Reason": "Lý do",
+    "Re-run": "Chạy lại",
+    "View exchange": "Xem trao đổi", "Hide exchange": "Ẩn trao đổi",
+    "Response": "Phản hồi", "Request": "Yêu cầu",
+    "Headers": "Headers", "Body": "Body",
+    "(empty body)": "(body rỗng)", "(no body)": "(không có body)",
+    "(none)": "(không có)", "Blocked before send.": "Đã bị chặn trước khi gửi.",
+    "Copy cURL": "Copy cURL",
+    "Credentials are masked (<code>********</code>) above before anything is stored.":
+        "Thông tin xác thực đã bị che (<code>********</code>) ở trên trước khi lưu trữ.",
+    "<b>Copy cURL</b> resolves the real credential from the persona vault live "
+    "when clicked — it is never written into this report, and only works from a "
+    "report the platform is currently serving, not a saved copy of it.":
+        "<b>Copy cURL</b> lấy thông tin xác thực thật từ persona vault ngay lúc bấm "
+        "— không bao giờ ghi vào báo cáo này, và chỉ hoạt động khi báo cáo đang được "
+        "chính nền tảng phục vụ, không phải một bản đã lưu.",
+    "re-run below:": "đã chạy lại bên dưới:",
+    "no longer in the plan": "không còn trong kế hoạch",
+    "Attack performed": "Đòn tấn công đã thực hiện", "Attack parameters": "Tham số tấn công",
+    "Observed": "Quan sát được",
+    "as": "với vai trò", "no response": "không có phản hồi",
+    "(request did not complete)": "(request chưa hoàn tất)",
+    "Response headers": "Headers phản hồi", "Response body": "Body phản hồi",
+    "Positive control": "Đối chứng dương", "Verification read-back": "Đọc lại xác minh",
+    "Multi-request probe: {sent} sent {mode}, {ok} succeeded, throttling {throttle}. "
+    "Status spread: {spread}.":
+        "Thăm dò nhiều request: đã gửi {sent} request {mode}, {ok} thành công, "
+        "throttling {throttle}. Phân bố mã trạng thái: {spread}.",
+    "concurrently": "đồng thời", "in sequence": "tuần tự",
+    "observed": "có ghi nhận", "not observed": "không ghi nhận",
+    # -- rerun --
+    "Rows judged <b>INCONCLUSIVE</b> can be sent again on their own. A re-run replays "
+    "the <b>test</b> through the trusted runner &mdash; the same method, path, query, "
+    "headers and body, with the persona's real credential resolved from the vault at "
+    "send time, because the headers and body recorded here are redacted and cannot be "
+    "replayed byte-for-byte. Nothing below is overwritten: the result is appended to "
+    "this log as a new execution, chained onto the previous one's evidence hash, so "
+    "both attempts stay on the record. Reload the report to see the new row.":
+        "Các dòng có kết quả <b>CHƯA RÕ</b> có thể được gửi lại riêng lẻ. Chạy lại sẽ "
+        "phát lại <b>test</b> qua trusted runner &mdash; cùng method, path, query, "
+        "headers và body, với thông tin xác thực thật của persona được lấy từ vault "
+        "ngay lúc gửi, vì headers/body ghi ở đây đã bị che và không thể phát lại "
+        "chính xác từng byte. Không có gì bên dưới bị ghi đè: kết quả được thêm vào "
+        "nhật ký này như một lượt thực thi mới, nối vào hash bằng chứng của lượt "
+        "trước, nên cả hai lần thử đều còn trên hồ sơ. Tải lại báo cáo để thấy dòng mới.",
+    "Post this report to Jira ({key})": "Đăng báo cáo này lên Jira ({key})",
+    "Posting…": "Đang đăng…", "Posted to Jira": "Đã đăng lên Jira",
+    "Failed to post — open the assessment page for details.":
+        "Đăng thất bại — mở trang assessment để xem chi tiết.",
+    "Network error — try again.": "Lỗi mạng — thử lại.",
+    "was": "trước đó là", "unchanged": "không đổi", "Reload the log": "Tải lại nhật ký",
+    "The platform refused this re-run.": "Nền tảng từ chối lượt chạy lại này.",
+    "Re-running {test} sends a real state-changing request that can create, "
+    "modify or delete data on the target. Type {issue} to confirm.":
+        "Chạy lại {test} sẽ gửi một request thay đổi dữ liệu thật, có thể tạo, sửa "
+        "hoặc xoá dữ liệu trên mục tiêu. Gõ {issue} để xác nhận.",
+    "Issue key did not match — cancelled, nothing was sent.":
+        "Issue key không khớp — đã huỷ, không có gì được gửi.",
+    "Re-run {test} on its own?\n\nSends the same request again through the "
+    "trusted runner, with live persona credentials. This record is kept exactly "
+    "as it is; the result is appended to the log as a new execution.":
+        "Chạy lại {test} riêng lẻ?\n\nGửi lại đúng request qua trusted runner, với "
+        "thông tin xác thực persona còn hiệu lực. Bản ghi này được giữ nguyên; kết "
+        "quả sẽ được thêm vào nhật ký như một lượt thực thi mới.",
+    "Sending…": "Đang gửi…", "Re-run again": "Chạy lại lần nữa",
+    "Could not reach the platform. Re-running works from a report served by the "
+    "app, not from a saved copy.":
+        "Không kết nối được nền tảng. Chạy lại chỉ hoạt động trên báo cáo do app "
+        "đang phục vụ, không phải bản đã lưu.",
+    # -- copy curl js --
+    "Fetching…": "Đang lấy dữ liệu…",
+    "Could not build a curl command.": "Không tạo được lệnh curl.",
+    "Copied — includes a live credential, handle it like one.":
+        "Đã copy — có chứa thông tin xác thực còn hiệu lực, xử lý như một bí mật thật.",
+    "Could not copy automatically — command is in the console (F12).":
+        "Không copy tự động được — lệnh đã in ra console (F12).",
+    "Could not reach the platform — this only works from a report the app is "
+    "serving, not a saved copy.":
+        "Không kết nối được nền tảng — chỉ hoạt động trên báo cáo do app đang phục "
+        "vụ, không phải bản đã lưu.",
+    # -- adjudication --
+    "AI reviewer": "AI reviewer", "deterministic triage": "phân loại tất định",
+    "Needs manual review": "Cần người xem lại",
+    "Reviewed as {result}": "Được đánh giá là {result}",
+    "Still undecided — re-run this one": "Vẫn chưa quyết — chạy lại dòng này",
+    "advisory, does not change the sealed verdict or create a finding":
+        "chỉ mang tính tham khảo, không thay đổi kết luận đã niêm phong hay tạo finding",
+    "Evidence cited": "Bằng chứng được trích dẫn", "Next:": "Tiếp theo:",
+    # -- run assessment section --
+    "Overall": "Tổng thể", "Ticket requirements covered": "Yêu cầu ticket đã phủ",
+    "decided": "đã quyết", "Executions decided": "Lượt thực thi đã quyết",
+    "Need a person": "Cần người xử lý", "Settled by review": "Đã giải quyết qua đánh giá",
+    "Reviewed by: {who}.": "Người đánh giá: {who}.",
+    "A reviewed result is <b>advisory</b>: it never overwrites the verdict the runner "
+    "sealed into the evidence chain, and never creates a finding. Coverage counts a "
+    "requirement as covered only when a test for it reached a decisive result &mdash; a "
+    "plan that touches everything and decides nothing scores zero here, deliberately.":
+        "Kết quả đánh giá chỉ mang tính <b>tham khảo</b>: không bao giờ ghi đè kết luận "
+        "mà runner đã niêm phong vào chuỗi bằng chứng, và không tạo finding. Độ phủ chỉ "
+        "tính một yêu cầu là đã phủ khi có test cho nó đạt kết quả dứt khoát &mdash; một "
+        "kế hoạch chạm vào mọi thứ nhưng không quyết được gì sẽ có điểm 0 ở đây, có chủ đích.",
+    "deterministic triage only": "chỉ phân loại tất định",
+    "PASSED": "ĐẠT", "FAILED": "LỖI", "INCOMPLETE": "CHƯA HOÀN TẤT",
+    "No requirement items were extracted from the ticket.":
+        "Không trích xuất được mục yêu cầu nào từ ticket.",
+    "Item": "Mục", "Requirement": "Yêu cầu", "Tests": "Test", "Note": "Ghi chú",
+    # -- plan review section --
+    "structural review (no AI)": "đánh giá cấu trúc (không AI)",
+    "None.": "Không có.",
+    "Review verdict": "Kết luận đánh giá", "Plan coverage": "Độ phủ kế hoạch",
+    "Decidable tests": "Test có thể quyết", "Added after review": "Đã thêm sau đánh giá",
+    "Reviewed by {who}; {n} test(s) reviewed over {rounds} revision round(s).":
+        "Người đánh giá: {who}; đã xem {n} test qua {rounds} vòng chỉnh sửa.",
+    "Gaps found at review time": "Lỗ hổng phát hiện lúc đánh giá",
+    "Still unresolved": "Vẫn chưa xử lý", "Strengths": "Điểm mạnh",
+    "APPROVE": "DUYỆT", "REVISE": "CẦN SỬA", "INSUFFICIENT": "CHƯA ĐỦ",
+    "blocking": "chặn", "advisory": "khuyến nghị",
+    # -- item states (run assessment table) --
+    "COVERED PASS": "ĐÃ PHỦ - ĐẠT", "COVERED FAIL": "ĐÃ PHỦ - LỖI",
+    "NOT COVERED": "CHƯA PHỦ", "NOT TESTED": "CHƯA TEST",
+})

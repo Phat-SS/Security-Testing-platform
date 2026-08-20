@@ -119,6 +119,19 @@ def test_diff_no_regression():
 
 # -- PDF --------------------------------------------------------------------
 
+def test_pdf_sanitizer_transliterates_vietnamese_instead_of_mangling_it():
+    """`encode("latin-1", "replace")` alone turns every accented character
+    into "?" — a real regression against this app's own Vietnamese UI
+    (app/core/i18n.py). Decompose-and-strip keeps it legible instead."""
+    from app.reporting.pdf import _s
+
+    assert _s("Kết quả đánh giá") == "Ket qua danh gia"
+    assert _s("Đã duyệt") == "Da duyet"
+    # A genuinely undecomposable script still degrades to "?" — documented,
+    # not silently "fixed".
+    assert _s("日本語") == "???"
+
+
 def test_pdf_export_is_a_pdf():
     from app.reporting.pdf import export_pdf
 

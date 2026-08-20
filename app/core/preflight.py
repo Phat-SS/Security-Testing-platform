@@ -18,7 +18,9 @@ network operation is the DNS lookup the scope validator performs anyway.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.core.engagement import Engagement
@@ -283,6 +285,78 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
     return Readiness(checks=checks, environments=envs)
 
 
+def jira_env_facts() -> list[tuple[str, str, str]]:
+    """(env var, status, hint) rows for the Jira MCP connector pane — presence
+    only, never the value, so this is safe to render even when live."""
+    def present(name: str) -> str:
+        return "set" if os.getenv(name) else "not set"
+
+    return [
+        ("JIRA_MCP_URL", present("JIRA_MCP_URL"),
+         "Streamable-HTTP endpoint, e.g. https://mcp.atlassian.com/v1/mcp."),
+        ("JIRA_CLOUD_ID", present("JIRA_CLOUD_ID"),
+         "From the MCP server's getAccessibleAtlassianResources tool."),
+        ("JIRA_MCP_TOKEN", present("JIRA_MCP_TOKEN"),
+         "OAuth access token. Short-lived — refresh via npx mcp-remote + npm run jira:token."),
+        ("JIRA_SITE_URL", present("JIRA_SITE_URL"),
+         "Human browse URL — powers the \"Open ticket\" link after posting a comment."),
+    ]
+
+
+def reload_dotenv(path: str = ".env") -> None:
+    """Re-read .env into this process's environment so Reconnect can pick up a
+    freshly refreshed token without a server restart.
+
+    Minimal by design (KEY=VALUE lines, optional quotes, '#' comments) — this
+    only needs to mirror what scripts/security-ui.js already parses at
+    startup, not be a general-purpose dotenv implementation.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            if key:
+                os.environ[key] = value
+
+
+def newest_mcp_auth_token(base: Path, newer_than: float | None = None) -> Path | None:
+    """Newest *_tokens.json under ~/.mcp-auth/mcp-remote-*/ — the cache
+    mcp-remote's OAuth flow writes to. `newer_than` (a time.time() value)
+    restricts this to a file written after that moment, so a stale cached
+    token lying around from a previous login isn't mistaken for a completed
+    fresh one."""
+    if not base.is_dir():
+        return None
+    candidates = [p for p in base.glob("*/*_tokens.json") if p.is_file()]
+    if newer_than is not None:
+        candidates = [p for p in candidates if p.stat().st_mtime > newer_than]
+    return max(candidates, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def write_dotenv_value(key: str, value: str, path: str = ".env") -> None:
+    """Set KEY=value in .env in place — replacing an existing line (commented
+    or not) if present, else appending. Mirrors scripts/jira-token.js's own
+    rewrite so the two stay interchangeable. The value is never logged."""
+    line = f"{key}={value}"
+    pattern = re.compile(rf"^#?\s*{re.escape(key)}=.*$", re.MULTILINE)
+    text = Path(path).read_text(encoding="utf-8") if os.path.exists(path) else ""
+    if pattern.search(text):
+        text = pattern.sub(line, text, count=1)
+    elif text and not text.endswith("\n"):
+        text += f"\n{line}\n"
+    else:
+        text += f"{line}\n"
+    Path(path).write_text(text, encoding="utf-8")
+
+
 def runtime_facts() -> list[tuple[str, str, str]]:
     """(label, value, hint) rows for settings that live in the environment and
     therefore need a server restart to change. Shown read-only next to the
@@ -291,13 +365,18 @@ def runtime_facts() -> list[tuple[str, str, str]]:
     def flag(name: str, default: str = "false") -> bool:
         return os.getenv(name, default).lower() == "true"
 
-    ai_key = "set" if os.getenv("ANTHROPIC_API_KEY") else "not set"
+    from app.analysis.staged import ClaudeLLM
+
+    cli_status = "found" if ClaudeLLM.is_available() else "not found"
+    model_desc = os.getenv("ANTHROPIC_MODEL") or "session default"
     jira_live = bool(os.getenv("JIRA_MCP_URL") and os.getenv("JIRA_MCP_TOKEN"))
     return [
         ("AI analyzer",
-         f"USE_AI={'true' if flag('USE_AI') else 'false'}, ANTHROPIC_API_KEY {ai_key}, "
-         f"model {os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-5')}",
-         "Falls back to the deterministic analyzer whenever it is off or fails."),
+         f"USE_AI={'true' if flag('USE_AI') else 'false'}, claude CLI {cli_status}, "
+         f"model {model_desc}",
+         "Runs `claude -p` under the operator's own Claude Code login (no "
+         "separate API key) and falls back to the deterministic analyzer "
+         "whenever it is off, the CLI is missing, or it fails."),
         ("Jira connector",
          "live MCP" if jira_live else "offline mock",
          "Needs JIRA_MCP_URL + JIRA_CLOUD_ID + JIRA_MCP_TOKEN. Tokens stay in "

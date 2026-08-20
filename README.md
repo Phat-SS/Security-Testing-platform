@@ -65,7 +65,10 @@ cd security-testing-platform
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-pytest                      # 53 tests: safety controls + full pipeline
+pytest                      # the full suite: safety controls + full pipeline;
+                            # enforced on every push/PR by .github/workflows/ci.yml,
+                            # so this comment can't go stale the way a hardcoded
+                            # count already had (the CI job is the source of truth)
 ```
 
 ### 1. The self-contained demo
@@ -195,6 +198,24 @@ is exactly where that would otherwise get quoted as a confirmed break.
 `--no-review` reproduces the pre-agent output exactly; `--review-rounds N` bounds
 how many times the planner may answer the reviewer.
 
+### 4. Running in Docker
+
+```bash
+cp .env.example .env
+cp config/engagement.example.json config/engagement.json   # then edit it
+docker compose up --build
+```
+
+Open `http://127.0.0.1:8100`. `docker-compose.yml` at the repo root builds
+`docker/Dockerfile` — non-root, read-only application directory, dropped
+Linux capabilities — and mounts `./config` read-only plus a named volume for
+the SQLite file, so `docker compose down` never discards an assessment.
+`docker compose --profile postgres up --build` adds a Postgres service
+instead (see the compose file's header for the two extra `.env` lines it
+needs). This is unrelated to `docker/docker-compose.yml`, which is the
+isolated sandbox for `ENABLE_PYTHON_RUNNER` covered under "Multi-user auth"
+below — that one exists to contain arbitrary Python, not to run the platform.
+
 ## What it can actually send
 
 The attack vocabulary is a closed registry — `app/execution/mutations.py`,
@@ -207,13 +228,13 @@ unknown kind is rejected rather than improvised.
 | **API1** BOLA | `swap_object_id`, `swap_id_in_query`, `swap_id_in_header`, `id_param_pollution`, `wrap_id_array`, `content_type_switch` |
 | **API2** Auth | `drop_auth`, `tamper_token`, `jwt_alg_none`, `jwt_alg_confusion`, `jwt_claim_tamper`, `jwt_expired_replay`, `jwt_kid_injection`, `borrowed_token` |
 | **API3** BOPLA | `inject_property`, `inject_nested_property` |
-| **API4** Resources | `oversized_payload`, `pagination_abuse`, `json_depth_bomb`, `rate_probe` |
+| **API4** Resources | `oversized_payload`, `pagination_abuse`, `json_depth_bomb`, `rate_probe`, `graphql_batching_abuse` |
 | **API5** BFLA | `escalate_persona`, `method_override`, `admin_path_swap` |
 | **API6** Business flows | `repeat_flow`, `race_condition` |
 | **API7** SSRF | `ssrf_url`, `ssrf_url_bypass` |
-| **API8** Misconfiguration | `cors_probe`, `debug_probe`, `security_headers_probe` |
-| **API9** Inventory | `version_downgrade`, `undocumented_path_probe` |
-| **API10** Unsafe consumption | `unsafe_redirect_url` |
+| **API8** Misconfiguration | `cors_probe`, `debug_probe`, `security_headers_probe`, `host_header_injection` |
+| **API9** Inventory | `version_downgrade`, `undocumented_path_probe`, `graphql_introspection_probe` |
+| **API10** Unsafe consumption | `unsafe_redirect_url`, `oauth_redirect_uri_bypass` |
 
 All ten categories have generators. `rate_probe`, `repeat_flow` and
 `race_condition` send multiple requests (capped at 50); `race_condition` sends
@@ -225,6 +246,15 @@ category. `aggressive` emits the full variant matrix — every id placement, the
 whole JWT suite, race windows. Choose it in the Design step, or
 `--depth aggressive` on the CLI. Volume is not risk here: nothing runs without
 approval, so the cost is review time.
+
+`graphql_introspection_probe`, `graphql_batching_abuse`, `host_header_injection`
+and `oauth_redirect_uri_bypass` are reviewed, registered mutations like every
+other kind here — the attack planner (`USE_AI=true`) can propose them today,
+validated by the same gate as any other proposal. The deterministic
+`TestDesigner` does not template them into a plan on its own yet (it has no
+signal for "this ticket is about GraphQL/OAuth" the way it does for BOLA/auth);
+add one by hand via the API/DB or let the planner add it as a gap-filling
+proposal in the meantime.
 
 ## The engagement config = authorization as an artifact
 
@@ -297,7 +327,7 @@ tests/         # scope, redaction, rules, verdict, evidence, approval, analysis,
 
 | Want | Set |
 |---|---|
-| Staged Claude analyzer instead of heuristic, plus the AI half of both reviewing agents | `USE_AI=true` + `ANTHROPIC_API_KEY=…` (+ `pip install anthropic`) |
+| Staged Claude analyzer instead of heuristic, plus the AI half of both reviewing agents | `USE_AI=true` + the `claude` CLI installed and logged in (rides your Claude Code login — no API key, no extra pip package) |
 | A working report link in the Jira comment | `PLATFORM_BASE_URL=https://…` |
 | Live Jira instead of the mock | `JIRA_MCP_URL=…` `JIRA_CLOUD_ID=…` (+ `pip install mcp`) |
 | PostgreSQL instead of SQLite | `DATABASE_URL=postgresql+psycopg://…` |
@@ -361,6 +391,11 @@ read-only FS, dropped caps, no direct network) whose **only** egress is a
 default-deny tinyproxy driven by `docker/allowlist` — the network-level
 enforcement of your engagement scope. See `docker/docker-compose.yml`.
 
+This is a separate image from the one that runs the platform itself
+(`docker/Dockerfile`, `docker-compose.yml` at the repo root — see "Running in
+Docker" below): the sandbox exists only to isolate arbitrary Python from
+`ENABLE_PYTHON_RUNNER`, it is not how you'd normally deploy the app.
+
 ## The Jira comment
 
 Most stakeholders never open the HTML report — they read the ticket. So the
@@ -402,8 +437,21 @@ than silently truncated.
 ## Where the AI is allowed to act
 
 Two agent roles, both bolted onto the same seam: **the AI proposes, the
-platform disposes.** Both are off unless `USE_AI=true` and a key is set; with
-them off the platform behaves exactly as the deterministic path always did.
+platform disposes.** Both are off unless `USE_AI=true` and the `claude` CLI is
+available; with them off the platform behaves exactly as the deterministic
+path always did.
+
+Every AI call (`ClaudeLLM` in `app/analysis/staged.py`) shells out to
+`claude -p` with `--tools ""`, `--safe-mode` and `--no-session-persistence`,
+run from outside this repo's working directory — the model only ever returns
+text, it is never given the ability to run a tool, reach an MCP server, load
+this or any other project's `CLAUDE.md`/hooks/skills/plugins, or persist the
+turn. That matters because these prompts are built from Jira ticket text,
+i.e. attacker-controlled input: without this, prompt injection in a ticket
+could try to make the model *act* rather than just answer, on the same host
+running this platform. `tests/test_claude_llm.py` pins the exact flags so a
+refactor that quietly drops one fails CI instead of only outrunning this
+paragraph.
 
 **1. Attack planner** (`app/analysis/attack_planner.py`) — runs in the Design
 step, after the rule engine, and sees what is already planned so it adds depth
@@ -510,6 +558,26 @@ only how many. Those fields are exported, rendered and posted to Jira with no
 redaction pass of their own, so naming a leaked session token or a victim's
 email there made the platform re-disclose the data it was reporting. The values
 remain in the captured response body, which *is* redacted before storage.
+
+### Database migrations
+
+`app.database.models.init_db` (`Base.metadata.create_all`) still creates the
+schema for a brand-new database — that has not changed, and tests keep using
+it directly for exactly that reason. What it cannot do is add a column to a
+database that already exists, which is why a schema change from here on ships
+as an [Alembic](https://alembic.sqlalchemy.org/) migration under `migrations/`
+instead. It reads `DATABASE_URL` the same way the app does, so it always
+targets the database a normal run would use.
+
+| Database | Command |
+|---|---|
+| Existing, from before Alembic | `alembic stamp 0001_baseline && alembic upgrade head` (once) |
+| Brand new | `alembic stamp head` (create_all already built the current schema — this just tells Alembic to agree), or `alembic upgrade head` on an empty database to build it from the migrations instead |
+
+`migrations/versions/0001_baseline.py` deliberately does nothing when *run* —
+it exists to be *stamped*, marking "this database already has the schema
+`create_all` has always produced," so later migrations know where they're
+starting from without trying to re-create tables that are already there.
 
 ## Roadmap
 

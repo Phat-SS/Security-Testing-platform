@@ -131,6 +131,7 @@ def test_add_edit_and_delete_a_persona(client, cfg):
         "auth_headers": "Authorization: Bearer tokenA",
         "owns": "customer_id=1001",
         "secret_markers": "alice@example.com",
+        "scoping_headers": "entity-context",
     })
     personas = _read(cfg)["personas"]
     assert personas == [{
@@ -139,6 +140,7 @@ def test_add_edit_and_delete_a_persona(client, cfg):
         "role": "agent",
         "owns": {"customer_id": "1001"},
         "secret_markers": ["alice@example.com"],
+        "scoping_headers": ["entity-context"],
     }]
 
     # Saving the same name edits in place instead of appending a duplicate.
@@ -182,7 +184,7 @@ def test_runner_limits_round_trip_and_reach_execution(client, cfg):
     from app.core.config import settings_with_overrides
 
     client.post("/config/runner", data={"timeout_s": "45", "max_requests_per_test": "5",
-                                        "max_response_bytes": "", "max_redirects": ""})
+                                        "max_response_bytes": ""})
     assert _read(cfg)["runner"] == {"timeout_s": 45.0, "max_requests_per_test": 5}
 
     eng = load_engagement(str(cfg))

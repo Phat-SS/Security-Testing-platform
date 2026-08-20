@@ -45,9 +45,13 @@ def test_the_import_form_offers_the_planning_pass_and_explains_it():
     from app.api import views
 
     page = views.dashboard([], "http://t", ai_on=False)
-    assert 'name="plan"' in page
-    assert "Plan &amp; review on import" in page
-    assert "every test arrives PENDING" in page
+    assert 'name="mode"' in page
+    assert 'value="analyze"' in page
+    assert 'value="auto_plan" selected' in page
+    assert 'value="ticket_poc"' in page
+    assert "Auto-plan (AI attack planner)" in page
+    assert "Run ticket's PoC only" in page
+    assert "every test lands PENDING" in page
 
 
 def test_importing_with_the_box_ticked_produces_a_plan_to_approve(client):

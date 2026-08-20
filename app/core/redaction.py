@@ -23,9 +23,16 @@ _SECRET_HEADERS = {
     "api-key",
     "x-auth-token",
     "x-amz-security-token",
+    "x-goog-api-key",
 }
 
 # Body/text patterns: match "<key> <sep> <value>" and mask the value only.
+# Matched as a SUBSTRING of the key (see _KV_PATTERN below), not the whole
+# key, because cloud metadata/credential responses name fields like
+# "AccessKeyId" or "SecretAccessKey" — a whole-key match would let an SSRF
+# probe against a cloud IMDS endpoint (exactly what ssrf_url targets) leak
+# straight through. When in doubt, redact: a short substring over-matches a
+# few benign field names before it under-matches a real credential.
 _SENSITIVE_KEYS = (
     "password",
     "passwd",
@@ -39,11 +46,21 @@ _SENSITIVE_KEYS = (
     "authorization",
     "private_key",
     "session",
+    "accesskeyid",
+    "access_key_id",
+    "secret_key",
+    "connection_string",
+    "connectionstring",
 )
 
-# key : "value"  |  key = value  |  key: value   (JSON, form, kv)
+# key : "value"  |  key = value  |  key: value   (JSON, form, kv). The key is
+# any identifier-shaped run of characters that CONTAINS one of the sensitive
+# substrings — not one that equals it exactly — so "SecretAccessKey" and
+# "aws_session_token" match via "secret"/"session" the same way redact_any
+# and redact_url already match keys by substring (`s in k.lower()` below).
 _KV_PATTERN = re.compile(
-    r'(?i)("?(?:' + "|".join(_SENSITIVE_KEYS) + r')"?\s*[:=]\s*)("?)([^"\s,&}]+)(\2)'
+    r'(?i)("?[A-Za-z0-9_.\-]*(?:' + "|".join(_SENSITIVE_KEYS) + r')[A-Za-z0-9_.\-]*"?\s*[:=]\s*)'
+    r'("?)([^"\s,&}]+)(\2)'
 )
 
 # Bearer / Basic tokens appearing inline anywhere.

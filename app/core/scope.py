@@ -16,8 +16,10 @@ that this module does:
    IP, then have DNS return an internal IP on the real connection
    (DNS rebinding / TOCTOU).
 
-Redirects are handled by the runner (auto-follow OFF; each hop re-validated),
-because a 302 to an internal host is the same attack wearing a hat.
+Redirects are never auto-followed by the runner (a 302 is captured and
+evaluated as-is), because a 302 to an internal host is the same attack
+wearing a hat and the HTTP client re-resolving DNS to chase it would bypass
+this validator entirely. See `HttpRunner._send` in `execution/http_runner.py`.
 """
 
 from __future__ import annotations
@@ -79,6 +81,30 @@ class ScopePolicy:
             blocked_hosts=self.blocked_hosts,
             allow_private_ranges=self.allow_private_ranges,
         )
+
+
+# IPv6 /96 prefixes known to carry a plain IPv4 address in their low 32 bits.
+# For a /96 prefix the embedded address occupies the address exactly (no
+# reserved "u" octet, unlike the shorter RFC 6052 prefixes), so extracting it
+# is a straight bitmask — no per-prefix special-casing needed beyond listing
+# the prefixes themselves.
+_IPV4_EMBEDDING_NETS = [
+    ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped (RFC 4291 2.5.5.2)
+    ipaddress.ip_network("::/96"),  # IPv4-compatible, deprecated (RFC 4291 2.5.5.1)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known prefix (RFC 6052)
+]
+
+
+def _embedded_ipv4_addresses(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    """Every IPv4 address `ip` carries in its low 32 bits, under any of the
+    known embedding prefixes it happens to fall in (usually zero or one)."""
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return []
+    found = []
+    for net in _IPV4_EMBEDDING_NETS:
+        if ip in net:
+            found.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return found
 
 
 # Injectable resolver so tests are deterministic and don't hit real DNS.
@@ -144,18 +170,20 @@ class ScopeValidator:
             return ScopeResult(False, host, ip_str, f"Resolver returned invalid IP '{ip_str}'.")
 
         if not self._policy.allow_private_ranges:
-            # An IPv6 answer can be an IPv4-mapped address (::ffff:a.b.c.d) —
-            # the exact same address underneath, just wrapped so a
+            # An IPv6 answer can *wrap* a blocked IPv4 address several ways —
+            # the exact same address underneath, just encoded so a
             # version-matched-only check (ip.version == net.version) misses
             # it entirely. Since switching the resolver to getaddrinfo added
             # IPv6 support, this became reachable: a DNS answer of
-            # ::ffff:169.254.169.254 would otherwise sail past every IPv4
-            # block-list entry. Check the address as resolved AND its
-            # unwrapped IPv4 form, if any.
+            # ::ffff:169.254.169.254 (IPv4-mapped), ::169.254.169.254
+            # (deprecated IPv4-compatible) or 64:ff9b::169.254.169.254
+            # (NAT64 well-known prefix, RFC 6052) all carry the metadata
+            # address in their low 32 bits and would otherwise sail past
+            # every IPv4 block-list entry. Check the address as resolved AND
+            # every IPv4 address it embeds.
             candidates = [ip]
-            mapped = getattr(ip, "ipv4_mapped", None)
-            if mapped is not None:
-                candidates.append(mapped)
+            for embedded in _embedded_ipv4_addresses(ip):
+                candidates.append(embedded)
             for candidate in candidates:
                 for net in _ALWAYS_BLOCK_NETS:
                     if candidate.version == net.version and candidate in net:

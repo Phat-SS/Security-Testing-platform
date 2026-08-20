@@ -100,6 +100,15 @@ def _pin_dns(host: str | None, ip: str | None):
             _socket.getaddrinfo = real_getaddrinfo
 
 
+# A candidate shorter than this proves nothing either way: short numeric ids,
+# area codes, or short words are routinely present as a coincidental substring
+# of unrelated boilerplate (an RFC problem+json body, a trace id, a version
+# string) that every caller — attacker and rightful owner alike — receives.
+# Mirrors the same floor `adjudicator._MIN_CORRELATION_BODY` applies to the
+# sibling byte-identical-body correlation check.
+_MIN_MARKER_LEN = 6
+
+
 class HttpRunner:
     def __init__(
         self,
@@ -115,7 +124,7 @@ class HttpRunner:
         self._settings = settings
         # Injectable client so tests can drive an in-memory ASGI app.
         self._client = client or httpx.Client(
-            follow_redirects=False,  # each redirect hop must be re-validated
+            follow_redirects=False,  # a 3xx is captured and evaluated as-is — see _send
             timeout=settings.limits.timeout_s,
             headers={"User-Agent": settings.limits.user_agent},
         )
@@ -196,8 +205,9 @@ class HttpRunner:
         # 3. positive control — can an entitled identity do this at all?
         baseline_ok: bool | None = None
         baseline_summary = ""
+        baseline_raw_body = ""
         if test.baseline is not None:
-            exchange, baseline_ok, baseline_summary = self._run_baseline(
+            exchange, baseline_ok, baseline_summary, baseline_raw_body = self._run_baseline(
                 test.baseline, test, context, log
             )
             if exchange is not None:
@@ -256,7 +266,19 @@ class HttpRunner:
         #    pre-redaction text: a leaked marker is often itself a
         #    session/token/password-shaped string, which redact_text would
         #    mask to "********" before a substring check ever saw it.
-        leaked = self._leaked_markers(raw_resp_text or "", target_markers, test.expected.body_must_not_contain, context)
+        #
+        #    The baseline's own body is only usable as an exclusion set when
+        #    the baseline FAILED (`baseline_ok is False`): that response is a
+        #    rejection/error for the entitled owner, so it should carry no
+        #    real object data at all — a marker "found" there is boilerplate.
+        #    When the baseline SUCCEEDED, its body legitimately contains the
+        #    victim's own data (that is the point of the positive control),
+        #    so the same marker appearing there is the expected shape of a
+        #    real leak, not evidence against one, and must not be excluded.
+        leaked = self._leaked_markers(
+            raw_resp_text or "", target_markers, test.expected.body_must_not_contain, context,
+            exclude_bodies=[baseline_raw_body] if baseline_ok is False and baseline_raw_body else None,
+        )
         if leaked:
             # Never put the raw marker value in the log: `log` is stored,
             # exported (export.json), and hashed into evidence just like
@@ -305,20 +327,27 @@ class HttpRunner:
 
     def _run_baseline(
         self, spec: BaselineSpec, test: TestCase, context: dict, log: list[str]
-    ) -> tuple[SupportingExchange | None, bool | None, str]:
-        """Run the positive control. Returns (evidence, ok, summary).
+    ) -> tuple[SupportingExchange | None, bool | None, str, str]:
+        """Run the positive control. Returns (evidence, ok, summary, raw_body).
 
         `ok` is None when the control could not be established at all (scope
         block, transport failure, unknown persona). That is deliberately
         distinct from False: "we could not check" must not read as "the target
         was unreachable", and neither may be silently upgraded to a PASS.
+
+        `raw_body` is the pre-redaction text of the baseline's own response —
+        the same identity/function the attack targets, minus the attack. The
+        caller uses it to rule out marker matches that are really just
+        boilerplate every caller gets (see `_leaked_markers`): the stored
+        `SupportingExchange.response.body` is already redacted and cannot be
+        used for that same-substring comparison.
         """
         tag = f"{test.test_id}.baseline"
         try:
             persona = self._vault.get(spec.as_persona)
         except KeyError as exc:
             log.append(f"{tag}: SKIPPED — {exc}")
-            return None, None, "baseline persona missing from vault"
+            return None, None, "baseline persona missing from vault", ""
 
         # Default to the test's own (unmutated) request: same object, same
         # function — just performed by the identity entitled to it.
@@ -328,12 +357,12 @@ class HttpRunner:
             url = self._absolute_url(path)
         except ScopeViolation as exc:
             log.append(f"{tag}: SKIPPED — {exc}")
-            return None, None, "baseline path rejected by scope"
+            return None, None, "baseline path rejected by scope", ""
 
         result = self._scope.validate_url(url)
         if not result.allowed:
             log.append(f"{tag}: SKIPPED — scope: {result.reason}")
-            return None, None, "baseline blocked by scope"
+            return None, None, "baseline blocked by scope", ""
 
         headers = {
             **persona.auth_headers,
@@ -342,7 +371,7 @@ class HttpRunner:
         query = _resolve_query(base_request.query, context)
         body = resolve_deep(base_request.body, context)
 
-        captured_req, captured_resp, _ = self._send(
+        captured_req, captured_resp, raw_text = self._send(
             base_request.method, url, headers, query, body, result.resolved_ip
         )
         if captured_resp is None:
@@ -355,6 +384,7 @@ class HttpRunner:
                 ),
                 None,
                 "baseline request did not complete",
+                "",
             )
 
         ok = captured_resp.status_code in spec.success_status_in
@@ -377,6 +407,7 @@ class HttpRunner:
             ),
             ok,
             summary,
+            raw_text or "",
         )
 
     def _run_verification(
@@ -634,18 +665,38 @@ class HttpRunner:
         target_markers: list[str],
         must_not_contain: list[str],
         context: dict,
+        *,
+        exclude_bodies: list[str] | None = None,
     ) -> list[str]:
         # NB: `body` is the RAW, pre-redaction response text (see `_send`).
         # A victim marker is often itself secret-shaped (a session token, an
         # API key) — checking against the redacted copy would mask it to
         # "********" before this substring check ever ran, hiding exactly
         # the disclosure this method exists to catch.
+        #
+        # Two independent guards against a false "leak", both needed:
+        #  - a length floor (`_MIN_MARKER_LEN`): a short marker (a bare id, an
+        #    area code) is routinely a coincidental substring of unrelated
+        #    boilerplate (RFC problem+json bodies, trace ids, version
+        #    strings) that has nothing to do with the victim.
+        #  - `exclude_bodies`: raw text from OTHER exchanges captured for this
+        #    same execution that are known to carry no victim data — chiefly
+        #    the positive control's own response. If the "leaked" marker is
+        #    also present there, the match says nothing about this response in
+        #    particular; it is present in whatever every caller receives.
+        exclude_bodies = [b for b in (exclude_bodies or []) if b]
         candidates = list(target_markers)
         for marker in must_not_contain:
             resolved = resolve(marker, context)
             if resolved:
                 candidates.append(resolved)
-        return [m for m in candidates if m and m in body]
+        return [
+            m for m in candidates
+            if m
+            and len(m) >= _MIN_MARKER_LEN
+            and m in body
+            and not any(m in other for other in exclude_bodies)
+        ]
 
     def _absolute_url(self, path: str) -> str:
         if path.startswith("http://") or path.startswith("https://"):

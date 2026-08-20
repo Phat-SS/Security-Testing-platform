@@ -8,9 +8,12 @@ reported a MISSING that no amount of testing could ever close.
 from app.analysis import HeuristicAnalyzer, TestDesigner
 from app.analysis.test_designer import AGGRESSIVE, STANDARD
 from app.execution.mutations import MUTATION_KINDS
+from app.execution.verdict import evaluate as evaluate_verdict
 from app.mcp.jira import NormalizedIssue
 from app.owasp.coverage import compute_coverage
-from app.schemas.enums import ApprovalStatus, OwaspApiCategory
+from app.schemas.analysis import Endpoint, IssueAnalysis, OwaspMapping
+from app.schemas.enums import ApprovalStatus, Applicability, OwaspApiCategory
+from app.schemas.execution import CapturedResponse
 
 
 def _design(description: str, depth: str = STANDARD, summary: str = "API work"):
@@ -93,6 +96,46 @@ def test_mass_assignment_tests_carry_a_read_back():
     )
     bopla = [t for t in tests if t.owasp_category == OwaspApiCategory.API3]
     assert bopla and all(t.verification is not None for t in bopla)
+
+
+# -- expected-public endpoints -------------------------------------------------
+
+
+def _public_analysis() -> IssueAnalysis:
+    return IssueAnalysis(
+        issue_key="X-1",
+        endpoints=[Endpoint(method="GET", path="/health", expected_public=True)],
+        owasp_mappings=[
+            OwaspMapping(category=OwaspApiCategory.API2, applicability=Applicability.APPLICABLE,
+                        reason="test fixture"),
+        ],
+    )
+
+
+def test_expected_public_endpoint_gets_one_drop_auth_test_expecting_success():
+    tests = TestDesigner().design(_public_analysis())
+    api2 = [t for t in tests if t.owasp_category == OwaspApiCategory.API2]
+    assert len(api2) == 1
+    assert api2[0].attack_mutation.kind == "drop_auth"
+    assert 200 in api2[0].expected.status_in
+    # No tamper_token/JWT variants — there is no credential to tamper with.
+    assert {t.attack_mutation.kind for t in api2} == {"drop_auth"}
+
+
+def test_expected_public_takes_precedence_over_auth_required():
+    analysis = _public_analysis()
+    analysis.endpoints[0].auth_required = True  # left on; expected_public still wins
+    tests = TestDesigner().design(analysis)
+    kinds = {t.attack_mutation.kind for t in tests if t.owasp_category == OwaspApiCategory.API2}
+    assert kinds == {"drop_auth"}
+
+
+def test_a_200_on_the_expected_public_test_is_a_pass_not_inconclusive():
+    tests = TestDesigner().design(_public_analysis())
+    test = next(t for t in tests if t.owasp_category == OwaspApiCategory.API2)
+    response = CapturedResponse(status_code=200, headers={}, body="", elapsed_ms=5, size_bytes=0)
+    verdict = evaluate_verdict(test, response, leaked_markers=[])
+    assert verdict.result.value == "PASS"
 
 
 def test_the_jwt_signature_probe_is_always_generated_for_authenticated_endpoints():

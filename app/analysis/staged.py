@@ -17,6 +17,7 @@ architecture is legible end to end.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -143,21 +144,77 @@ def _signals_from(extraction: ExtractionResult, issue: NormalizedIssue) -> Requi
     )
 
 
-class ClaudeLLM:  # pragma: no cover - requires API key
-    """Real LLM client backed by the Anthropic API."""
+class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
+    """Real LLM client backed by the local Claude Code CLI (`claude -p`) rather
+    than a separate Anthropic API key — this rides whatever login/subscription
+    and default model the operator's Claude Code is already using, so there is
+    no second credential to provision or bill separately.
 
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        import os
+    Every call runs with `--tools ""` and `--safe-mode`: no built-in tools, and
+    no CLAUDE.md/hooks/skills/plugins/MCP servers from this or any other repo
+    (auth and model selection still work normally under `--safe-mode` — only
+    `--bare` would break those, which is why this uses `--safe-mode` instead).
+    The prompt here is built from a Jira ticket, i.e. attacker-controlled text;
+    a CLI invocation that could act on that text (run Bash, edit files, trigger
+    a hook) rather than merely transform it into a text completion would turn
+    prompt injection in a ticket into arbitrary code execution on the host
+    running this platform.
+    """
 
-        self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
-        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+    def __init__(self, model: str | None = None, cli_path: str | None = None,
+                 timeout: float = 90.0) -> None:
+        self._model = model or os.environ.get("ANTHROPIC_MODEL") or None
+        self._cli = cli_path or os.environ.get("CLAUDE_CLI_PATH", "claude")
+        self._timeout = timeout
+
+    @staticmethod
+    def is_available(cli_path: str | None = None) -> bool:
+        import shutil
+
+        cli = cli_path or os.environ.get("CLAUDE_CLI_PATH", "claude")
+        return shutil.which(cli) is not None
 
     def complete(self, system: str, user: str) -> str:
-        import anthropic
+        import shutil
+        import subprocess
+        import tempfile
 
-        client = anthropic.Anthropic(api_key=self._api_key)
-        msg = client.messages.create(
-            model=self._model, max_tokens=2000, system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return "".join(b.text for b in msg.content if b.type == "text")
+        # Resolve to a full path: on Windows a bare "claude" (really a .cmd
+        # shim) is not reliably found by CreateProcess without a shell, even
+        # though shutil.which() (used by is_available()) does find it.
+        resolved = shutil.which(self._cli) or self._cli
+        cmd = [
+            resolved, "-p", "--output-format", "json",
+            "--tools", "", "--safe-mode", "--no-session-persistence",
+            "--system-prompt", system,
+        ]
+        if self._model:
+            cmd += ["--model", self._model]
+        try:
+            proc = subprocess.run(
+                cmd, input=user, capture_output=True, text=True,
+                encoding="utf-8", timeout=self._timeout,
+                # Run outside this repo so it can never pick up this
+                # project's own CLAUDE.md/hooks even before --safe-mode
+                # would otherwise suppress them.
+                cwd=tempfile.gettempdir(),
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"claude CLI not found ({self._cli!r}) — install Claude Code "
+                "or set CLAUDE_CLI_PATH"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"claude CLI timed out after {self._timeout}s") from exc
+
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"claude CLI returned non-JSON output (exit {proc.returncode}): "
+                f"stdout={proc.stdout[:500]!r} stderr={proc.stderr[:500]!r}"
+            ) from exc
+
+        if proc.returncode != 0 or payload.get("is_error"):
+            raise RuntimeError(f"claude CLI error: {payload.get('result') or proc.stderr[:500]}")
+        return payload.get("result", "")

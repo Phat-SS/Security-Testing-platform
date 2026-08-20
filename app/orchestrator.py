@@ -29,11 +29,11 @@ from app.execution.http_runner import HttpRunner
 from app.owasp.coverage import (
     apply_coverage_to_analysis,
     compute_coverage,
-    coverage_summary,
 )
 from app.pipeline.findings import build_findings, leads
 from app.poc.jira_extract import combined_poc_source, extract_poc_scripts
 from app.poc.transpiler import to_test_cases, transpile_curl, transpile_python
+from app.reporting.curl import render_curl
 from app.reporting.html import render_report
 from app.schemas.agent import Adjudication
 from app.schemas.enums import ApprovalStatus, TestSource
@@ -170,6 +170,58 @@ class Orchestrator:
                              detail=f"{type(exc).__name__}: {exc}")
             return assessment_id, None
         return assessment_id, review
+
+    async def import_and_run_poc_plan(self, issue_key: str, actor: str = "tester"):
+        """Import, then run exactly the PoC embedded in the ticket — nothing else.
+
+        Unlike import_and_plan, neither the AI attack planner nor the
+        deterministic rule engine contributes a single test: the plan is
+        exactly the requests transpiled from the ticket's own PoC, and
+        nothing the ticket's prose might separately imply (an endpoint
+        mentioned in passing does not get its own BOLA/broken-auth probe
+        here). The transpiled tests are sent verbatim, too (`verbatim=True`):
+        no `classify()`-guessed mutation on top of them (e.g. injecting
+        `role`/`is_admin` into a body that never had them) and no path
+        rewritten to a `{victim_id}` placeholder nothing then fills back in —
+        a ticket's PoC is already a complete exploit, not a template to attack
+        a second time. The plan reviewer still runs once, read-only, so the
+        tester can see whether the ticket's own PoC actually covers what the
+        ticket asks for; the result adjudicator still runs at the assess step
+        exactly as it does for any other assessment.
+
+        Returns (assessment_id, PlanReview | None, poc_found: bool). poc_found is
+        False when the ticket had no embedded PoC script to run — the caller should
+        tell the tester to use Auto-plan or paste a PoC by hand instead.
+        """
+        assessment_id = await self.import_and_analyze(issue_key)
+        analysis = self.get_analysis(assessment_id)
+        poc = analysis.detected_poc_source if analysis else ""
+        if not poc:
+            self._repo.audit("ticket_poc_missing", assessment_id, actor=actor,
+                             detail="no embedded PoC script found in ticket description")
+            return assessment_id, None, False
+        try:
+            self.design(assessment_id, poc_python=poc, use_planner=False,
+                       use_rule_engine=False, verbatim=True,
+                       review=True, max_rounds=0, actor=actor)
+        except Exception as exc:  # noqa: BLE001 - import already succeeded; must not be lost
+            self._repo.audit("ticket_poc_design_failed", assessment_id, actor=actor,
+                             detail=f"{type(exc).__name__}: {exc}")
+            return assessment_id, None, True
+        review = self._repo.get_plan_review(assessment_id)
+        # Make the mode's intent explicit on the review itself: unresolved gaps here
+        # were never sent to the AI planner, unlike Auto-plan's mode, so the existing
+        # "no AI planner configured" note (which only fires when self._planner is
+        # None) would otherwise be silent when a planner *is* configured but simply
+        # wasn't asked.
+        if review is not None and review.unresolved_gaps and self._planner is not None:
+            review.notes = (
+                f"{review.notes} Ticket PoC mode: only the ticket's own PoC ran as a "
+                "test; the AI planner did not add tests to close the gap(s) below. "
+                "Switch to Auto-plan or add tests by hand if you need them covered."
+            ).strip()
+            self._repo.save_plan_review(assessment_id, review)
+        return assessment_id, review, True
 
     def delete_assessment(self, assessment_id: str, actor: str = "tester") -> None:
         assessment = self._repo.get_assessment(assessment_id)
@@ -330,6 +382,7 @@ class Orchestrator:
                poc_curl: str | None = None, poc_postman: str | None = None,
                burp_xml: str | None = None, jmeter_xml: str | None = None,
                depth: str | None = None, use_planner: bool = True,
+               use_rule_engine: bool = True, verbatim: bool = False,
                review: bool = False, max_rounds: int = 1,
                actor: str = "tester") -> list:
         from app.schemas.analysis import IssueAnalysis
@@ -337,19 +390,24 @@ class Orchestrator:
         assessment = self._repo.get_assessment(assessment_id)
         analysis = IssueAnalysis.model_validate(assessment.analysis_json)
 
+        # Strictly additive, like use_planner: when off, the deterministic
+        # rule engine contributes nothing and the plan is exactly whatever
+        # the PoC/AI planner produced — "run only the ticket's PoC" (Option
+        # 1) means only the ticket's PoC, not the PoC plus a full rule-engine
+        # sweep of every endpoint the ticket happens to mention.
         designer = self._designer.with_depth(depth) if depth else self._designer
-        generated = designer.design(analysis)
+        generated = designer.design(analysis) if use_rule_engine else []
 
         # Transpile any provided PoC into scoped, PENDING test cases. Never run.
         poc_tests = []
         if poc_python:
             r = transpile_python(poc_python)
-            poc_tests += to_test_cases(r)
+            poc_tests += to_test_cases(r, verbatim=verbatim)
             if not r.is_safe:
                 self._repo.audit("poc_flagged", assessment_id,
                                  detail=f"dangerous constructs: {r.dangerous_constructs}")
         if poc_curl:
-            poc_tests += to_test_cases(transpile_curl(poc_curl))
+            poc_tests += to_test_cases(transpile_curl(poc_curl), verbatim=verbatim)
         if poc_postman:
             from app.poc.postman import postman_to_test_cases
 
@@ -494,8 +552,8 @@ class Orchestrator:
         out.tests_added = [t.test_id for t in added]
         if out.unresolved_gaps and self._planner is None:
             out.notes = (
-                f"{out.notes} No AI planner is configured (set USE_AI=true and "
-                "ANTHROPIC_API_KEY), so the gaps below were not answered automatically - "
+                f"{out.notes} No AI planner is configured (set USE_AI=true with the "
+                "claude CLI installed and logged in), so the gaps below were not answered automatically - "
                 "they are listed for you to close by editing the endpoint list, importing "
                 "a PoC that covers them, or adding a test by hand."
             ).strip()
@@ -812,6 +870,43 @@ class Orchestrator:
         )
         return original, replay
 
+    # -- copying one execution as a curl command -----------------------------
+    #
+    # Same redaction problem as re-running (see the block comment above
+    # rerun_execution), different resolution: a "copy" action must not send
+    # anything, so it cannot re-run the test's setup/baseline steps to
+    # re-derive a request the way rerun_execution does — that would fire real,
+    # possibly state-changing requests at the target just to produce a string.
+    # Instead this takes the exact recorded request (the actual attack that was
+    # sent) and patches back only the attacker persona's auth header(s),
+    # resolved live from the vault, into render_curl. Everything else in the
+    # recorded request — including anything else that happened to be redacted
+    # — is left exactly as captured.
+
+    def build_curl(self, assessment_id: str, execution_id: str,
+                    vault: PersonaVault, actor: str = "tester") -> str:
+        execution = self._repo.get_execution(assessment_id, execution_id)
+        if execution is None:
+            raise self.RerunRefused(f"No execution {execution_id} in this assessment.")
+
+        test = self._repo.get_test_case(assessment_id, execution.test_id)
+        persona = None
+        if test is not None:
+            try:
+                persona = vault.get(test.auth_context.persona)
+            except KeyError:
+                persona = None
+
+        curl = render_curl(execution.request, persona)
+        # This hands the caller a live, currently-valid credential — worth a
+        # line in the same audit trail rerun_execution writes to.
+        self._repo.audit(
+            "build_curl", assessment_id, actor=actor,
+            detail=f"{execution_id} curl command generated for {test.test_id if test else execution.test_id} "
+                   f"(includes a live credential from the persona vault)",
+        )
+        return curl
+
     # re-running an assessment ---------------------------------------------
     #
     # A re-run is a NEW assessment of the same issue, not a second pass over the
@@ -1066,7 +1161,7 @@ class Orchestrator:
 
     # 7. report -------------------------------------------------------------
 
-    def build_report_html(self, assessment_id: str) -> str:
+    def build_report_html(self, assessment_id: str, lang: str = "en") -> str:
         assessment = self._repo.get_assessment(assessment_id)
         tests = {t.test_id: t for t in self._repo.get_test_cases(assessment_id)}
         executions = self._repo.get_executions(assessment_id)
@@ -1089,6 +1184,7 @@ class Orchestrator:
             # for it and where the raw evidence it refers to already is.
             plan_review=self._repo.get_plan_review(assessment_id),
             run_assessment=self._repo.get_run_assessment(assessment_id),
+            lang=lang,
         )
         self._repo.audit("report", assessment_id, detail=f"html report generated; evidence_chain_ok={chain_ok}")
         return html

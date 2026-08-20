@@ -79,4 +79,4 @@ def _extract_links(fields: dict) -> list[str]:
             issue = link.get(side)
             if issue:
                 links.append(issue.get("key", ""))
-    return [l for l in links if l]
+    return [key for key in links if key]

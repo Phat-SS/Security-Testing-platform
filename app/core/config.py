@@ -13,7 +13,6 @@ class RunnerLimits:
 
     timeout_s: float = 15.0
     max_response_bytes: int = 2_000_000  # cap stored/echoed body size
-    max_redirects: int = 0  # auto-follow OFF; each hop re-validated explicitly
     max_requests_per_test: int = 25
     user_agent: str = "SecTestPlatform/0.1 (+authorized-testing)"
 
@@ -29,7 +28,6 @@ class Settings:
             limits=RunnerLimits(
                 timeout_s=float(os.getenv("RUNNER_TIMEOUT_S", "15")),
                 max_response_bytes=int(os.getenv("RUNNER_MAX_RESPONSE_BYTES", "2000000")),
-                max_redirects=int(os.getenv("RUNNER_MAX_REDIRECTS", "0")),
                 max_requests_per_test=int(os.getenv("RUNNER_MAX_REQUESTS_PER_TEST", "25")),
             ),
             # Default-deny private ranges. Only a lab explicitly opts in.
@@ -54,7 +52,6 @@ def settings_with_overrides(overrides: dict) -> Settings:
     fields = {
         "timeout_s": float,
         "max_response_bytes": int,
-        "max_redirects": int,
         "max_requests_per_test": int,
     }
     applied = {}
@@ -65,7 +62,7 @@ def settings_with_overrides(overrides: dict) -> Settings:
             value = cast(overrides[key])
         except (TypeError, ValueError):
             continue
-        if value < 0 or (key != "max_redirects" and value == 0):
+        if value <= 0:
             continue
         applied[key] = value
     if not applied:

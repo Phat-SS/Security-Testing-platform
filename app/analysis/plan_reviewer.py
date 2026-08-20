@@ -14,7 +14,7 @@ Two reviewers, same output type:
     category with no test is a gap; every requirement item with no test is a
     gap; authorization tests without a positive control are a quality defect,
     because a test that can only ever return INCONCLUSIVE is not coverage.
-  * **AI** (when `USE_AI` + a key) — reads the ticket's intent against the plan
+  * **AI** (when `USE_AI=true` and the claude CLI is available) — reads the ticket's intent against the plan
     and names gaps a structural check cannot see ("nothing tests that the
     *expired* coupon path is the one that must reject").
 
@@ -23,6 +23,14 @@ in, never substituted for them. A model that decides everything is fine must
 not be able to erase a structural gap that is measurably there — so the
 deterministic verdict floors the final one: if structure says INSUFFICIENT, the
 review is at best REVISE.
+
+The AI reviewer also writes `requirement_digest`: for each security-relevant
+requirement, what the ticket asks for restated as the concrete behaviour a
+tester can check a response against ("PUT .../change-ownership must return
+401 for an anonymous caller, not fall through to validation"), not the
+ticket's own — often vaguer — wording. This is a reading task, so it is
+AI-only; the deterministic review leaves it empty rather than guess at intent
+from a bullet's grammar alone.
 
 What a review cannot do, in any mode: remove a test, change an approval status,
 mark a plan approved, or authorise anything. It produces gaps, which become a
@@ -40,7 +48,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.analysis.staged import LLMClient
 from app.execution.mutations import MUTATION_KINDS
-from app.schemas.agent import PlanReview, PlanReviewGap, RequirementItem
+from app.schemas.agent import PlanReview, PlanReviewGap, RequirementDigestItem, RequirementItem
 from app.schemas.analysis import IssueAnalysis
 from app.schemas.enums import OwaspApiCategory
 from app.schemas.testcase import TestCase
@@ -55,6 +63,14 @@ _NEEDS_BASELINE = {OwaspApiCategory.API1, OwaspApiCategory.API3, OwaspApiCategor
 _NEEDS_VERIFICATION = {OwaspApiCategory.API3}
 
 _MAX_GAPS = 12
+
+
+class _ProposedDigestItem(BaseModel):
+    """The narrow shape the reviewing model may emit per requirement digest row."""
+
+    item_id: str = ""
+    requirement: str = ""
+    expected: str = ""
 
 
 class _ProposedGap(BaseModel):
@@ -75,6 +91,7 @@ class _ProposedReview(BaseModel):
     gaps: list[_ProposedGap] = Field(default_factory=list)
     strengths: list[str] = Field(default_factory=list)
     notes: str = ""
+    requirement_digest: list[_ProposedDigestItem] = Field(default_factory=list)
 
 
 _SYSTEM = """You are a review agent auditing a security test plan produced by
@@ -95,6 +112,20 @@ Judge on two axes:
    object does not exist". A state-changing probe without a read-back cannot
    prove the change persisted.
 
+Before any of that, do a third thing the tester cannot get from a table of
+category names: for each requirement listed below that is security-relevant
+(it has an OWASP hint), restate it as `requirement_digest` — what the ticket
+is actually asking for, and precisely what a secure system must do about it.
+The ticket's own wording is often a paraphrase ("must prevent unauthorized
+ownership changes"); your `expected` must be the concrete, checkable behaviour
+a tester can hold a real HTTP response against — the specific status code, who
+is and is not allowed to act, and what must never happen — using whatever
+specifics the ticket itself gives (a status code it names, an endpoint it
+names, a field it names). If the ticket names a status code, say that code, not
+"an error". If it does not, say what class of response would count instead of
+inventing one. Keep each `expected` to one or two sentences a tester can act on
+without re-reading the ticket.
+
 Rules, because output that breaks them is discarded:
 - `severity` is one of "blocking", "important", "minor". Reserve "blocking" for
   a security-relevant requirement with NO test at all.
@@ -102,11 +133,14 @@ Rules, because output that breaks them is discarded:
 - `suggested_mutation`, when set, must be one of the catalogue entries given.
 - Do not restate a gap already listed under "structural gaps already found".
 - Do not invent endpoints. Reference only the ones listed.
+- `requirement_digest[].item_id` must be one of the requirement ids listed
+  below (e.g. "R-02"), never invented.
 - Scores are integers 0-100.
 
 Return ONLY a JSON object:
 {"verdict": "APPROVE"|"REVISE"|"INSUFFICIENT", "coverage_score": int,
  "quality_score": int, "strengths": [str], "notes": str,
+ "requirement_digest": [{"item_id": str, "requirement": str, "expected": str}],
  "gaps": [{"description": str, "requirement_id": str, "category": str,
            "severity": str, "suggested_mutation": str, "suggested_endpoint": str}]}"""
 
@@ -309,9 +343,12 @@ class PlanReviewer:
             base.degraded_reason = f"reviewer LLM call failed — {type(exc).__name__}: {exc}"
             return base
 
-        return self._merge(base, proposed)
+        return self._merge(base, proposed, requirements)
 
-    def _merge(self, base: PlanReview, proposed: _ProposedReview) -> PlanReview:
+    def _merge(
+        self, base: PlanReview, proposed: _ProposedReview,
+        requirements: list[RequirementItem],
+    ) -> PlanReview:
         """Combine the two reviews, with structure as the floor.
 
         The model may add gaps, add strengths, and lower the scores. It may not
@@ -354,6 +391,29 @@ class PlanReviewer:
         merged.coverage_score = min(base.coverage_score, _clamp(proposed.coverage_score))
         merged.quality_score = min(base.quality_score, _clamp(proposed.quality_score))
         merged.verdict = _floor_verdict(base.verdict, proposed.verdict)
+
+        # Only for ids that are actually in this ticket's requirement list —
+        # an invented id would show a tester a confident-looking restatement of
+        # a requirement that does not exist. One row per id: a model asked
+        # about the same item twice must not print it twice.
+        known_ids = {i.item_id for i in requirements}
+        by_id = {i.item_id: i for i in requirements}
+        digest: list[RequirementDigestItem] = []
+        seen_ids: set[str] = set()
+        for row in proposed.requirement_digest:
+            item_id = (row.item_id or "").strip()
+            expected = " ".join((row.expected or "").split())
+            if item_id not in known_ids or item_id in seen_ids or not expected:
+                continue
+            seen_ids.add(item_id)
+            requirement_text = " ".join((row.requirement or "").split()) or by_id[item_id].text
+            digest.append(RequirementDigestItem(
+                item_id=item_id,
+                requirement=requirement_text[:400],
+                expected=expected[:400],
+            ))
+        merged.requirement_digest = digest
+
         merged.reviewed_at = _now()
         return merged
 
@@ -461,8 +521,8 @@ def build_reviewer() -> PlanReviewer:
     """A reviewer that uses the model when configured, structure otherwise.
 
     Always returns a reviewer, unlike `build_planner`: the structural review
-    costs nothing, needs no key, and is the part a tester should never be
-    without — "this plan has no test for the category the ticket is about" is
+    costs nothing, needs nothing enabled, and is the part a tester should never
+    be without — "this plan has no test for the category the ticket is about" is
     worth saying whether or not an AI is available to say it more eloquently.
     """
     from app.analysis.claude_analyzer import ClaudeAnalyzer

@@ -23,6 +23,7 @@ from app.analysis import TestDesigner, build_analyzer
 from app.analysis.attack_planner import build_planner
 from app.core.config import Settings
 from app.core.engagement import load_engagement
+from app.core.logging_config import configure_error_tracking, configure_logging
 from app.database import Repository, init_db, make_engine, make_session_factory
 from app.execution.adaptive import AdaptiveBudget
 from app.mcp import build_jira_client
@@ -76,8 +77,8 @@ async def _run(args) -> None:
             budget = None
             if args.adaptive:
                 if planner is None:
-                    print("adaptive  -> SKIPPED (no AI planner: set USE_AI=true and "
-                          "ANTHROPIC_API_KEY)")
+                    print("adaptive  -> SKIPPED (no AI planner: set USE_AI=true with the "
+                          "claude CLI installed and logged in)")
                 else:
                     budget = AdaptiveBudget(
                         max_iterations=args.adaptive_iterations,
@@ -119,8 +120,8 @@ def main() -> None:
                         "applicable category; 'aggressive' is the full variant matrix")
     p.add_argument("--adaptive", action="store_true",
                    help="after each undecided/failed result, let the AI planner propose a "
-                        "bounded follow-up probe and run it (requires USE_AI + API key; "
-                        "never runs destructive follow-ups)")
+                        "bounded follow-up probe and run it (requires USE_AI=true and the "
+                        "claude CLI; never runs destructive follow-ups)")
     p.add_argument("--adaptive-iterations", type=int, default=2,
                    help="max adaptive follow-up rounds (default 2)")
     p.add_argument("--adaptive-followups", type=int, default=10,
@@ -135,6 +136,8 @@ def main() -> None:
                         "gaps (default 1; each round is another batch of PENDING tests)")
     p.add_argument("--report", default="reports/cli_report.html")
     args = p.parse_args()
+    configure_logging()
+    configure_error_tracking()
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)
     asyncio.run(_run(args))
 

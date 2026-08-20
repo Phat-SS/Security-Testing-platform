@@ -24,6 +24,11 @@ class Endpoint(BaseModel):
     method: str
     path: str
     auth_required: bool = True
+    # Declares that this route is intentionally reachable without a credential —
+    # independent of `auth_required`, and takes precedence over it for API2: a
+    # 200 without auth here is the correct, expected result, not a finding. Left
+    # False (the default) leaves auth_required's existing behaviour untouched.
+    expected_public: bool = False
     # Path/body params that look like object identifiers (BOLA/BOPLA surface).
     object_id_params: list[str] = Field(default_factory=list)
     # True if the request carries a body whose properties could be tampered.
@@ -116,6 +121,7 @@ def endpoints_fingerprint(endpoints: list[Endpoint]) -> str:
             ep.method.upper(),
             ep.path,
             ep.auth_required,
+            ep.expected_public,
             sorted(ep.object_id_params),
             ep.writes_properties,
             sorted(ep.url_fields),

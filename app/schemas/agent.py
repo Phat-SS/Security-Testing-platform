@@ -106,6 +106,25 @@ class PlanReviewGap(BaseModel):
         return f"{head}: {self.description}"
 
 
+class RequirementDigestItem(BaseModel):
+    """One requirement, restated as what a secure system must specifically do.
+
+    `text` on `RequirementItem` is the ticket's own wording — a bullet or AC
+    line, exactly as written. That is often a paraphrase ("must prevent
+    unauthorized ownership changes") rather than the concrete, checkable
+    behaviour a tester can hold a test result against ("PUT
+    /vehicles/{id}/change-ownership must return 401 for an anonymous caller,
+    not fall through to business-logic validation"). This is that restatement
+    — written once, by the reviewing agent reading the ticket, so a tester
+    opening the plan review knows exactly what "the control held" is supposed
+    to mean for this item before they approve anything.
+    """
+
+    item_id: str = ""
+    requirement: str = ""
+    expected: str = ""
+
+
 class PlanReview(BaseModel):
     """The second agent's opinion of a generated plan, before a human reads it.
 
@@ -125,6 +144,12 @@ class PlanReview(BaseModel):
     gaps: list[PlanReviewGap] = Field(default_factory=list)
     strengths: list[str] = Field(default_factory=list)
     notes: str = ""
+    # AI-only (empty on the deterministic review — restating intent from prose
+    # is a reading task, not something a structural count can do). Read this
+    # before the gap list: it says what the ticket actually needs to be true,
+    # so a gap below ("no test for API2") means something concrete instead of
+    # just a category name.
+    requirement_digest: list[RequirementDigestItem] = Field(default_factory=list)
 
     reviewer: Reviewer = "deterministic"
     # Why the AI reviewer did not run, when it didn't. Same contract as

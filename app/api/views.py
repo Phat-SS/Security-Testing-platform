@@ -11,7 +11,8 @@ import json
 from collections import Counter
 
 from app.api import ui, views_assessment
-from app.api.ui import attr, e, info
+from app.api.ui import attr, e
+from app.core.i18n import VI, get_lang, tt as _t
 from app.database.models import Assessment
 from app.schemas.testcase import TestCase
 
@@ -73,7 +74,7 @@ _CSS = """
 *{box-sizing:border-box;}
 body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   margin:0;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;}
-.wrap{max-width:1180px;margin:0 auto;padding:22px 20px 80px;}
+.wrap{max-width:1600px;margin:0 auto;padding:22px 20px 80px;}
 a{color:var(--accent);}
 .mono{font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums;}
 .muted{color:var(--muted);}
@@ -91,6 +92,11 @@ nav.tabs{display:flex;gap:4px;}
 nav.tabs a{padding:6px 12px;border-radius:6px 6px 0 0;text-decoration:none;color:var(--muted);font-size:13.5px;}
 nav.tabs a.active{background:var(--surface);color:var(--fg);font-weight:600;border:1px solid var(--border);
   border-bottom-color:var(--surface);margin-bottom:-1px;}
+.lang-switch{font-size:12.5px;color:var(--muted);white-space:nowrap;}
+.lang-link{color:var(--muted);text-decoration:none;padding:2px 3px;}
+.lang-link.active{color:var(--fg);font-weight:700;}
+.lang-link:not(.active):hover{color:var(--fg);}
+.lang-sep{margin:0 2px;color:var(--border);}
 .chips{display:flex;gap:8px;flex-wrap:wrap;}
 .chip{display:inline-flex;align-items:center;font-size:11.5px;color:var(--muted);background:var(--surface);
   border:1px solid var(--border);border-radius:999px;padding:4px 10px;}
@@ -172,7 +178,7 @@ code{background:var(--accent-soft);padding:1px 5px;border-radius:4px;}
 # Behaviour shared by every page: the tooltip bubble, the theme toggle and the
 # collapsible-section memory. Emitted once at the end of <body> so it binds
 # against a document that is already parsed.
-_SHARED_JS = f"<script>{ui.TOOLTIP_JS}{ui.THEME_JS}{ui.SECTION_JS}</script>"
+_SHARED_JS = f"<script>{ui.TOOLTIP_JS}{ui.THEME_JS}{ui.SECTION_JS}{ui.LANG_JS}</script>"
 
 _FOOT = f"{_SHARED_JS}</div></body></html>"
 
@@ -181,32 +187,40 @@ def _topbar(active: str) -> str:
     auth_links = ""
     if _AUTH_ENABLED:
         auth_links = (
-            "<a href=\"/login\" class=\"btn sec\">Log in</a>"
+            f"<a href=\"/login\" class=\"btn sec\">{_t('Log in')}</a>"
             "<form method=\"post\" action=\"/logout\" style=\"margin:0\">"
-            "<button type=\"submit\" class=\"btn ghost\">Log out</button></form>"
+            f"<button type=\"submit\" class=\"btn ghost\">{_t('Log out')}</button></form>"
         )
+    lang_toggle = ui.lang_toggle_html(get_lang())
+    confirm_msg = _t(
+        "Shut down the server?\n\nThis stops this app AND any other process running "
+        "from this project (the demo target, stray CLI/pytest runs) — including ones "
+        "started in other terminals. You will need to start it again manually."
+    )
+    shutting_down = _t("Shutting down…")
+    shutdown_title = _t("Server is shutting down")
+    shutdown_body = _t(
+        "All processes for this project have been stopped. Start it again from a "
+        "terminal to continue."
+    )
     return f"""<div class="topbar">
-<a href="/" class="brand">{_MARK}<b>API Security Testing Platform</b></a>
+<a href="/" class="brand">{_MARK}<b>{_t("API Security Testing Platform")}</b></a>
 <div class="row" style="gap:16px">
 <nav class="tabs">
-<a href="/" class="{"active" if active == "dashboard" else ""}">Dashboard</a>
-<a href="/config" class="{"active" if active == "config" else ""}">Configuration</a>
+<a href="/" class="{"active" if active == "dashboard" else ""}">{_t("Dashboard")}</a>
+<a href="/config" class="{"active" if active == "config" else ""}">{_t("Configuration")}</a>
 </nav>
+{lang_toggle}
 {ui.THEME_TOGGLE_HTML}
 {auth_links}
-<button type="button" class="btn sec danger" onclick="shutdownServer()">Shutdown server</button>
+<button type="button" class="btn sec danger" onclick="shutdownServer()">{_t("Shutdown server")}</button>
 </div></div>
 <script>
 function shutdownServer() {{
-  if (!confirm(
-    'Shut down the server?\\n\\n' +
-    'This stops this app AND any other process running from this project ' +
-    '(the demo target, stray CLI/pytest runs) — including ones started in ' +
-    'other terminals. You will need to start it again manually.'
-  )) return;
+  if (!confirm({json.dumps(confirm_msg)})) return;
   document.querySelectorAll('.danger').forEach(function (b) {{
     b.disabled = true;
-    b.textContent = 'Shutting down…';
+    b.textContent = {json.dumps(shutting_down)};
   }});
   fetch('/admin/shutdown', {{
     method: 'POST',
@@ -219,9 +233,8 @@ function _shutdownDone() {{
   document.body.innerHTML =
     '<div style="max-width:520px;margin:80px auto;padding:24px;font:15px -apple-system,' +
     'BlinkMacSystemFont,\\'Segoe UI\\',sans-serif">' +
-    '<h1 style="font-size:18px;margin:0 0 8px">Server is shutting down</h1>' +
-    '<p style="color:#5b6b6d">All processes for this project have been stopped. ' +
-    'Start it again from a terminal to continue.</p></div>';
+    '<h1 style="font-size:18px;margin:0 0 8px">' + {json.dumps(shutdown_title)} + '</h1>' +
+    '<p style="color:#5b6b6d">' + {json.dumps(shutdown_body)} + '</p></div>';
 }}
 </script>"""
 
@@ -233,7 +246,7 @@ _THEME_BOOT = (
 
 
 def page(title: str, body: str, active: str = "") -> str:
-    head = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+    head = f"""<!doctype html><html lang="{get_lang()}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{_e(title)}</title>
 {_THEME_BOOT}<style>{_CSS}</style></head><body><div class="wrap">
 {_topbar(active)}
@@ -263,70 +276,92 @@ def dashboard(
     the one thing you already knew from having run it, and nothing about what it
     found.
     """
-    flash_html = f"<div class='card pad flash'>{_e(flash)}</div>" if flash else ""
+    flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
     warn_html = f"<div class='card pad warn'>&#9888; {_e(warning)}</div>" if warning else ""
 
     counts = Counter(a.status for a in assessments)
     summary = ui.stats([
-        (str(len(assessments)), "Assessments", "", ""),
-        (str(counts.get("CREATED", 0)), "Imported", "Analyzed, no plan generated yet.", ""),
-        (str(counts.get("ANALYZED", 0)), "Designed", "A plan exists; it may not be approved.", ""),
-        (str(counts.get("EXECUTED", 0)), "Executed", "At least one run has happened.", ""),
+        (str(len(assessments)), _t("Assessments"), "", ""),
+        (str(counts.get("CREATED", 0)), _t("Imported"), _t("Analyzed, no plan generated yet."), ""),
+        (str(counts.get("ANALYZED", 0)), _t("Designed"), _t("A plan exists; it may not be approved."), ""),
+        (str(counts.get("EXECUTED", 0)), _t("Executed"), _t("At least one run has happened."), ""),
     ])
 
     by_id = {r["id"]: r for r in (rows or [])}
     cards = "".join(_assessment_card(a, by_id.get(a.id, {})) for a in assessments)
     cards = cards or (
         "<p class='muted'>"
-        + ("No assessments match this filter." if (q or status)
-           else "No assessments yet — import a Jira issue above.")
+        + (_t("No assessments match this filter.") if (q or status)
+           else _t("No assessments yet — import a Jira issue above."))
         + "</p>"
     )
 
     target = (_e(engagement_target) if engagement_target
-              else "<span class='muted'>not configured — execution disabled</span>")
-    ai = "AI (Claude)" if ai_on else "deterministic (heuristic)"
+              else f"<span class='muted'>{_t('not configured — execution disabled')}</span>")
+    ai = _t("AI (Claude)") if ai_on else _t("deterministic (heuristic)")
 
     # Available keys come from the mock only; a live instance is not enumerated,
     # so the hint becomes "type your own key" rather than a stale list.
     keys = available_keys or []
     if keys:
-        hint = ("importable now: "
+        hint = (_t("importable now:") + " "
                 + ", ".join(f"<a href='#' class='keyfill'><code>{_e(k)}</code></a>" for k in keys))
         placeholder = _e(keys[0])
     else:
-        hint = "enter any issue key your Jira account can read"
+        hint = _t("enter any issue key your Jira account can read")
         placeholder = "ABC-123"
 
-    return page("Dashboard", f"""
+    plan_tip = _t(
+        "Analyze only: just the endpoint list and OWASP mapping, nothing designed yet — "
+        "pick this when the endpoint list needs correcting first. Auto-plan: the AI planner "
+        "adds its own attacks on top of the rule engine, then a reviewing agent audits the "
+        "result and sends gaps back for one revision round. Run ticket's PoC only: no "
+        "invented attacks — just the PoC script embedded in the ticket's description, "
+        "always sent to the target URL configured for this tool (never a host from the "
+        "script itself), still reviewed by the same reviewing agent read-only. Either way, "
+        "nothing runs: every test lands PENDING."
+    )
+    confirm_delete = _t("Delete this assessment? This cannot be undone.")
+    reimport_confirm = _t(
+        "Re-import {issue} from Jira?\n\nCreates a new assessment from the ticket as it "
+        "reads now. No tests are generated and nothing runs."
+    )
+    rerun_confirm = _t(
+        "Re-run {issue}?\n\nCreates a new assessment with the same plan and approvals, "
+        "then runs the approved non-destructive tests. Destructive tests are never "
+        "included in a re-run. The previous run is kept as the baseline."
+    )
+    working = _t("Working…")
+    running = _t("Running…")
+
+    return page(_t("Dashboard"), f"""
 {flash_html}{warn_html}
 <div class="chips" style="margin-bottom:18px">
-<span class="chip">Analyzer <b>{ai}</b></span>
+<span class="chip">{_t("Analyzer")} <b>{ai}</b></span>
 <span class="chip">Jira <b>{_e(jira_mode)}</b></span>
-<span class="chip">Target <b>{target}</b></span>
+<span class="chip">{_t("Target")} <b>{target}</b></span>
 </div>
 <div class="card pad" style="margin-bottom:22px">
-<label class="field" style="margin-bottom:8px"><span>Import a Jira issue</span></label>
+<label class="field" style="margin-bottom:8px"><span>{_t("Import a Jira issue")}</span></label>
 <form method="post" action="/import" class="row js-busy" style="align-items:flex-end">
 <input name="issue_key" id="issue_key" placeholder="{placeholder}" style="max-width:220px" required>
-<label class="field" style="max-width:150px;margin:0"><span>Depth</span>
+<label class="field" style="max-width:150px;margin:0"><span>{_t("Depth")}</span>
 <select name="depth">
-<option value="standard" selected>Standard</option>
-<option value="aggressive">Aggressive</option>
+<option value="standard" selected>{_t("Standard")}</option>
+<option value="aggressive">{_t("Aggressive")}</option>
 </select></label>
-<label class="row" style="gap:6px;align-items:center;margin:0 0 8px"
- data-tip="Analyze the ticket and its embedded PoC, design a plan, let the AI planner add
- depth, then have a reviewing agent audit the plan against the ticket&#39;s requirements and
- send its gaps back for one revision round. You land on the plan with something to approve.
- Nothing runs: every test arrives PENDING. Uncheck to analyze only &mdash; which is what you
- want when the endpoint list needs correcting first.">
-<input type="checkbox" name="plan" value="true" checked style="width:auto">
-<span class="muted">Plan &amp; review on import</span></label>
-<button class="btn">Import</button>
+<label class="field" style="max-width:190px;margin:0" data-tip="{attr(plan_tip)}">
+<span>{_t("On import")}</span>
+<select name="mode">
+<option value="analyze">{_t("Analyze only")}</option>
+<option value="auto_plan" selected>{_t("Auto-plan (AI attack planner)")}</option>
+<option value="ticket_poc">{_t("Run ticket's PoC only")}</option>
+</select></label>
+<button class="btn">{_t("Import")}</button>
 </form>
 <p class="muted" style="margin:8px 0 0;font-size:13px">{hint}</p></div>
 {summary}
-<h2 class="section">Recent assessments</h2>
+<h2 class="section">{_t("Recent assessments")}</h2>
 {_dashboard_toolbar(q, status, sort, per, len(assessments), page_no)}
 <div class="grid-cards">{cards}</div>
 <script>
@@ -338,7 +373,7 @@ document.querySelectorAll('form.js-busy').forEach(function (f) {{
     var btn = f.querySelector('button:not([type=button])');
     if (!btn || btn.disabled) return;
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Working…';
+    btn.innerHTML = '<span class="spinner"></span> ' + {json.dumps(working)};
   }});
 }});
 document.querySelectorAll('.keyfill').forEach(function (a) {{
@@ -349,22 +384,19 @@ document.querySelectorAll('.keyfill').forEach(function (a) {{
 }});
 document.querySelectorAll('.delete-form').forEach(function (f) {{
   f.addEventListener('submit', function (e) {{
-    if (!confirm('Delete this assessment? This cannot be undone.')) e.preventDefault();
+    if (!confirm({json.dumps(confirm_delete)})) e.preventDefault();
   }});
 }});
 document.querySelectorAll('.rerun-form').forEach(function (f) {{
   f.addEventListener('submit', function (e) {{
     var mode = f.querySelector('[name=mode]').value;
     var msg = mode === 'reimport'
-      ? 'Re-import ' + f.dataset.issue + ' from Jira?\\n\\nCreates a new assessment from ' +
-        'the ticket as it reads now. No tests are generated and nothing runs.'
-      : 'Re-run ' + f.dataset.issue + '?\\n\\nCreates a new assessment with the same plan ' +
-        'and approvals, then runs the approved non-destructive tests. Destructive tests ' +
-        'are never included in a re-run. The previous run is kept as the baseline.';
+      ? {json.dumps(reimport_confirm)}.replace('{{issue}}', f.dataset.issue)
+      : {json.dumps(rerun_confirm)}.replace('{{issue}}', f.dataset.issue);
     if (!confirm(msg)) {{ e.preventDefault(); return; }}
     var btn = f.querySelector('button');
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Running…';
+    btn.innerHTML = '<span class="spinner"></span> ' + {json.dumps(running)};
   }});
 }});
 </script>
@@ -384,22 +416,24 @@ def _dashboard_toolbar(q: str, status: str, sort: str, per: int, shown: int,
     def options(name, current, choices):
         opts = "".join(
             f'<option value="{attr(value)}"{" selected" if value == current else ""}>'
-            f"{_e(text)}</option>" for value, text in choices
+            f"{_e(_t(text))}</option>" for value, text in choices
         )
         return f'<select name="{attr(name)}" style="width:auto">{opts}</select>'
 
+    shown_label = _t("{n} shown").format(n=shown)
+    page_label = _t(" · page {n}").format(n=page_no) if page_no > 1 else ""
     return f"""<form method="get" action="/" class="toolbar">
-<label class="field grow"><span>Search issue key</span>
+<label class="field grow"><span>{_t("Search issue key")}</span>
 <input name="q" value="{attr(q)}" placeholder="BH-142" style="width:100%"></label>
-<label class="field"><span>Status</span>{options("status", status, _DASH_STATUS)}</label>
-<label class="field"><span>Sort</span>{options("sort", sort or "recent", _DASH_SORT)}</label>
-<label class="field"><span>Per page</span>
+<label class="field"><span>{_t("Status")}</span>{options("status", status, _DASH_STATUS)}</label>
+<label class="field"><span>{_t("Sort")}</span>{options("sort", sort or "recent", _DASH_SORT)}</label>
+<label class="field"><span>{_t("Per page")}</span>
 {options("per", str(per), [(str(n), str(n)) for n in (12, 24, 48, 96)])}</label>
 <div class="row" style="gap:6px;align-items:flex-end">
-<button class="btn sec">Apply</button>
-<a class="btn ghost" href="/">Clear</a></div>
+<button class="btn sec">{_t("Apply")}</button>
+<a class="btn ghost" href="/">{_t("Clear")}</a></div>
 <span class="count" style="align-self:flex-end;padding-bottom:8px">
-{shown} shown{f" &middot; page {page_no}" if page_no > 1 else ""}</span>
+{shown_label}{page_label}</span>
 </form>"""
 
 
@@ -410,11 +444,11 @@ def _assessment_card(a: Assessment, row: dict) -> str:
 
     facts = []
     if row.get("n_tests"):
-        facts.append(f'{row["n_tests"]} test(s)')
+        facts.append(_t("{n} test(s)").format(n=row["n_tests"]))
     if row.get("n_approved"):
-        facts.append(f'{row["n_approved"]} approved')
+        facts.append(_t("{n} approved").format(n=row["n_approved"]))
     if row.get("n_executions"):
-        facts.append(f'{row["n_executions"]} run')
+        facts.append(_t("{n} run").format(n=row["n_executions"]))
     facts_html = (f'<div class="muted" style="font-size:12px;margin-top:6px">'
                   f'{" &middot; ".join(facts)}</div>' if facts else "")
 
@@ -439,7 +473,7 @@ def _assessment_card(a: Assessment, row: dict) -> str:
     rerun = ""
     if row.get("n_tests"):
         mode = "same" if row.get("n_approved") else "reimport"
-        word = "Re-run" if row.get("n_approved") else "Re-import"
+        word = _t("Re-run") if row.get("n_approved") else _t("Re-import")
         rerun = (
             f'<form method="post" action="/assessment/{_e(a.id)}/rerun" '
             f'class="rerun-form" data-issue="{attr(a.issue_key)}" style="margin:0">'
@@ -460,36 +494,42 @@ def _assessment_card(a: Assessment, row: dict) -> str:
         f"<form method='post' action='/assessment/{_e(a.id)}/delete' class='delete-form' "
         f"style='margin:0'>"
         f"<button type='submit' class='btn ghost danger' "
-        f"style='padding:3px 9px;font-size:12px'>Delete</button></form></div></div>"
+        f"style='padding:3px 9px;font-size:12px'>{_t('Delete')}</button></form></div></div>"
     )
 
 
 def login_page(flash: str = "") -> str:
-    flash_html = f"<div class='card pad flash'>{_e(flash)}</div>" if flash else ""
-    return page("Log in", f"""
-<h1 style="font-size:19px">Log in</h1>
-<p class="sub">Multi-user auth is enabled. Paste the API key printed by
-<code>python -m app.core.auth add &lt;name&gt; &lt;role&gt;</code> to authenticate this
-browser for actions like designing tests, approving, and executing. Reads stay open either way.</p>
+    flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
+    intro = _t(
+        "Multi-user auth is enabled. Paste the API key printed by "
+        "<code>python -m app.core.auth add &lt;name&gt; &lt;role&gt;</code> to authenticate "
+        "this browser for actions like designing tests, approving, and executing. Reads "
+        "stay open either way."
+    )
+    return page(_t("Log in"), f"""
+<h1 style="font-size:19px">{_t("Log in")}</h1>
+<p class="sub">{intro}</p>
 {flash_html}
 <div class="card pad" style="max-width:420px">
 <form method="post" action="/login">
-<label class="field" style="margin-bottom:12px"><span>API key</span>
+<label class="field" style="margin-bottom:12px"><span>{_t("API key")}</span>
 <input type="password" name="api_key" required autofocus></label>
-<button class="btn">Log in</button>
+<button class="btn">{_t("Log in")}</button>
 </form>
 </div>
 """)
 
 
 def error_page(title: str, headline: str, hint_html: str,
-                back_href: str = "/", back_label: str = "← Back to dashboard") -> str:
+                back_href: str = "/", back_label: str | None = None) -> str:
     """A failure as a readable page instead of a bare 500. `headline` may
     contain user input and is escaped; `hint_html` is markup we build ourselves."""
+    back_label = _t(back_label if back_label is not None else "← Back to dashboard")
+    title = _t(title)
     return page(title, f"""
 <h1 style="font-size:19px">{_e(title)}</h1>
 <div class="card pad err">
-<p style="margin:0 0 8px"><b>{_e(headline)}</b></p>
+<p style="margin:0 0 8px"><b>{_e(_t(headline))}</b></p>
 <p class="muted" style="margin:0">{hint_html}</p>
 </div>
 <p><a href="{_e(back_href)}" class="btn sec">{_e(back_label)}</a></p>
@@ -578,7 +618,7 @@ def assessment_page(
 
 def test_detail_page(assessment: Assessment, test: TestCase, flash: str = "") -> str:
     aid = assessment.id
-    flash_html = f"<div class='card pad flash'>{_e(flash)}</div>" if flash else ""
+    flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
 
     headers_text = "\n".join(f"{k}: {v}" for k, v in test.request.headers.items())
     query_text = "\n".join(f"{k}={v}" for k, v in test.request.query.items())
@@ -651,7 +691,7 @@ and re-approve it on the assessment page before it can run.</p>
 def regression_page(aid: str, issue_key: str, prev_id: str | None, diff, comment: str,
                     flash: str = "") -> str:
     s = diff.summary()
-    flash_html = f"<div class='card pad flash'>{_e(flash)}</div>" if flash else ""
+    flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
     banner_cls = "err" if s["regressed"] else "flash"
     banner = "⚠️ REGRESSION — new findings since last run" if s["regressed"] else (
         "✅ No new findings since last run")
@@ -722,8 +762,15 @@ _CONFIG_TABS = [
     ("scope", "Scope"),
     ("personas", "Personas"),
     ("runner", "Runner limits"),
+    ("mcp", "MCP"),
     ("runtime", "Runtime (.env)"),
 ]
+
+VI.update({
+    "Readiness": "Sẵn sàng", "Environments": "Môi trường", "Scope": "Phạm vi",
+    "Personas": "Persona", "Runner limits": "Giới hạn runner", "MCP": "MCP",
+    "Runtime (.env)": "Runtime (.env)",
+})
 
 
 def _kv_textarea_value(mapping: dict, sep: str) -> str:
@@ -754,50 +801,51 @@ def _readiness_pane(readiness, engagement_path: str) -> str:
     env_rows = ""
     for env in readiness.environments:
         cls = _READY_CLASS[env.state]
-        star = " <span class='pill low'>default</span>" if env.is_active else ""
+        star = f" <span class='pill low'>{_t('default')}</span>" if env.is_active else ""
         ip = (f"<div class='muted mono' style='font-size:11.5px'>{_e(env.resolved_ip)}</div>"
               if env.resolved_ip else "")
+        verdict_word = _t("ALLOWED") if env.state == "ok" else _t("BLOCKED")
         env_rows += (
             f"<tr><td><code>{_e(env.name)}</code>{star}</td>"
             f"<td class='mono' style='font-size:12.5px'>{_e(env.url)}</td>"
-            f"<td><span class='pill {cls}'>{'ALLOWED' if env.state == 'ok' else 'BLOCKED'}</span>"
+            f"<td><span class='pill {cls}'>{verdict_word}</span>"
             f"{ip}</td>"
             f"<td class='muted'>{_e(env.reason)}</td></tr>"
         )
-    env_rows = env_rows or "<tr><td colspan='4' class='muted'>No environments to check.</td></tr>"
+    env_rows = env_rows or f"<tr><td colspan='4' class='muted'>{_t('No environments to check.')}</td></tr>"
 
     if readiness.can_run:
-        verdict = ("<div class='card pad flash' style='margin-bottom:16px'>"
-                   "<b>&#10003; Ready to run.</b> Nothing in this configuration will "
-                   "stop a request from being sent.</div>")
+        verdict = (f"<div class='card pad flash' style='margin-bottom:16px'>"
+                   f"<b>&#10003; {_t('Ready to run.')}</b> "
+                   f"{_t('Nothing in this configuration will stop a request from being sent.')}</div>")
     else:
         verdict = ("<div class='card pad err' style='margin-bottom:16px'>"
-                   f"<b>&#10007; {readiness.n_blocking} blocking issue(s).</b> "
-                   "A run started now comes back entirely BLOCKED or ERROR. Each row "
-                   "below names the setting and the pane that fixes it.</div>")
+                   f"<b>&#10007; {_t('{n} blocking issue(s).').format(n=readiness.n_blocking)}</b> "
+                   f"{_t('A run started now comes back entirely BLOCKED or ERROR. Each row below names the setting and the pane that fixes it.')}</div>")
 
     return f"""{verdict}
 <div class="card" style="margin-bottom:22px"><div class="tblwrap"><table>
-<tr><th style="width:110px">State</th><th>Check</th></tr>{rows}</table></div></div>
+<tr><th style="width:110px">{_t("State")}</th><th>{_t("Check")}</th></tr>{rows}</table></div></div>
 
-<h2 class="section">Scope verdict per environment</h2>
-<p class="muted" style="margin:-4px 0 10px">Each base URL run through the same
-<code>ScopeValidator</code> the runner calls, DNS lookup included. Whatever this table
-says here is exactly what the execution log will say.</p>
+<h2 class="section">{_t("Scope verdict per environment")}</h2>
+<p class="muted" style="margin:-4px 0 10px">{_t(
+    'Each base URL run through the same <code>ScopeValidator</code> the runner calls, DNS '
+    'lookup included. Whatever this table says here is exactly what the execution log will say.'
+)}</p>
 <div class="card"><div class="tblwrap"><table>
-<tr><th>Environment</th><th>Base URL</th><th>Verdict</th><th>Reason</th></tr>{env_rows}
+<tr><th>{_t("Environment")}</th><th>{_t("Base URL")}</th><th>{_t("Verdict")}</th><th>{_t("Reason")}</th></tr>{env_rows}
 </table></div></div>
-<p class="muted" style="margin-top:12px">Config file: <code>{_e(engagement_path)}</code></p>"""
+<p class="muted" style="margin-top:12px">{_t("Config file:")} <code>{_e(engagement_path)}</code></p>"""
 
 
 def _environments_pane(environments: dict[str, str], active: str) -> str:
     rows = ""
     for name, url in environments.items():
-        badge = " <span class='pill low'>default</span>" if name == active else ""
+        badge = f" <span class='pill low'>{_t('default')}</span>" if name == active else ""
         make_default = "" if name == active else (
             f"<form method='post' action='/config/environments/{_e(name)}/activate' "
             f"style='margin:0;display:inline-block'>"
-            f"<button class='btn ghost' style='padding:4px 8px'>Make default</button></form>"
+            f"<button class='btn ghost' style='padding:4px 8px'>{_t('Make default')}</button></form>"
         )
         rows += (
             f"<tr><td><b>{_e(name)}</b>{badge}</td><td class='mono'>{_e(url)}</td>"
@@ -805,30 +853,38 @@ def _environments_pane(environments: dict[str, str], active: str) -> str:
             f"<form method='post' action='/config/environments/{_e(name)}/delete' "
             f"style='margin:0;display:inline-block' class='confirm-delete' "
             f"data-what='environment {_e(name)}'>"
-            f"<button class='btn sec' style='padding:4px 10px'>Delete</button></form></td></tr>"
+            f"<button class='btn sec' style='padding:4px 10px'>{_t('Delete')}</button></form></td></tr>"
         )
-    rows = rows or "<tr><td colspan='3' class='muted'>No environments configured yet.</td></tr>"
-    return f"""<p class="muted" style="margin:0 0 12px">Named target URLs. Only the
-path/method/body of a pasted PoC survive transpiling, so whichever base URL is picked
-here is what actually gets called.</p>
+    rows = rows or f"<tr><td colspan='3' class='muted'>{_t('No environments configured yet.')}</td></tr>"
+    intro = _t(
+        "Named target URLs. Only the path/method/body of a pasted PoC survive transpiling, "
+        "so whichever base URL is picked here is what actually gets called."
+    )
+    authorize_tip = _t(
+        "Adds this URL's hostname to scope.allowed_hosts. Without it every request to "
+        "the new environment is refused before it is sent."
+    )
+    authorize_note = _t(
+        "<b>Authorize its host</b> adds the hostname to <b>Scope &rarr; approved hosts</b> "
+        "in the same step. Leave it off for a target the engagement does not actually cover "
+        "— the URL is then saved but every request to it stays blocked, which is the safe "
+        "direction to fail in."
+    )
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
 <div class="card" style="margin-bottom:18px"><div class="tblwrap"><table>
-<tr><th>Name</th><th>Base URL</th><th></th></tr>{rows}</table></div></div>
+<tr><th>{_t("Name")}</th><th>{_t("Base URL")}</th><th></th></tr>{rows}</table></div></div>
 <div class="card pad">
 <form method="post" action="/config/environments" class="row">
 <input name="name" placeholder="staging" style="max-width:160px" required>
 <input name="url" placeholder="https://staging.company.com" style="flex:1;min-width:240px" required>
 <label class="muted" style="display:flex;align-items:center;gap:4px">
-<input type="checkbox" name="make_active" value="true" style="width:auto"> make default</label>
+<input type="checkbox" name="make_active" value="true" style="width:auto"> {_t("make default")}</label>
 <label class="muted" style="display:flex;align-items:center;gap:4px"
- title="Adds this URL's hostname to scope.allowed_hosts. Without it every request to
- the new environment is refused before it is sent.">
-<input type="checkbox" name="authorize_host" value="true" style="width:auto" checked> authorize its host</label>
-<button class="btn">Save</button>
+ title="{attr(authorize_tip)}">
+<input type="checkbox" name="authorize_host" value="true" style="width:auto" checked> {_t("authorize its host")}</label>
+<button class="btn">{_t("Save")}</button>
 </form>
-<p class="muted" style="margin:10px 0 0"><b>Authorize its host</b> adds the hostname to
-<b>Scope &rarr; approved hosts</b> in the same step. Leave it off for a target the
-engagement does not actually cover — the URL is then saved but every request to it stays
-blocked, which is the safe direction to fail in.</p>
+<p class="muted" style="margin:10px 0 0">{authorize_note}</p>
 </div>"""
 
 
@@ -836,31 +892,40 @@ def _scope_pane(policy) -> str:
     allowed = "\n".join(sorted(policy.allowed_hosts))
     blocked = "\n".join(sorted(policy.blocked_hosts))
     priv = "checked" if policy.allow_private_ranges else ""
-    return f"""<p class="muted" style="margin:0 0 12px">The authorization boundary.
-Every outbound request is checked against this before it is sent, and the hostname must
-appear in <b>approved hosts</b> exactly — there are no wildcards, because a wildcard in a
-pentest authorization list is how an unauthorized host gets tested by accident.</p>
+    intro = _t(
+        "The authorization boundary. Every outbound request is checked against this "
+        "before it is sent, and the hostname must appear in <b>approved hosts</b> exactly "
+        "— there are no wildcards, because a wildcard in a pentest authorization list is "
+        "how an unauthorized host gets tested by accident."
+    )
+    priv_note = _t(
+        "Off by default. When off, a host that <i>resolves</i> to 127.0.0.0/8, 10/8, "
+        "172.16/12, 192.168/16 or 169.254/16 (cloud metadata) is refused even if its name "
+        "is on the approved list — that check is what stops a DNS-based SSRF from reaching "
+        "an internal service. Turn it on only for a local lab target."
+    )
+    footer = _t(
+        "Hostnames only — no scheme, no port, no path. A port is not part of the check "
+        "(<code>api.example.com:8443</code> is authorized by <code>api.example.com</code>), "
+        "and DNS is resolved and the resulting IP re-checked on every request, so a name "
+        "that resolves somewhere new is caught at send time."
+    )
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
 <div class="card pad">
 <form method="post" action="/config/scope">
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-<label class="field"><span>Approved hosts — one per line</span>
+<label class="field"><span>{_t("Approved hosts — one per line")}</span>
 <textarea name="allowed_hosts" rows="7" placeholder="staging-api.company.com&#10;127.0.0.1">{_e(allowed)}</textarea></label>
-<label class="field"><span>Blocked hosts — one per line (always wins)</span>
+<label class="field"><span>{_t("Blocked hosts — one per line (always wins)")}</span>
 <textarea name="blocked_hosts" rows="7" placeholder="production.company.com">{_e(blocked)}</textarea></label>
 </div>
 <label class="row" style="gap:8px;margin-top:14px;align-items:flex-start">
 <input type="checkbox" name="allow_private_ranges" value="true" style="width:auto;margin-top:3px" {priv}>
-<span><b>Allow private / loopback ranges</b><br>
-<span class="muted">Off by default. When off, a host that <i>resolves</i> to
-127.0.0.0/8, 10/8, 172.16/12, 192.168/16 or 169.254/16 (cloud metadata) is refused even if
-its name is on the approved list — that check is what stops a DNS-based SSRF from
-reaching an internal service. Turn it on only for a local lab target.</span></span></label>
-<div style="margin-top:14px"><button class="btn">Save scope</button></div>
+<span><b>{_t("Allow private / loopback ranges")}</b><br>
+<span class="muted">{priv_note}</span></span></label>
+<div style="margin-top:14px"><button class="btn">{_t("Save scope")}</button></div>
 </form></div>
-<p class="muted" style="margin-top:12px">Hostnames only — no scheme, no port, no path.
-A port is not part of the check (<code>api.example.com:8443</code> is authorized by
-<code>api.example.com</code>), and DNS is resolved and the resulting IP re-checked on
-every request, so a name that resolves somewhere new is caught at send time.</p>"""
+<p class="muted" style="margin-top:12px">{footer}</p>"""
 
 
 def _personas_pane(personas: list[dict], attacker: str, victim: str) -> str:
@@ -870,34 +935,40 @@ def _personas_pane(personas: list[dict], attacker: str, victim: str) -> str:
         name = p.get("name", "")
         roles = ""
         if name == attacker:
-            roles += " <span class='pill med'>attacker</span>"
+            roles += f" <span class='pill med'>{_t('attacker')}</span>"
         if name == victim:
-            roles += " <span class='pill high'>victim</span>"
+            roles += f" <span class='pill high'>{_t('victim')}</span>"
         headers = _kv_textarea_value(p.get("auth_headers") or {}, ": ")
         owns = _kv_textarea_value(p.get("owns") or {}, "=")
         markers = "\n".join(p.get("secret_markers") or [])
+        scoping = "\n".join(p.get("scoping_headers") or [])
+        save_label = _t("Save {name}").format(name=_e(name))
         cards += f"""<div class="card pad" style="margin-bottom:12px">
 <div class="row" style="justify-content:space-between;margin-bottom:10px">
 <div><b>{_e(name)}</b>{roles}</div>
 <form method="post" action="/config/personas/{_e(name)}/delete" style="margin:0"
  class="confirm-delete" data-what="persona {_e(name)}">
-<button class="btn ghost">Delete</button></form>
+<button class="btn ghost">{_t("Delete")}</button></form>
 </div>
 <form method="post" action="/config/personas">
 <input type="hidden" name="name" value="{_e(name)}">
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-<label class="field"><span>Role label</span>
+<label class="field"><span>{_t("Role label")}</span>
 <input name="role" value="{_e(p.get('role', 'user'))}"></label>
-<label class="field"><span>Owned object ids — key=value per line</span>
+<label class="field"><span>{_t("Owned object ids — key=value per line")}</span>
 <textarea name="owns" rows="3" placeholder="customer_id=2002">{_e(owns)}</textarea></label>
 </div>
-<label class="field" style="margin-top:12px"><span>Auth headers — Header: value per line</span>
+<label class="field" style="margin-top:12px"><span>{_t("Auth headers — Header: value per line")}</span>
 <textarea name="auth_headers" rows="3" placeholder="Authorization: Bearer eyJ...">{_e(headers)}</textarea></label>
-<label class="field" style="margin-top:12px"><span>Secret markers — one per line</span>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
+<label class="field"><span>{_t("Secret markers — one per line")}</span>
 <textarea name="secret_markers" rows="2" placeholder="beth.victim@example.com">{_e(markers)}</textarea></label>
-<div style="margin-top:12px"><button class="btn">Save {_e(name)}</button></div>
+<label class="field"><span>{_t("Scoping headers to strip on privilege-escalation tests — one per line")}</span>
+<textarea name="scoping_headers" rows="2" placeholder="entity-context">{_e(scoping)}</textarea></label>
+</div>
+<div style="margin-top:12px"><button class="btn">{save_label}</button></div>
 </form></div>"""
-    cards = cards or "<p class='muted'>No personas defined yet — add one below.</p>"
+    cards = cards or f"<p class='muted'>{_t('No personas defined yet — add one below.')}</p>"
 
     def opts(selected: str) -> str:
         out = "".join(
@@ -906,54 +977,64 @@ def _personas_pane(personas: list[dict], attacker: str, victim: str) -> str:
         )
         if selected and selected not in names:
             out = (f"<option value='{_e(selected)}' selected>{_e(selected)} "
-                   f"— not defined!</option>" + out)
-        return out or "<option value=''>— no personas defined —</option>"
+                   f"— {_t('not defined!')}</option>" + out)
+        return out or f"<option value=''>— {_t('no personas defined')} —</option>"
 
-    return f"""<p class="muted" style="margin:0 0 12px">Test identities and their
-credentials. You cannot test broken object-level authorization with one identity:
-BOLA means "A reaches B's object", which needs two real accounts plus knowledge of what
-each legitimately owns. Tests reference personas <i>by name</i>, so a token never lands
-in a test case, an export or a report.</p>
+    personas_intro = _t(
+        'Test identities and their credentials. You cannot test broken object-level '
+        'authorization with one identity: BOLA means "A reaches B\'s object", which needs '
+        'two real accounts plus knowledge of what each legitimately owns. Tests reference '
+        'personas <i>by name</i>, so a token never lands in a test case, an export or a report.'
+    )
+    roles_note = _t(
+        "The attacker sends the requests; generated BOLA cases aim it at ids the victim "
+        "owns. Point these at two <i>different</i> personas or the results are "
+        "inconclusive by construction."
+    )
+    add_footer = _t(
+        "Use dedicated test accounts. Credentials are written to the engagement config in "
+        "plain text and every response is passed through secret redaction before it reaches "
+        "a report — but a real user's token does not belong in either."
+    )
+
+    return f"""<p class="muted" style="margin:0 0 12px">{personas_intro}</p>
 
 <div class="card pad" style="margin-bottom:18px">
 <form method="post" action="/config/identities" class="row" style="align-items:flex-end">
-<label class="field" style="max-width:220px"><span>Attacker persona</span>
+<label class="field" style="max-width:220px"><span>{_t("Attacker persona")}</span>
 <select name="attacker">{opts(attacker)}</select></label>
-<label class="field" style="max-width:220px"><span>Victim persona</span>
+<label class="field" style="max-width:220px"><span>{_t("Victim persona")}</span>
 <select name="victim">{opts(victim)}</select></label>
-<button class="btn">Save roles</button>
+<button class="btn">{_t("Save roles")}</button>
 </form>
-<p class="muted" style="margin:10px 0 0">The attacker sends the requests; generated
-BOLA cases aim it at ids the victim owns. Point these at two <i>different</i> personas
-or the results are inconclusive by construction.</p>
+<p class="muted" style="margin:10px 0 0">{roles_note}</p>
 </div>
 
-<h2 class="section">Defined personas</h2>
+<h2 class="section">{_t("Defined personas")}</h2>
 {cards}
 
-<h2 class="section">Add a persona</h2>
+<h2 class="section">{_t("Add a persona")}</h2>
 <div class="card pad">
 <form method="post" action="/config/personas">
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-<label class="field"><span>Name</span>
+<label class="field"><span>{_t("Name")}</span>
 <input name="name" placeholder="agent_A" required></label>
-<label class="field"><span>Role label</span>
+<label class="field"><span>{_t("Role label")}</span>
 <input name="role" placeholder="agent" value="user"></label>
 </div>
-<label class="field" style="margin-top:12px"><span>Auth headers — Header: value per line</span>
+<label class="field" style="margin-top:12px"><span>{_t("Auth headers — Header: value per line")}</span>
 <textarea name="auth_headers" rows="3" placeholder="Authorization: Bearer eyJ..."></textarea></label>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
-<label class="field"><span>Owned object ids — key=value per line</span>
+<label class="field"><span>{_t("Owned object ids — key=value per line")}</span>
 <textarea name="owns" rows="2" placeholder="customer_id=1001"></textarea></label>
-<label class="field"><span>Secret markers — one per line</span>
+<label class="field"><span>{_t("Secret markers — one per line")}</span>
 <textarea name="secret_markers" rows="2" placeholder="alice.buyer@example.com"></textarea></label>
 </div>
-<div style="margin-top:12px"><button class="btn">Add persona</button></div>
+<label class="field" style="margin-top:12px"><span>{_t("Scoping headers to strip on privilege-escalation tests — one per line")}</span>
+<textarea name="scoping_headers" rows="2" placeholder="entity-context"></textarea></label>
+<div style="margin-top:12px"><button class="btn">{_t("Add persona")}</button></div>
 </form>
-<p class="muted" style="margin:10px 0 0">Use dedicated test accounts. Credentials are
-written to the engagement config in plain text and every response is passed through
-secret redaction before it reaches a report — but a real user's token does not belong
-in either.</p>
+<p class="muted" style="margin:10px 0 0">{add_footer}</p>
 </div>"""
 
 
@@ -967,25 +1048,105 @@ def _runner_pane(limits, overrides: dict) -> str:
  placeholder="{_e(env_default)} (from .env)">
 <span class="muted" style="font-size:11.5px;text-transform:none;letter-spacing:0">{hint}</span></label>"""
 
-    return f"""<p class="muted" style="margin:0 0 12px">Hard caps the trusted runner
-applies to every outbound request. Blank means "use the <code>.env</code> value" shown as
-the placeholder; a value here overrides it for this engagement only, with no restart.</p>
+    intro = _t(
+        'Hard caps the trusted runner applies to every outbound request. Blank means '
+        '"use the <code>.env</code> value" shown as the placeholder; a value here '
+        'overrides it for this engagement only, with no restart.'
+    )
+    footer = _t(
+        "The runner never auto-follows a redirect: a 302 to an internal host is the same "
+        "SSRF wearing a hat, and blindly chasing it would let the HTTP client re-resolve DNS "
+        "outside the scope gate. A 3xx response is captured and evaluated exactly as received "
+        "— there is no redirect setting to tune here."
+    )
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
 <div class="card pad">
 <form method="post" action="/config/runner">
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
-{field("timeout_s", "Request timeout (s)", "Raise it for a slow staging host.", "0.5")}
-{field("max_requests_per_test", "Max requests per test", "Caps a single test's fan-out, race windows included.")}
-{field("max_response_bytes", "Max response bytes", "Body larger than this is truncated before storage.")}
-{field("max_redirects", "Max redirects", "0 keeps auto-follow off — every hop is re-validated against scope explicitly.")}
+{field("timeout_s", _t("Request timeout (s)"), _t("Raise it for a slow staging host."), "0.5")}
+{field("max_requests_per_test", _t("Max requests per test"), _t("Caps a single test's fan-out, race windows included."))}
+{field("max_response_bytes", _t("Max response bytes"), _t("Body larger than this is truncated before storage."))}
 </div>
 <div style="margin-top:14px" class="row">
-<button class="btn">Save limits</button>
-<button class="btn ghost" name="reset" value="true">Reset to .env defaults</button>
+<button class="btn">{_t("Save limits")}</button>
+<button class="btn ghost" name="reset" value="true">{_t("Reset to .env defaults")}</button>
 </div>
 </form></div>
-<p class="muted" style="margin-top:12px">Leaving redirects at 0 is deliberate: a 302 to an
-internal host is the same SSRF wearing a hat, so the runner follows hops itself and
-re-validates each one rather than letting the HTTP client do it silently.</p>"""
+<p class="muted" style="margin-top:12px">{footer}</p>"""
+
+
+def _mcp_pane(
+    jira_mode: str,
+    jira_live: bool,
+    jira_warning: str,
+    jira_env: list[tuple[str, str, str]],
+    jira_keys: list[str],
+) -> str:
+    cls = "low" if jira_live else "med"
+    word = _t("LIVE") if jira_live else _t("MOCK")
+    warning_html = (
+        f"<div class='muted' style='margin-top:6px;color:var(--crit)'>&#9888; {_e(jira_warning)}</div>"
+        if jira_warning else ""
+    )
+    keys_html = (
+        f"<div class='muted' style='margin-top:6px'>{_t('Serves:')} "
+        + ", ".join(f"<code>{_e(k)}</code>" for k in jira_keys) + "</div>"
+        if jira_keys else ""
+    )
+    env_rows = "".join(
+        f"<tr><td class='mono'>{_e(name)}</td>"
+        f"<td><span class='pill {'low' if status == 'set' else 'med'}'>{_t(status.upper())}</span></td>"
+        f"<td class='muted'>{_e(hint)}</td></tr>"
+        for name, status, hint in jira_env
+    )
+    intro = _t(
+        "External MCP connectors this platform talks to. Credentials live in <code>.env</code> "
+        "only — never in <code>engagement.json</code> or a report. <b>Reconnect</b> re-reads "
+        "<code>.env</code> and rebinds the client in place, which is all a restart would have "
+        "done anyway — useful right after refreshing a short-lived OAuth token."
+    )
+    refresh_note = _t(
+        "<b>Refresh token</b> opens the Atlassian OAuth login in your browser, waits for it, "
+        "and reconnects automatically — needs Node.js (<code>npx</code>) and a browser on the "
+        "machine running this app. If that isn't available here, do it by hand instead: "
+        "authorize once with <code>npx -y mcp-remote https://mcp.atlassian.com/v1/mcp</code>, "
+        "run <code>npm run jira:token</code> to pull the new token into <code>.env</code>, then "
+        "click <b>Reconnect</b> above."
+    )
+    postman_note = _t(
+        "No MCP integration is wired up for this platform — there is nothing here yet to "
+        "connect or reconnect. (Separately, a completed assessment can already export a "
+        "Postman collection from its report page — a one-way file export, unrelated to this "
+        "connector list.)"
+    )
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
+
+<div class="card pad" style="margin-bottom:18px">
+<div class="row" style="justify-content:space-between;align-items:flex-start">
+<div>
+<b>Jira</b> <span class="pill {cls}" style="margin-left:6px">{word}</span>
+<div class="muted" style="margin-top:4px">{_e(jira_mode)}</div>
+{warning_html}{keys_html}
+</div>
+<div class="row" style="gap:8px;margin:0">
+<form method="post" action="/config/mcp/jira/refresh-token" class="js-busy" style="margin:0">
+<button class="btn ghost">{_t("Refresh token")}</button></form>
+<form method="post" action="/config/mcp/jira/reconnect" style="margin:0">
+<button class="btn">{_t("Reconnect")}</button></form>
+</div>
+</div>
+</div>
+
+<div class="card" style="margin-bottom:18px"><div class="tblwrap"><table>
+<tr><th>{_t("Environment variable")}</th><th>{_t("Status")}</th><th>{_t("Purpose")}</th></tr>{env_rows}
+</table></div></div>
+<p class="muted" style="margin-bottom:22px">{refresh_note}</p>
+
+<h2 class="section">{_t("Other connectors")}</h2>
+<div class="card pad">
+<b>Postman</b> <span class="pill med" style="margin-left:6px">{_t("NOT CONFIGURED")}</span>
+<div class="muted" style="margin-top:4px">{postman_note}</div>
+</div>"""
 
 
 def _runtime_pane(facts: list[tuple[str, str, str]]) -> str:
@@ -994,15 +1155,21 @@ def _runtime_pane(facts: list[tuple[str, str, str]]) -> str:
         f"<td class='muted'>{_e(hint)}</td></tr>"
         for label, value, hint in facts
     )
-    return f"""<p class="muted" style="margin:0 0 12px">Read-only. These come from the
-process environment (<code>.env</code>), are read at startup, and need a server restart to
-change — so they are shown here rather than made editable, which would offer a save button
-that quietly does nothing until the next boot.</p>
+    intro = _t(
+        "Read-only. These come from the process environment (<code>.env</code>), are read "
+        "at startup, and need a server restart to change — so they are shown here rather "
+        "than made editable, which would offer a save button that quietly does nothing "
+        "until the next boot."
+    )
+    footer = _t(
+        "Secrets are never echoed here — only whether one is present. Keep tokens in "
+        "<code>.env</code>, never in <code>engagement.json</code>."
+    )
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
 <div class="card"><div class="tblwrap"><table>
-<tr><th>Setting</th><th>Current</th><th>Environment variable</th></tr>{rows}
+<tr><th>{_t("Setting")}</th><th>{_t("Current")}</th><th>{_t("Environment variable")}</th></tr>{rows}
 </table></div></div>
-<p class="muted" style="margin-top:12px">Secrets are never echoed here — only whether one
-is present. Keep tokens in <code>.env</code>, never in <code>engagement.json</code>.</p>"""
+<p class="muted" style="margin-top:12px">{footer}</p>"""
 
 
 def config_page(
@@ -1011,14 +1178,19 @@ def config_page(
     engagement_path: str,
     limits,
     runtime: list[tuple[str, str, str]],
+    jira_mode: str,
+    jira_live: bool,
+    jira_warning: str,
+    jira_env: list[tuple[str, str, str]],
+    jira_keys: list[str],
     tab: str = "readiness",
     flash: str = "",
     error: str = "",
 ) -> str:
     if tab not in dict(_CONFIG_TABS):
         tab = "readiness"
-    flash_html = f"<div class='card pad flash'>{_e(flash)}</div>" if flash else ""
-    error_html = f"<div class='card pad err'>&#9888; {_e(error)}</div>" if error else ""
+    flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
+    error_html = f"<div class='card pad err'>&#9888; {_e(_t(error))}</div>" if error else ""
 
     panes = {
         "readiness": _readiness_pane(readiness, engagement_path),
@@ -1030,19 +1202,20 @@ def config_page(
             engagement.victim,
         ),
         "runner": _runner_pane(limits, engagement.runner),
+        "mcp": _mcp_pane(jira_mode, jira_live, jira_warning, jira_env, jira_keys),
         "runtime": _runtime_pane(runtime),
     }
 
     state_cls = _READY_CLASS[readiness.state]
     if readiness.n_blocking:
-        counts = f"{readiness.n_blocking} blocking"
+        counts = _t("{n} blocking").format(n=readiness.n_blocking)
     elif readiness.n_warnings:
-        counts = f"{readiness.n_warnings} to check"
+        counts = _t("{n} to check").format(n=readiness.n_warnings)
     else:
-        counts = "all checks pass"
+        counts = _t("all checks pass")
 
     buttons = "".join(
-        f"<button class='{'active' if key == tab else ''}' data-tab='cfg-{key}'>{label}"
+        f"<button class='{'active' if key == tab else ''}' data-tab='cfg-{key}'>{_t(label)}"
         + (f" <span class='pill {state_cls}' style='margin-left:6px'>{readiness.n_blocking or ''}</span>"
            if key == "readiness" and readiness.n_blocking else "")
         + "</button>"
@@ -1053,11 +1226,11 @@ def config_page(
         for key, _label in _CONFIG_TABS
     )
 
-    return page("Configuration", f"""
+    return page(_t("Configuration"), f"""
 <div class="topbar" style="margin-bottom:14px">
-<div><h1>Configuration</h1>
-<p class="sub" style="margin:2px 0 0">Everything a run depends on, in one place.</p></div>
-<span class="chip">Status <b class="pill {state_cls}" style="margin-left:6px">{_e(counts)}</b></span>
+<div><h1>{_t("Configuration")}</h1>
+<p class="sub" style="margin:2px 0 0">{_t("Everything a run depends on, in one place.")}</p></div>
+<span class="chip">{_t("Status")} <b class="pill {state_cls}" style="margin-left:6px">{_e(counts)}</b></span>
 </div>
 {flash_html}{error_html}
 <div class="tabbar" id="config-tabs">{buttons}</div>
@@ -1091,3 +1264,285 @@ def config_page(
 }})();
 </script>
 """, active="config")
+
+
+VI.update({
+    # -- shared chrome (topbar, present on every page) --
+    "API Security Testing Platform": "Nền tảng kiểm thử bảo mật API",
+    "Dashboard": "Trang chủ",
+    "Configuration": "Cấu hình",
+    "Log in": "Đăng nhập",
+    "Log out": "Đăng xuất",
+    "Shutdown server": "Tắt server",
+    "Shutting down…": "Đang tắt…",
+    "Server is shutting down": "Server đang tắt",
+    "All processes for this project have been stopped. Start it again from a "
+    "terminal to continue.":
+        "Mọi tiến trình của dự án này đã dừng. Khởi động lại từ terminal để tiếp tục.",
+    "Shut down the server?\n\nThis stops this app AND any other process running "
+    "from this project (the demo target, stray CLI/pytest runs) — including ones "
+    "started in other terminals. You will need to start it again manually.":
+        "Tắt server?\n\nThao tác này dừng app này VÀ mọi tiến trình khác của dự án "
+        "(demo target, các lệnh CLI/pytest đang chạy lẻ) — kể cả những tiến trình "
+        "khởi động từ terminal khác. Bạn sẽ phải tự khởi động lại.",
+    # -- dashboard --
+    "Assessments": "Assessment", "Imported": "Đã nhập", "Designed": "Đã lên kế hoạch",
+    "Executed": "Đã chạy",
+    "Analyzed, no plan generated yet.": "Đã phân tích, chưa có kế hoạch.",
+    "A plan exists; it may not be approved.": "Đã có kế hoạch; có thể chưa được duyệt.",
+    "At least one run has happened.": "Đã có ít nhất một lượt chạy.",
+    "No assessments match this filter.": "Không có assessment nào khớp bộ lọc này.",
+    "No assessments yet — import a Jira issue above.":
+        "Chưa có assessment nào — nhập một issue Jira ở trên.",
+    "not configured — execution disabled": "chưa cấu hình — không thể chạy test",
+    "AI (Claude)": "AI (Claude)", "deterministic (heuristic)": "tất định (heuristic)",
+    "importable now:": "có thể nhập ngay:",
+    "enter any issue key your Jira account can read":
+        "nhập bất kỳ issue key nào tài khoản Jira của bạn đọc được",
+    "Analyzer": "Bộ phân tích", "Target": "Mục tiêu",
+    "Import a Jira issue": "Nhập một issue Jira",
+    "Depth": "Độ sâu", "Standard": "Tiêu chuẩn", "Aggressive": "Nâng cao",
+    "Analyze the ticket and its embedded PoC, design a plan, let the AI planner add "
+    "depth, then have a reviewing agent audit the plan against the ticket's requirements "
+    "and send its gaps back for one revision round. You land on the plan with something "
+    "to approve. Nothing runs: every test arrives PENDING. Uncheck to analyze only — "
+    "which is what you want when the endpoint list needs correcting first.":
+        "Phân tích ticket và PoC đính kèm, lên kế hoạch, để AI planner bổ sung chiều sâu, "
+        "sau đó một agent đánh giá kế hoạch so với yêu cầu của ticket và gửi lại các lỗ "
+        "hổng cho một vòng chỉnh sửa. Bạn sẽ đến thẳng trang kế hoạch để duyệt. Không có "
+        "gì được chạy: mọi test đều ở trạng thái PENDING. Bỏ chọn để chỉ phân tích — dùng "
+        "khi cần sửa lại danh sách endpoint trước.",
+    "Plan &amp; review on import": "Lên kế hoạch &amp; đánh giá khi nhập",
+    "Import": "Nhập", "Recent assessments": "Assessment gần đây",
+    "Working…": "Đang xử lý…", "Running…": "Đang chạy…",
+    "Delete this assessment? This cannot be undone.":
+        "Xoá assessment này? Không thể hoàn tác.",
+    "Re-import {issue} from Jira?\n\nCreates a new assessment from the ticket as it "
+    "reads now. No tests are generated and nothing runs.":
+        "Nhập lại {issue} từ Jira?\n\nTạo một assessment mới từ nội dung ticket hiện tại. "
+        "Không tạo test nào và không chạy gì cả.",
+    "Re-run {issue}?\n\nCreates a new assessment with the same plan and approvals, "
+    "then runs the approved non-destructive tests. Destructive tests are never "
+    "included in a re-run. The previous run is kept as the baseline.":
+        "Chạy lại {issue}?\n\nTạo một assessment mới với cùng kế hoạch và các duyệt hiện "
+        "có, rồi chạy các test không phá huỷ đã duyệt. Test phá huỷ không bao giờ được "
+        "đưa vào lượt chạy lại. Lượt chạy trước được giữ làm mốc so sánh.",
+    # -- dashboard toolbar --
+    "Any status": "Mọi trạng thái", "Newest first": "Mới nhất trước",
+    "Oldest first": "Cũ nhất trước", "Issue key": "Issue key",
+    "Most findings": "Nhiều phát hiện nhất",
+    "Search issue key": "Tìm theo issue key",
+    "Status": "Trạng thái", "Sort": "Sắp xếp", "Per page": "Mỗi trang",
+    "Apply": "Áp dụng", "Clear": "Xoá bộ lọc",
+    "{n} shown": "{n} đang hiển thị", " · page {n}": " · trang {n}",
+    # -- assessment card --
+    "{n} test(s)": "{n} test", "{n} approved": "{n} đã duyệt", "{n} run": "{n} lượt chạy",
+    "Re-run": "Chạy lại", "Re-import": "Nhập lại", "Delete": "Xoá",
+    # -- login / error pages --
+    "API key": "API key",
+    "Multi-user auth is enabled. Paste the API key printed by "
+    "<code>python -m app.core.auth add &lt;name&gt; &lt;role&gt;</code> to authenticate "
+    "this browser for actions like designing tests, approving, and executing. Reads "
+    "stay open either way.":
+        "Xác thực đa người dùng đang bật. Dán API key được in ra bởi "
+        "<code>python -m app.core.auth add &lt;name&gt; &lt;role&gt;</code> để xác thực "
+        "trình duyệt này cho các thao tác như thiết kế test, duyệt và chạy test. Xem dữ "
+        "liệu vẫn luôn mở dù có xác thực hay không.",
+    "← Back to dashboard": "← Về trang chủ",
+    "← Back to assessment": "← Về assessment",
+    "← Back to the new assessment": "← Về assessment mới",
+    # -- main.py flash messages (static ones only — dynamic ones with names/counts
+    # baked into the string are left in English, since a template-less lookup
+    # cannot translate a value it has already been substituted into) --
+    "Invalid API key": "API key không hợp lệ", "Logged out": "Đã đăng xuất",
+    "Deleted assessment": "Đã xoá assessment", "Assessment not found": "Không tìm thấy assessment",
+    "Test plan generated": "Đã tạo kế hoạch test", "Unknown action": "Hành động không xác định",
+    "No tests selected": "Chưa chọn test nào",
+    "Execution disabled: no engagement configured": "Không thể chạy: chưa cấu hình engagement",
+    "Scope saved": "Đã lưu phạm vi",
+    "Saved — approval reset to PENDING": "Đã lưu — duyệt được đặt lại về PENDING",
+    "Posted to Jira": "Đã đăng lên Jira",
+    # -- main.py error_page titles --
+    "Invalid environment name": "Tên môi trường không hợp lệ", "Invalid URL": "URL không hợp lệ",
+    "Import failed": "Nhập thất bại", "Re-analysis failed": "Phân tích lại thất bại",
+    "Planning agent failed": "Agent lên kế hoạch thất bại",
+    "Result review failed": "Đánh giá kết quả thất bại",
+    "Execution failed": "Chạy test thất bại", "Re-import failed": "Nhập lại thất bại",
+    "Re-run failed": "Chạy lại thất bại", "Posting to Jira failed": "Đăng lên Jira thất bại",
+    # -- config page shell --
+    "Everything a run depends on, in one place.": "Mọi thứ một lượt chạy cần, ở một nơi.",
+    "{n} blocking": "{n} chặn", "{n} to check": "{n} cần kiểm tra",
+    "all checks pass": "mọi kiểm tra đều đạt",
+    # -- readiness pane --
+    "No environments to check.": "Không có môi trường nào để kiểm tra.",
+    "Ready to run.": "Sẵn sàng chạy.",
+    "Nothing in this configuration will stop a request from being sent.":
+        "Không có gì trong cấu hình này ngăn request được gửi đi.",
+    "{n} blocking issue(s).": "{n} vấn đề chặn.",
+    "A run started now comes back entirely BLOCKED or ERROR. Each row below names the "
+    "setting and the pane that fixes it.":
+        "Nếu chạy ngay bây giờ, kết quả sẽ toàn BỊ CHẶN hoặc LỖI. Mỗi dòng dưới đây nêu "
+        "rõ cấu hình và tab cần sửa.",
+    "State": "Trạng thái", "Check": "Kiểm tra",
+    "Scope verdict per environment": "Kết luận phạm vi theo từng môi trường",
+    "Each base URL run through the same <code>ScopeValidator</code> the runner calls, DNS "
+    "lookup included. Whatever this table says here is exactly what the execution log will say.":
+        "Mỗi base URL được chạy qua đúng <code>ScopeValidator</code> mà runner gọi, kể cả "
+        "tra cứu DNS. Bảng này nói gì thì nhật ký thực thi cũng sẽ nói y hệt vậy.",
+    "Environment": "Môi trường", "Base URL": "Base URL", "Verdict": "Kết luận",
+    "Reason": "Lý do", "Config file:": "File cấu hình:",
+    "default": "mặc định", "ALLOWED": "CHO PHÉP", "BLOCKED": "BỊ CHẶN",
+    # -- environments pane --
+    "Make default": "Đặt làm mặc định",
+    "No environments configured yet.": "Chưa cấu hình môi trường nào.",
+    "Named target URLs. Only the path/method/body of a pasted PoC survive transpiling, "
+    "so whichever base URL is picked here is what actually gets called.":
+        "Các URL mục tiêu có tên. Chỉ path/method/body của PoC dán vào còn giữ lại sau "
+        "khi transpile, nên base URL chọn ở đây chính là URL thật sự được gọi.",
+    "Name": "Tên",
+    "make default": "đặt làm mặc định", "authorize its host": "cấp phép host này",
+    "Save": "Lưu",
+    "<b>Authorize its host</b> adds the hostname to <b>Scope &rarr; approved hosts</b> "
+    "in the same step. Leave it off for a target the engagement does not actually cover "
+    "— the URL is then saved but every request to it stays blocked, which is the safe "
+    "direction to fail in.":
+        "<b>Cấp phép host này</b> sẽ thêm hostname vào <b>Scope &rarr; approved hosts</b> "
+        "cùng lúc. Bỏ chọn nếu mục tiêu không thực sự nằm trong phạm vi engagement — URL "
+        "vẫn được lưu nhưng mọi request đến đó vẫn bị chặn, đây là hướng an toàn khi lỗi.",
+    # -- scope pane --
+    "The authorization boundary. Every outbound request is checked against this "
+    "before it is sent, and the hostname must appear in <b>approved hosts</b> exactly "
+    "— there are no wildcards, because a wildcard in a pentest authorization list is "
+    "how an unauthorized host gets tested by accident.":
+        "Ranh giới cấp phép. Mọi request gửi đi đều được kiểm tra với danh sách này trước "
+        "khi gửi, và hostname phải khớp chính xác trong <b>approved hosts</b> — không có "
+        "wildcard, vì wildcard trong danh sách cấp phép pentest chính là cách một host "
+        "không được phép bị test nhầm.",
+    "Approved hosts — one per line": "Host được cấp phép — mỗi dòng một host",
+    "Blocked hosts — one per line (always wins)": "Host bị chặn — mỗi dòng một host (luôn ưu tiên)",
+    "Allow private / loopback ranges": "Cho phép dải IP nội bộ / loopback",
+    "Off by default. When off, a host that <i>resolves</i> to 127.0.0.0/8, 10/8, "
+    "172.16/12, 192.168/16 or 169.254/16 (cloud metadata) is refused even if its name "
+    "is on the approved list — that check is what stops a DNS-based SSRF from reaching "
+    "an internal service. Turn it on only for a local lab target.":
+        "Mặc định tắt. Khi tắt, một host mà DNS <i>trả về</i> 127.0.0.0/8, 10/8, "
+        "172.16/12, 192.168/16 hoặc 169.254/16 (cloud metadata) sẽ bị từ chối dù tên nó "
+        "có trong danh sách cấp phép — kiểm tra này ngăn SSRF qua DNS chạm tới dịch vụ "
+        "nội bộ. Chỉ bật khi mục tiêu là lab nội bộ.",
+    "Save scope": "Lưu phạm vi",
+    "Hostnames only — no scheme, no port, no path. A port is not part of the check "
+    "(<code>api.example.com:8443</code> is authorized by <code>api.example.com</code>), "
+    "and DNS is resolved and the resulting IP re-checked on every request, so a name "
+    "that resolves somewhere new is caught at send time.":
+        "Chỉ hostname — không scheme, không port, không path. Port không nằm trong kiểm "
+        "tra (<code>api.example.com:8443</code> được cấp phép bởi <code>api.example.com</code>), "
+        "và DNS được resolve rồi IP kết quả được kiểm tra lại mỗi request, nên một tên miền "
+        "trỏ đến nơi mới sẽ bị phát hiện ngay lúc gửi.",
+    # -- personas pane --
+    "attacker": "kẻ tấn công", "victim": "nạn nhân",
+    "Role label": "Nhãn vai trò",
+    "Owned object ids — key=value per line": "ID object sở hữu — mỗi dòng key=value",
+    "Auth headers — Header: value per line": "Auth headers — mỗi dòng Header: value",
+    "Secret markers — one per line": "Dấu hiệu bí mật — mỗi dòng một dấu hiệu",
+    "Scoping headers to strip on privilege-escalation tests — one per line":
+        "Header scoping cần loại bỏ khi test leo thang đặc quyền — mỗi dòng một header",
+    "Save {name}": "Lưu {name}",
+    "No personas defined yet — add one below.": "Chưa có persona nào — thêm một cái bên dưới.",
+    "not defined!": "chưa định nghĩa!", "no personas defined": "chưa có persona nào",
+    'Test identities and their credentials. You cannot test broken object-level '
+    'authorization with one identity: BOLA means "A reaches B\'s object", which needs '
+    'two real accounts plus knowledge of what each legitimately owns. Tests reference '
+    'personas <i>by name</i>, so a token never lands in a test case, an export or a report.':
+        'Danh tính test và thông tin xác thực của chúng. Không thể test broken '
+        'object-level authorization với một danh tính duy nhất: BOLA nghĩa là "A chạm '
+        'được object của B", cần hai tài khoản thật cộng với biết rõ mỗi bên sở hữu gì. '
+        'Test tham chiếu persona <i>bằng tên</i>, nên token không bao giờ xuất hiện trong '
+        'test case, file export hay báo cáo.',
+    "Attacker persona": "Persona kẻ tấn công", "Victim persona": "Persona nạn nhân",
+    "Save roles": "Lưu vai trò",
+    "The attacker sends the requests; generated BOLA cases aim it at ids the victim "
+    "owns. Point these at two <i>different</i> personas or the results are "
+    "inconclusive by construction.":
+        "Kẻ tấn công là bên gửi request; các case BOLA được tạo sẽ nhắm vào id mà nạn "
+        "nhân sở hữu. Chọn hai persona <i>khác nhau</i>, nếu không kết quả sẽ luôn chưa "
+        "rõ ràng do bản chất thiết kế.",
+    "Defined personas": "Persona đã định nghĩa", "Add a persona": "Thêm persona",
+    "Add persona": "Thêm persona",
+    "Use dedicated test accounts. Credentials are written to the engagement config in "
+    "plain text and every response is passed through secret redaction before it reaches "
+    "a report — but a real user's token does not belong in either.":
+        "Dùng tài khoản test riêng. Thông tin xác thực được ghi vào config engagement ở "
+        "dạng plain text, và mọi phản hồi đều qua bước che bí mật trước khi vào báo cáo "
+        "— nhưng token của một người dùng thật không nên xuất hiện ở cả hai nơi đó.",
+    # -- runner pane --
+    'Hard caps the trusted runner applies to every outbound request. Blank means '
+    '"use the <code>.env</code> value" shown as the placeholder; a value here '
+    'overrides it for this engagement only, with no restart.':
+        'Giới hạn cứng mà trusted runner áp dụng cho mọi request gửi đi. Để trống nghĩa '
+        'là "dùng giá trị <code>.env</code>" hiển thị làm placeholder; điền giá trị ở '
+        'đây sẽ ghi đè chỉ cho engagement này, không cần restart.',
+    "Request timeout (s)": "Timeout request (giây)",
+    "Raise it for a slow staging host.": "Tăng lên nếu host staging phản hồi chậm.",
+    "Max requests per test": "Số request tối đa mỗi test",
+    "Caps a single test's fan-out, race windows included.":
+        "Giới hạn số request một test có thể gửi, kể cả trong race window.",
+    "Max response bytes": "Số byte phản hồi tối đa",
+    "Body larger than this is truncated before storage.":
+        "Body lớn hơn mức này sẽ bị cắt bớt trước khi lưu.",
+    "Save limits": "Lưu giới hạn", "Reset to .env defaults": "Khôi phục mặc định .env",
+    "The runner never auto-follows a redirect: a 302 to an internal host is the same "
+    "SSRF wearing a hat, and blindly chasing it would let the HTTP client re-resolve DNS "
+    "outside the scope gate. A 3xx response is captured and evaluated exactly as received "
+    "— there is no redirect setting to tune here.":
+        "Runner không bao giờ tự động theo redirect: một 302 trỏ vào host nội bộ cũng "
+        "chính là SSRF đội lốt, và đi theo nó một cách mù quáng sẽ để HTTP client "
+        "resolve DNS lại ngoài tầm kiểm soát của scope gate. Response 3xx được ghi nhận "
+        "và đánh giá đúng như nhận được — không có tuỳ chọn redirect nào để chỉnh ở đây.",
+    # -- mcp pane --
+    "LIVE": "TRỰC TIẾP", "MOCK": "GIẢ LẬP", "Serves:": "Phục vụ:",
+    "SET": "ĐÃ ĐẶT", "NOT SET": "CHƯA ĐẶT",
+    "External MCP connectors this platform talks to. Credentials live in <code>.env</code> "
+    "only — never in <code>engagement.json</code> or a report. <b>Reconnect</b> re-reads "
+    "<code>.env</code> and rebinds the client in place, which is all a restart would have "
+    "done anyway — useful right after refreshing a short-lived OAuth token.":
+        "Các kết nối MCP bên ngoài mà nền tảng này giao tiếp. Thông tin xác thực chỉ nằm "
+        "trong <code>.env</code> — không bao giờ trong <code>engagement.json</code> hay "
+        "báo cáo. <b>Reconnect</b> đọc lại <code>.env</code> và gắn lại client tại chỗ, "
+        "đúng bằng những gì một lần restart sẽ làm — hữu ích ngay sau khi làm mới token "
+        "OAuth ngắn hạn.",
+    "Reconnect": "Kết nối lại",
+    "Environment variable": "Biến môi trường", "Purpose": "Mục đích",
+    "To refresh an expired token: authorize once with "
+    "<code>npx -y mcp-remote https://mcp.atlassian.com/v1/mcp</code> (opens the Atlassian "
+    "OAuth login in your browser — only needed again once the refresh token itself is "
+    "revoked or expires), then run <code>npm run jira:token</code> to pull the new token "
+    "into <code>.env</code>, then click <b>Reconnect</b> above.":
+        "Để làm mới token đã hết hạn: cấp phép một lần với "
+        "<code>npx -y mcp-remote https://mcp.atlassian.com/v1/mcp</code> (mở màn hình đăng "
+        "nhập OAuth của Atlassian trên trình duyệt — chỉ cần lặp lại khi refresh token bị "
+        "thu hồi hoặc hết hạn), sau đó chạy <code>npm run jira:token</code> để lấy token "
+        "mới vào <code>.env</code>, rồi bấm <b>Kết nối lại</b> ở trên.",
+    "Other connectors": "Kết nối khác", "NOT CONFIGURED": "CHƯA CẤU HÌNH",
+    "No MCP integration is wired up for this platform — there is nothing here yet to "
+    "connect or reconnect. (Separately, a completed assessment can already export a "
+    "Postman collection from its report page — a one-way file export, unrelated to this "
+    "connector list.)":
+        "Chưa có tích hợp MCP nào cho nền tảng này — chưa có gì để kết nối hay kết nối "
+        "lại ở đây. (Tách biệt với việc này, một assessment đã hoàn tất có thể export "
+        "bộ sưu tập Postman từ trang report — một file export một chiều, không liên quan "
+        "đến danh sách kết nối này.)",
+    # -- runtime pane --
+    "Read-only. These come from the process environment (<code>.env</code>), are read "
+    "at startup, and need a server restart to change — so they are shown here rather "
+    "than made editable, which would offer a save button that quietly does nothing "
+    "until the next boot.":
+        "Chỉ đọc. Các giá trị này đến từ biến môi trường tiến trình (<code>.env</code>), "
+        "được đọc lúc khởi động, và cần restart server để thay đổi — nên chỉ hiển thị ở "
+        "đây thay vì cho sửa, vì nút lưu sẽ âm thầm không có tác dụng gì cho tới lần "
+        "khởi động sau.",
+    "Setting": "Cấu hình", "Current": "Giá trị hiện tại",
+    "Secrets are never echoed here — only whether one is present. Keep tokens in "
+    "<code>.env</code>, never in <code>engagement.json</code>.":
+        "Bí mật không bao giờ hiển thị ở đây — chỉ báo có tồn tại hay không. Giữ token "
+        "trong <code>.env</code>, không bao giờ trong <code>engagement.json</code>.",
+})

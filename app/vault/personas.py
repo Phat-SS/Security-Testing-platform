@@ -32,6 +32,16 @@ class Persona:
     # literal "${VAR}", so this is what tells the readiness panel to block the
     # run and name the variable to set. Names only, never values.
     missing_env: tuple[str, ...] = ()
+    # Client-supplied headers this persona's session relies on to scope
+    # authorization — a tenant/entity/account id the app trusts from the
+    # request rather than deriving server-side (e.g. "entity-context",
+    # "X-Tenant-Id"). Declaring them here — instead of hand-typing
+    # detail["strip_headers"] on every BFLA test case — is what lets
+    # `escalate_persona` strip them automatically: the whole point of that
+    # probe is to ask "with the scoping header gone, does the server still
+    # decide the same thing?", which only tests anything when the header
+    # named actually is the one the target trusts.
+    scoping_headers: tuple[str, ...] = ()
 
 
 class PersonaVault:

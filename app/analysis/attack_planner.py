@@ -198,13 +198,14 @@ class AttackPlanner:
         except ValidationError as exc:
             return PlanResult(error=f"model output failed schema validation: {exc.error_count()} error(s)")
 
-        return self.accept(proposals, existing or [])
+        return self.accept(proposals, existing or [], expected_public=_expected_public_paths(analysis))
 
     def accept(
         self,
         proposals: list[ProposedTest],
         existing: list[TestCase],
         id_prefix: str = "AI",
+        expected_public: set[tuple[str, str]] | None = None,
     ) -> PlanResult:
         """Apply every constraint to already-parsed proposals.
 
@@ -216,11 +217,17 @@ class AttackPlanner:
         planning passes would otherwise both mint `AI-API1-001` and the second
         one's tests would be discarded as duplicates of the first — losing
         exactly the follow-up work the adaptive loop exists to do.
+
+        `expected_public`: {(METHOD, path)} of endpoints declared intentionally
+        public — an authentication-bypass proposal against one of these is
+        rejected, the same way the rule-engine designer no longer proposes one
+        of its own for that endpoint.
         """
         result = PlanResult()
         seen = {_dedup_key(t.owasp_category.value, t.request.method, t.request.path,
                            t.attack_mutation.kind) for t in existing}
         counters: dict[str, int] = {}
+        expected_public = expected_public or set()
 
         for index, proposal in enumerate(proposals):
             if len(result.tests) >= self._max_tests:
@@ -229,7 +236,7 @@ class AttackPlanner:
                 )
                 continue
 
-            reason = self._reject_reason(proposal)
+            reason = self._reject_reason(proposal, expected_public)
             if reason:
                 result.rejected.append(f"#{index} '{proposal.title}': {reason}")
                 continue
@@ -315,7 +322,8 @@ class AttackPlanner:
                 error=f"model output failed schema validation: {exc.error_count()} error(s)"
             )
 
-        return self.accept(proposals, existing, id_prefix=id_prefix)
+        return self.accept(proposals, existing, id_prefix=id_prefix,
+                          expected_public=_expected_public_paths(analysis))
 
     def follow_up(
         self, analysis: IssueAnalysis, test: TestCase, execution, id_prefix: str = "AI"
@@ -383,11 +391,12 @@ class AttackPlanner:
         except ValidationError as exc:
             return PlanResult(error=f"model output failed schema validation: {exc.error_count()} error(s)")
 
-        return self.accept(proposals, [test], id_prefix=id_prefix)
+        return self.accept(proposals, [test], id_prefix=id_prefix,
+                          expected_public=_expected_public_paths(analysis))
 
     # -- constraints --------------------------------------------------------
 
-    def _reject_reason(self, p: ProposedTest) -> str | None:
+    def _reject_reason(self, p: ProposedTest, expected_public: set[tuple[str, str]]) -> str | None:
         if p.mutation_kind not in MUTATION_KINDS:
             return (
                 f"unknown mutation kind {p.mutation_kind!r} — the trusted runner has no "
@@ -425,6 +434,12 @@ class AttackPlanner:
             return (
                 f"mutation {p.mutation_kind!r} attacks another identity's object but no "
                 "target_persona was named"
+            )
+        if spec.category == OwaspApiCategory.API2 and (p.method.upper(), path) in expected_public:
+            return (
+                f"{p.method.upper()} {path} is declared expected-public (no credential "
+                "required by design); an authentication-bypass probe there is not a "
+                "meaningful test"
             )
         if not p.expected_status_in:
             return "expected_status_in is empty; there is nothing to evaluate the result against"
@@ -534,6 +549,10 @@ def _dedup_key(category: str, method: str, path: str, kind: str) -> str:
     return f"{category}|{method.upper()}|{path}|{kind}"
 
 
+def _expected_public_paths(analysis: IssueAnalysis) -> set[tuple[str, str]]:
+    return {(ep.method.upper(), ep.path) for ep in analysis.endpoints if ep.expected_public}
+
+
 def _extract_json_object(text: str) -> dict:
     start = text.find("{")
     end = text.rfind("}")
@@ -549,7 +568,7 @@ def build_planner(known_personas: list[str] | None = None) -> AttackPlanner | No
     """Return a planner when the AI path is enabled and configured, else None.
 
     Mirrors `build_analyzer`: the deterministic designer is always the backbone,
-    and the planner is strictly additive. No key, no planner, no behaviour change.
+    and the planner is strictly additive. Not enabled, no planner, no behaviour change.
     """
     from app.analysis.claude_analyzer import ClaudeAnalyzer
 

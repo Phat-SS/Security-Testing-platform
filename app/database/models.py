@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 from sqlalchemy import create_engine
 
@@ -50,13 +50,35 @@ class Assessment(Base):
 
 
 class TestCaseRow(Base):
+    """`severity`/`is_destructive`/`source`/`path`/`search_text` are
+    denormalized copies of fields already inside `data_json`, promoted to
+    real columns for the same reason `owasp_category`/`approval_status`
+    were: `Repository.query_test_cases` filters, sorts and paginates a plan
+    that can be several hundred rows, and doing that in SQL instead of by
+    loading every row's JSON into Python is what makes it scale. Kept in
+    sync by the repository on every write (`save_test_cases`,
+    `replace_test_cases`, `update_test_request`, `set_approval_bulk`) —
+    `data_json` remains the source of truth; these columns are a queryable
+    projection of it, not a second copy that can independently drift on read.
+    """
+
     __tablename__ = "test_cases"
+    __table_args__ = (
+        Index("ix_test_cases_assessment_severity", "assessment_id", "severity"),
+        Index("ix_test_cases_assessment_destructive", "assessment_id", "is_destructive"),
+        Index("ix_test_cases_assessment_source", "assessment_id", "source"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
     test_id: Mapped[str] = mapped_column(String(64), index=True)
     owasp_category: Mapped[str] = mapped_column(String(16))
     approval_status: Mapped[str] = mapped_column(String(16), default="PENDING")
+    severity: Mapped[str] = mapped_column(String(16), default="")
+    is_destructive: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(32), default="")
+    path: Mapped[str] = mapped_column(String(512), default="")
+    search_text: Mapped[str] = mapped_column(Text, default="")
     data_json: Mapped[dict] = mapped_column(JSON)
 
     assessment: Mapped[Assessment] = relationship(back_populates="test_cases")
@@ -134,8 +156,30 @@ def default_database_url() -> str:
 
 def make_engine(url: str | None = None):
     url = url or default_database_url()
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+        # SQLite has no server-side connection pool to configure and no
+        # separate process to go stale behind a failover, so none of the
+        # options below apply to it. check_same_thread=False: the platform
+        # shares one engine across request threads (each session opens/closes
+        # its own connection; SQLAlchemy's own locking, not a raw shared
+        # connection, protects it).
+        return create_engine(url, connect_args={"check_same_thread": False}, future=True)
+    # Postgres (or any server DB): SQLAlchemy's engine defaults (pool_size=5,
+    # no pre-ping) silently exhaust under a handful of concurrent requests —
+    # a race-condition/adaptive probe alone can hold several connections open
+    # at once — and go blind to a connection Postgres or a proxy in front of
+    # it already dropped (failover, idle timeout), surfacing as an opaque
+    # "server closed the connection unexpectedly" on the next request rather
+    # than a clean retry. All four are tunable via env vars because the right
+    # pool size depends on the deployment, not on this code.
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        pool_recycle=int(os.getenv("DB_POOL_RECYCLE_S", "1800")),
+        future=True,
+    )
 
 
 def make_session_factory(engine):
@@ -143,4 +187,10 @@ def make_session_factory(engine):
 
 
 def init_db(engine) -> None:
+    from sqlalchemy import inspect
+
+    from app.database.migrate import bootstrap_alembic
+
+    was_fresh = not inspect(engine).get_table_names()
     Base.metadata.create_all(engine)
+    bootstrap_alembic(engine, was_fresh=was_fresh)

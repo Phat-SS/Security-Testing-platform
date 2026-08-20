@@ -167,9 +167,38 @@ Decide from evidence, never from a status code alone:
 - INCONCLUSIVE is the correct answer whenever the evidence does not settle it.
   Choosing it is not a failure; guessing is.
 
+You will often be handed a case where the response status is not in the
+declared expected set, but nothing was disclosed either — the deterministic
+evaluator could not tell whether that mismatch means anything. Do not treat
+"status differs from expected" as automatically FAIL or automatically PASS;
+read WHAT the actual status and body imply about which layer of the system
+handled the request, and compare that against what the expected set was
+specifically checking for:
+- If the expected set required a rejection from one specific control (e.g.
+  401 for "no credential must be authenticated") and the actual response
+  looks like it came from a DIFFERENT, later layer (e.g. a 400 with an
+  input-validation message, or a 2xx with normal business data) — and the
+  ticket's requirements or the test's objective describe that specific
+  control as the thing under test — that is evidence the control never ran,
+  and can support FAIL even with no leaked data, PROVIDED a positive control
+  (baseline) confirms the endpoint is reachable at all. Name which layer you
+  believe answered and why.
+- If the actual status is a different rejection that plausibly reflects the
+  SAME security decision (e.g. 404 instead of 403, hiding an object's
+  existence rather than announcing it) with no disclosure, that supports
+  PASS: the control held, just with a different — sometimes more
+  defensible — status line than the test author guessed.
+- If you cannot tell which of those two this is from the evidence given,
+  say INCONCLUSIVE and set `needs_manual_review` true. Do not guess to
+  avoid leaving work for a person; a wrong FAIL becomes a finding posted to
+  Jira, and a wrong PASS hides a real bug.
+
 Set `needs_manual_review` to true when a person still has to look — you are
 uncertain, the evidence is ambiguous, or acting on your answer would need
-knowledge of the business that is not in the material below.
+knowledge of the business that is not in the material below. Set it to false
+when the evidence above genuinely settles the question, even without a
+disclosed marker — that is what lets this run without a person, not a
+license to assert past what the evidence shows.
 
 `evidence_cited` must quote or paraphrase the specific part of the captured
 evidence that drove your answer. Do not include secrets, tokens or personal data
@@ -240,8 +269,9 @@ class ResultAdjudicator:
             if klass == "agent" and self._llm is None:
                 base.needs_manual_review = True
                 base.degraded_reason = (
-                    "No AI adjudicator is configured (set USE_AI=true and ANTHROPIC_API_KEY), "
-                    "so reading the response body is still a human task."
+                    "No AI adjudicator is configured (set USE_AI=true with the claude "
+                    "CLI installed and logged in), so reading the response body is "
+                    "still a human task."
                 )
             return base
 
@@ -594,7 +624,7 @@ def _now() -> str:
 def build_adjudicator() -> ResultAdjudicator:
     """Always returns an adjudicator; the AI half is opt-in.
 
-    Without a key the triage half still runs, and triage is most of the value:
+    Without it enabled the triage half still runs, and triage is most of the value:
     "these four need you, these two just need re-running, and this one is a
     test-data problem" is worth having whether or not a model is available to
     read the remaining bodies.

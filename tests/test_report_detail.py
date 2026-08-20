@@ -127,8 +127,8 @@ def test_the_report_carries_the_verdicts_reasoning_next_to_the_evidence():
     assert "returned data belonging to another identity" in html
     # ...and the request/response panels the reasoning refers to.
     assert "http://target.test/customers/2002" in html
-    assert ">request<" in html
-    assert ">response<" in html
+    assert "<h4>Request" in html
+    assert "<h4>Response " in html
 
 
 def test_the_report_carries_a_findings_impact_reproduction_and_fix():

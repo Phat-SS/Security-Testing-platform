@@ -5,7 +5,6 @@ correctly disabled). The execute-against-a-live-target path is covered by
 test_orchestrator and the demo.
 """
 
-import os
 
 import pytest
 from starlette.testclient import TestClient

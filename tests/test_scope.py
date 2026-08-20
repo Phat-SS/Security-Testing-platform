@@ -68,6 +68,25 @@ def test_ipv4_mapped_ipv6_cannot_bypass_the_ipv4_blocklist(mapped_ip):
     assert "SSRF" in r.reason or "blocked range" in r.reason
 
 
+@pytest.mark.parametrize("wrapped_ip", [
+    "::169.254.169.254",       # deprecated IPv4-compatible form
+    "::127.0.0.1",              # deprecated IPv4-compatible form, loopback
+    "64:ff9b::169.254.169.254",  # NAT64 well-known prefix (RFC 6052)
+    "64:ff9b::a01:203",          # NAT64 well-known prefix, 10.1.2.3
+])
+def test_other_ipv4_embedding_ipv6_forms_cannot_bypass_the_blocklist(wrapped_ip):
+    # ::ffff:0:0/96 (IPv4-mapped) isn't the only IPv6 wrapper that carries a
+    # plain IPv4 address in its low 32 bits. The deprecated IPv4-compatible
+    # form and the NAT64 well-known prefix both do too, and both resolve to
+    # the exact same address a hostname-only or single-prefix check would
+    # miss.
+    policy = ScopePolicy(allowed_hosts={"h.com"})
+    v = make(policy, {"h.com": wrapped_ip})
+    r = v.validate_url("https://h.com/")
+    assert not r.allowed
+    assert "SSRF" in r.reason or "blocked range" in r.reason
+
+
 def test_private_range_allowed_only_with_explicit_optin():
     policy = ScopePolicy(allowed_hosts={"127.0.0.1"}, allow_private_ranges=True)
     v = make(policy, {"127.0.0.1": "127.0.0.1"})

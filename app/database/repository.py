@@ -11,7 +11,7 @@ import json
 from typing import ClassVar
 
 from pydantic import ValidationError
-from sqlalchemy import func
+from sqlalchemy import case, func
 
 from app.database.models import (
     AgentRecordRow,
@@ -138,11 +138,13 @@ class Repository:
     def save_test_cases(self, assessment_id: str, tests: list[TestCase]) -> None:
         with self._sf() as s:
             for t in tests:
+                data = t.model_dump(mode="json")
                 s.add(TestCaseRow(
                     assessment_id=assessment_id, test_id=t.test_id,
                     owasp_category=t.owasp_category.value,
                     approval_status=t.approval_status.value,
-                    data_json=t.model_dump(mode="json"),
+                    data_json=data,
+                    **_derived_columns(data),
                 ))
             s.commit()
 
@@ -194,6 +196,7 @@ class Repository:
                     owasp_category=t.owasp_category.value,
                     approval_status=status,
                     data_json=data,
+                    **_derived_columns(data),
                 ))
             s.commit()
             return {"replaced": len(rows), "total": len(tests), "carried_over": carried}
@@ -245,6 +248,8 @@ class Repository:
             )
             row.approval_status = "PENDING"
             row.data_json = data
+            for col, value in _derived_columns(data).items():
+                setattr(row, col, value)
             s.commit()
             return True
 
@@ -256,11 +261,11 @@ class Repository:
     # browser is what makes "approve all 312 matching this filter" mean the same
     # thing the tester just read on screen.
     #
-    # Category and approval status are real indexed columns, so they filter in
-    # SQL. Severity, destructiveness, source and the title text live inside
-    # data_json; those are matched against the raw dict, and only the rows that
-    # end up on the page are validated into TestCase objects — a 400-test plan
-    # was paying for 400 pydantic validations on every render.
+    # category/approval_status/severity/is_destructive/source/path are all real
+    # (indexed, for the first four) columns — filter, sort AND pagination run in
+    # SQL, and only the one page's rows are ever validated into TestCase objects.
+    # A 400-test plan was previously paying for 400 pydantic validations, and a
+    # full table scan in Python, on every render.
 
     _SEVERITY_ORDER: ClassVar[dict[str, int]] = {
         "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4,
@@ -290,113 +295,121 @@ class Repository:
         rendered), the total, and facet counts for the filter controls.
         """
         with self._sf() as s:
-            query = s.query(TestCaseRow).filter_by(assessment_id=assessment_id)
+            filtered = (
+                s.query(TestCaseRow)
+                .filter(TestCaseRow.assessment_id == assessment_id)
+            )
             if cat:
-                query = query.filter(TestCaseRow.owasp_category == cat)
+                filtered = filtered.filter(TestCaseRow.owasp_category == cat)
             if appr:
-                query = query.filter(TestCaseRow.approval_status == appr)
-            rows = query.order_by(TestCaseRow.id).all()
-            raw = [(r.test_id, dict(r.data_json)) for r in rows]
+                filtered = filtered.filter(TestCaseRow.approval_status == appr)
+            if sev:
+                filtered = filtered.filter(TestCaseRow.severity == sev)
+            if src:
+                filtered = filtered.filter(TestCaseRow.source == src)
+            if dest in ("yes", "no"):
+                filtered = filtered.filter(TestCaseRow.is_destructive == (dest == "yes"))
+            needle = q.strip().lower()
+            if needle:
+                filtered = filtered.filter(TestCaseRow.search_text.contains(needle))
+
+            total = filtered.count()
+            matched_ids = [
+                tid for (tid,) in
+                filtered.with_entities(TestCaseRow.test_id).order_by(TestCaseRow.id).all()
+            ]
+
+            per = max(1, min(per, 500))
+            pages = max(1, -(-total // per))
+            page = max(1, min(page, pages))
+            page_rows = (
+                self._sorted_query(filtered, sort)
+                .offset((page - 1) * per).limit(per).all()
+            )
 
             facets, meta = self._facets(assessment_id, s)
 
-        needle = q.strip().lower()
-        matched = [
-            (test_id, data) for test_id, data in raw
-            if self._matches(test_id, data, needle, sev, dest, src)
-        ]
-        matched = self._sorted(matched, sort)
-
-        per = max(1, min(per, 500))
-        pages = max(1, -(-len(matched) // per))
-        page = max(1, min(page, pages))
-        window = matched[(page - 1) * per: page * per]
-
         return {
-            "tests": [TestCase.model_validate(data) for _tid, data in window],
-            "matched_ids": [test_id for test_id, _d in matched],
-            "total": len(matched),
-            "unfiltered_total": len(raw),
+            "tests": [TestCase.model_validate(r.data_json) for r in page_rows],
+            "matched_ids": matched_ids,
+            "total": total,
+            "unfiltered_total": meta["total"],
             "page": page,
             "pages": pages,
             "per": per,
             "facets": facets,
-            # Plan-wide counts, computed from the same scan the facets need, so
-            # the page does not have to load and validate every test again just
-            # to say how many are approved.
+            # Plan-wide counts, computed once via the same aggregate queries
+            # the facets need, so the page does not have to load and validate
+            # every test again just to say how many are approved.
             "meta": meta,
         }
 
-    @staticmethod
-    def _matches(test_id: str, data: dict, needle: str, sev: str, dest: str, src: str) -> bool:
-        if sev and str(data.get("severity", "")) != sev:
-            return False
-        if dest in ("yes", "no") and bool(data.get("is_destructive")) is not (dest == "yes"):
-            return False
-        if src and str(data.get("source", "")) != src:
-            return False
-        if needle:
-            request = data.get("request") or {}
-            haystack = " ".join(str(x) for x in (
-                test_id,
-                data.get("title", ""),
-                data.get("objective", ""),
-                (data.get("attack_mutation") or {}).get("kind", ""),
-                request.get("method", ""),
-                request.get("path", ""),
-            )).lower()
-            if needle not in haystack:
-                return False
-        return True
-
     @classmethod
-    def _sorted(cls, matched: list, sort: str) -> list:
+    def _sorted_query(cls, query, sort: str):
         if sort == "sev":
-            return sorted(matched, key=lambda item: (
-                cls._SEVERITY_ORDER.get(str(item[1].get("severity")), 9), item[0]))
+            rank = case(*[(TestCaseRow.severity == k, v) for k, v in cls._SEVERITY_ORDER.items()],
+                        else_=len(cls._SEVERITY_ORDER))
+            return query.order_by(rank, TestCaseRow.id)
         if sort == "appr":
-            return sorted(matched, key=lambda item: (
-                cls._APPROVAL_ORDER.get(str(item[1].get("approval_status")), 9), item[0]))
+            rank = case(*[(TestCaseRow.approval_status == k, v) for k, v in cls._APPROVAL_ORDER.items()],
+                        else_=len(cls._APPROVAL_ORDER))
+            return query.order_by(rank, TestCaseRow.id)
         if sort == "cat":
-            return sorted(matched, key=lambda item: (
-                str(item[1].get("owasp_category")), item[0]))
+            return query.order_by(TestCaseRow.owasp_category, TestCaseRow.id)
         if sort == "endpoint":
-            return sorted(matched, key=lambda item: (
-                str((item[1].get("request") or {}).get("path", "")), item[0]))
-        return matched  # "id" — generation order, which groups by category already
+            return query.order_by(TestCaseRow.path, TestCaseRow.id)
+        return query.order_by(TestCaseRow.id)  # "id" — generation order, already grouped by category
 
     @staticmethod
     def _facets(assessment_id: str, session) -> tuple[dict, dict]:
         """Counts per filter value over the *unfiltered* plan, so a dropdown can
         say how many rows each option would leave and never offer an option that
-        matches nothing — plus the plan-wide totals the page header needs."""
-        rows = session.query(TestCaseRow).filter_by(assessment_id=assessment_id).all()
-        out: dict[str, dict[str, int]] = {
-            "cat": {}, "sev": {}, "appr": {}, "src": {}, "dest": {},
+        matches nothing — plus the plan-wide totals the page header needs.
+
+        Six small GROUP BY/COUNT aggregate queries, run by the database, instead
+        of loading and deserializing every row's JSON to count in Python."""
+
+        def counts(column) -> dict[str, int]:
+            rows = (
+                session.query(column, func.count(TestCaseRow.id))
+                .filter(TestCaseRow.assessment_id == assessment_id, column != "")
+                .group_by(column)
+                .all()
+            )
+            return {str(value): int(n) for value, n in rows}
+
+        dest_rows = (
+            session.query(TestCaseRow.is_destructive, func.count(TestCaseRow.id))
+            .filter(TestCaseRow.assessment_id == assessment_id)
+            .group_by(TestCaseRow.is_destructive)
+            .all()
+        )
+        out = {
+            "cat": counts(TestCaseRow.owasp_category),
+            "sev": counts(TestCaseRow.severity),
+            "appr": counts(TestCaseRow.approval_status),
+            "src": counts(TestCaseRow.source),
+            "dest": {("yes" if is_dest else "no"): int(n) for is_dest, n in dest_rows},
         }
-        meta = {"total": len(rows), "approved": 0, "rejected": 0, "pending": 0,
-                "approved_destructive": 0}
-        for r in rows:
-            data = r.data_json
-            for key, value in (
-                ("cat", r.owasp_category),
-                ("sev", str(data.get("severity", ""))),
-                ("appr", r.approval_status),
-                ("src", str(data.get("source", ""))),
-                ("dest", "yes" if data.get("is_destructive") else "no"),
-            ):
-                if value:
-                    out[key][value] = out[key].get(value, 0) + 1
-            if r.approval_status == "APPROVED":
-                meta["approved"] += 1
-                if data.get("is_destructive"):
-                    # The count the destructive-run gate is sized from, so it has
-                    # to be the intersection and not a product of two facets.
-                    meta["approved_destructive"] += 1
-            elif r.approval_status == "REJECTED":
-                meta["rejected"] += 1
-            elif r.approval_status == "PENDING":
-                meta["pending"] += 1
+
+        total = (
+            session.query(func.count(TestCaseRow.id))
+            .filter(TestCaseRow.assessment_id == assessment_id).scalar() or 0
+        )
+        approved_destructive = (
+            session.query(func.count(TestCaseRow.id))
+            .filter(TestCaseRow.assessment_id == assessment_id,
+                    TestCaseRow.approval_status == "APPROVED",
+                    TestCaseRow.is_destructive.is_(True))
+            .scalar() or 0
+        )
+        meta = {
+            "total": int(total),
+            "approved": out["appr"].get("APPROVED", 0),
+            "rejected": out["appr"].get("REJECTED", 0),
+            "pending": out["appr"].get("PENDING", 0),
+            "approved_destructive": int(approved_destructive),
+        }
         return out, meta
 
     def set_approval_bulk(self, assessment_id: str, test_ids: list[str], status: str) -> int:
@@ -606,3 +619,32 @@ class Repository:
 def _test_fingerprint(data: dict) -> str:
     """Order-insensitive equality check for a test case's stored JSON."""
     return json.dumps(data, sort_keys=True, default=str)
+
+
+def _search_text(data: dict) -> str:
+    """Everything `q` matches against, lowercased once at write time so a
+    query never has to lowercase a plan's worth of JSON on every read."""
+    request = data.get("request") or {}
+    parts = (
+        data.get("test_id", ""),
+        data.get("title", ""),
+        data.get("objective", ""),
+        (data.get("attack_mutation") or {}).get("kind", ""),
+        request.get("method", ""),
+        request.get("path", ""),
+    )
+    return " ".join(str(part) for part in parts if part).lower()
+
+
+def _derived_columns(data: dict) -> dict:
+    """The queryable projection of a TestCase's JSON — see TestCaseRow's
+    docstring. `data` is already the `mode="json"` dump (or an equivalent
+    plain dict), so field values are plain strings/bools, not enums."""
+    request = data.get("request") or {}
+    return {
+        "severity": str(data.get("severity", "")),
+        "is_destructive": bool(data.get("is_destructive")),
+        "source": str(data.get("source", "")),
+        "path": str(request.get("path", "")),
+        "search_text": _search_text(data),
+    }

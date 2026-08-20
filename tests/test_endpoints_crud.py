@@ -136,6 +136,34 @@ def test_editing_can_turn_off_auth_required(client, repo):
     assert _endpoints(repo, aid)[0]["auth_required"] is False
 
 
+def test_editing_can_mark_an_endpoint_expected_public(client, repo):
+    """A separate switch from auth_required: declares a 200 without a credential
+    is the correct, expected result for this endpoint, not a finding."""
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+    target = _signatures(repo, aid)[0]
+    method, path = target.split(" ", 1)
+
+    client.post(f"/assessment/{aid}/endpoints", follow_redirects=True,
+                data={"replaces": target, "method": method, "path": path,
+                      "auth_required": "true", "expected_public": "true"})
+
+    assert _endpoints(repo, aid)[0]["expected_public"] is True
+    # Flipping it changes what the designer would generate, so the existing
+    # plan (built before the flag was set) must show as stale.
+    page = client.get(f"/assessment/{aid}").text
+    assert "different endpoint list" in page
+
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+    tests = repo().get_test_cases(aid)
+    target_tests = [t for t in tests if t.request.path == path
+                    and t.request.method == method.upper()
+                    and t.owasp_category.value == "API2:2023"]
+    assert target_tests
+    assert all(t.attack_mutation.kind == "drop_auth" for t in target_tests)
+    assert all(200 in t.expected.status_in for t in target_tests)
+
+
 def test_editing_into_an_existing_signature_is_refused(client, repo):
     aid = _import(client)
     first, second = _signatures(repo, aid)[:2]

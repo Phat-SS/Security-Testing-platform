@@ -8,16 +8,39 @@ font's encoding so arbitrary response content can't break rendering.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter
 
 from app.schemas.execution import Execution
 from app.schemas.finding import Finding
 from app.schemas.testcase import TestCase
 
+# Letters Unicode does NOT decompose into base-letter + combining mark (so
+# NFKD below can't strip them the way it strips á/ê/ô/etc.) but that still
+# have an obvious ASCII stand-in.
+_NON_DECOMPOSING = str.maketrans({"đ": "d", "Đ": "D"})
+
 
 def _s(text) -> str:
-    # Core PDF fonts are latin-1; drop anything else rather than crash.
-    return str(text).encode("latin-1", "replace").decode("latin-1")
+    """Core PDF fonts (Helvetica) only cover latin-1. This app also ships a
+    full Vietnamese UI (app/core/i18n.py) whose strings flow straight into
+    this report, so `encode("latin-1", "replace")` alone silently turns every
+    accented character into "?" — "Kết quả" becomes "K?t qu?", which is a
+    regression against the app's own i18n, not a neutral degradation.
+
+    Decomposing to base letter + combining marks and dropping the marks
+    keeps the text legible instead: "Kết quả" renders as "Ket qua". This does
+    not make the PDF Unicode-correct — embedding a Unicode TTF (fpdf2's
+    `add_font`) would — it trades exactness for legibility in a report format
+    that stays dependency-light on purpose (see module docstring). A
+    genuinely undecomposable character (CJK, Cyrillic, emoji) still falls
+    back to "?"; that residual case is real, but now the exception rather
+    than every diacritic in a Vietnamese report.
+    """
+    s = str(text).translate(_NON_DECOMPOSING)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.encode("latin-1", "replace").decode("latin-1")
 
 
 def export_pdf(

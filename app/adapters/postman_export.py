@@ -69,13 +69,13 @@ def _assertions(t: TestCase) -> list[str]:
     codes = t.expected.status_in
     lines = [
         f"// OWASP {t.owasp_category.value} — a secure system should reject this attack",
-        f"pm.test('rejected with expected status', function () {{",
+        "pm.test('rejected with expected status', function () {",
         f"    pm.expect({json.dumps(codes)}).to.include(pm.response.code);",
         "});",
     ]
     for marker in t.expected.body_must_not_contain:
         lines += [
-            f"pm.test('no disclosure of protected data', function () {{",
+            "pm.test('no disclosure of protected data', function () {",
             f"    pm.expect(pm.response.text()).to.not.include({json.dumps(marker)});",
             "});",
         ]

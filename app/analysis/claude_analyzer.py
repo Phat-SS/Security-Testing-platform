@@ -1,8 +1,10 @@
 """Claude-backed analyzer (optional, real).
 
 Implements the same `analyze(issue) -> IssueAnalysis` shape as HeuristicAnalyzer
-but uses the Anthropic API. Enabled only when USE_AI=true and ANTHROPIC_API_KEY
-is set; otherwise the platform runs fully on the deterministic path.
+but uses the operator's local Claude Code CLI (see `ClaudeLLM` in
+`app.analysis.staged`) rather than a separate Anthropic API key. Enabled only
+when USE_AI=true and the `claude` CLI is installed and logged in; otherwise the
+platform runs fully on the deterministic path.
 
 Design guarantees preserved:
   * AI output is NEVER trusted directly — it is parsed and validated against the
@@ -14,91 +16,38 @@ Design guarantees preserved:
 
 from __future__ import annotations
 
-import json
 import os
 
-from app.analysis.extractor import HeuristicAnalyzer
 from app.mcp.jira import NormalizedIssue
 from app.schemas.analysis import IssueAnalysis
 
-_SYSTEM = """You are a senior API security analyst. Given a Jira ticket, extract
-a structured security analysis. Identify HTTP endpoints (method + path), object
-identifier parameters, whether auth is required, URL/webhook fields, and which
-OWASP API Security Top 10 (2023) categories are APPLICABLE with a reason.
-Return ONLY JSON matching the provided schema. Do not invent target hostnames.
-Mark a category NOT_APPLICABLE rather than guessing."""
-
 
 class ClaudeAnalyzer:
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
-        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        self._fallback = HeuristicAnalyzer()
+    """Thin compatibility wrapper around `StagedAnalyzer(ClaudeLLM(...))` so
+    callers that pre-date the staged pipeline (and `is_enabled()`, which every
+    other AI-backed component gates on) keep a single, simple entry point."""
+
+    def __init__(self, model: str | None = None) -> None:
+        from app.analysis.staged import ClaudeLLM, StagedAnalyzer
+
+        self._staged = StagedAnalyzer(ClaudeLLM(model=model))
         # Why the last analyze() did not use the AI, if it didn't. Read by the
         # orchestrator and written to the audit trail. Falling back silently
         # meant an operator who deliberately switched USE_AI on could not tell
-        # a working AI path from a broken key — both produced a normal-looking
-        # analysis, just a thinner one.
+        # a working AI path from a broken CLI login — both produced a
+        # normal-looking analysis, just a thinner one.
         self.last_fallback_reason: str = ""
 
     @staticmethod
     def is_enabled() -> bool:
-        return os.getenv("USE_AI", "false").lower() == "true" and bool(
-            os.getenv("ANTHROPIC_API_KEY")
-        )
+        from app.analysis.staged import ClaudeLLM
+
+        return os.getenv("USE_AI", "false").lower() == "true" and ClaudeLLM.is_available()
 
     def analyze(self, issue: NormalizedIssue) -> IssueAnalysis:
-        self.last_fallback_reason = ""
-        try:
-            import anthropic  # imported lazily so the SDK is an optional dep
-        except ImportError:
-            self.last_fallback_reason = (
-                "the `anthropic` package is not installed (pip install anthropic)"
-            )
-            return self._fallback.analyze(issue)
-
-        if not self._api_key:
-            self.last_fallback_reason = "ANTHROPIC_API_KEY is not set"
-            return self._fallback.analyze(issue)
-
-        schema = IssueAnalysis.model_json_schema()
-        prompt = (
-            f"Ticket {issue.issue_key}:\n"
-            f"Summary: {issue.summary}\n"
-            f"Description:\n{issue.description}\n"
-            f"Acceptance criteria: {issue.acceptance_criteria}\n\n"
-            f"Return JSON for this schema (issue_key must be {issue.issue_key!r}):\n"
-            f"{json.dumps(schema)}"
-        )
-        try:
-            client = anthropic.Anthropic(api_key=self._api_key)
-            msg = client.messages.create(
-                model=self._model,
-                max_tokens=2000,
-                system=_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = "".join(block.text for block in msg.content if block.type == "text")
-            payload = _extract_json(text)
-            analysis = IssueAnalysis.model_validate_json(payload)
-            # Never trust the AI's issue_key — pin it.
-            analysis.issue_key = issue.issue_key
-            return analysis
-        except Exception as exc:  # noqa: BLE001 - fall back on anything, but say why
-            # Any API/parse/validation failure → deterministic fallback. The
-            # reason is recorded rather than swallowed: an auth error, a rate
-            # limit and a truncated response all land here and are very
-            # different problems for whoever has to fix one.
-            self.last_fallback_reason = f"{type(exc).__name__}: {exc}"
-            return self._fallback.analyze(issue)
-
-
-def _extract_json(text: str) -> str:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("no JSON object in model response")
-    return text[start : end + 1]
+        result = self._staged.analyze(issue)
+        self.last_fallback_reason = self._staged.last_fallback_reason
+        return result
 
 
 def build_analyzer():
@@ -109,4 +58,6 @@ def build_analyzer():
         from app.analysis.staged import ClaudeLLM, StagedAnalyzer
 
         return StagedAnalyzer(ClaudeLLM())
+    from app.analysis.extractor import HeuristicAnalyzer
+
     return HeuristicAnalyzer()

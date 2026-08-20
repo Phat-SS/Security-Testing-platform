@@ -16,7 +16,21 @@ Evidence is ranked. Strongest first:
   1. verification read-back  — the attack's effect persisted in server state
   2. correlated disclosure   — the victim's data came back in the response
   3. direct header/limit observation — the control is absent, not inferred
-  4. status codes            — weakest; never decisive on their own
+  4. credential-check bypass — a credential-removing mutation (API2) reached a
+     business-logic rejection instead of the required auth rejection, while
+     the credentialed baseline proved the endpoint works
+  5. status codes            — weakest; never decisive on their own
+
+Tier 1 needs no other identity's response to mean something: it is proven by
+re-reading the object. Tier 2 is different — "the response disclosed another
+identity's data" is only a meaningful claim once we know what a legitimate
+response looks like, which is exactly what the positive control establishes.
+So a failed positive control (`baseline_ok is False`) gates tier 2 and forces
+INCONCLUSIVE even when a marker match was found: a marker "leak" against a
+target that is unreachable even for its rightful owner is far more likely a
+coincidental substring in shared boilerplate than a real disclosure. It does
+NOT gate tier 1 (state persistence needs no baseline) or tier 3 (headers and
+rate limits are observed directly, not by comparison to another identity).
 
 Outputs the six-state result with a human-readable reason, always.
 """
@@ -26,6 +40,21 @@ from __future__ import annotations
 from app.schemas.enums import Confidence, TestStatus
 from app.schemas.execution import CapturedResponse, RepeatStats, Verdict
 from app.schemas.testcase import TestCase
+
+# API2 mutations that remove or invalidate the credential itself. Kept in sync
+# with app.execution.mutations' API2 catalogue by hand: `borrowed_token`
+# deliberately excluded — it presents another persona's VALID credential, so a
+# non-401/403 response there is a different (BOLA-flavoured) question, not
+# evidence the auth check itself was skipped.
+_AUTH_BYPASS_MUTATION_KINDS = {
+    "drop_auth",
+    "tamper_token",
+    "jwt_alg_none",
+    "jwt_alg_confusion",
+    "jwt_claim_tamper",
+    "jwt_expired_replay",
+    "jwt_kid_injection",
+}
 
 
 def evaluate(
@@ -79,37 +108,6 @@ def evaluate(
             ),
         )
 
-    # --- 2. Correlated cross-identity disclosure. --------------------------
-    if leaked_markers:
-        # Only the COUNT, never the values. `actual_summary` and `reason` are
-        # narrative fields: they are stored, exported via export.json, rendered
-        # into reports and posted to Jira, and — unlike request/response — they
-        # get no redact_*() pass of their own. A leaked marker is frequently a
-        # session token or an API key, and a victim's email is PII either way,
-        # so writing it here would make the platform re-disclose the very data
-        # it is reporting as disclosed. The runner already applies exactly this
-        # rule to its execution log; the verdict was the remaining hole.
-        #
-        # The values stay discoverable where a reader should look for them: the
-        # captured response body, which IS redacted before storage.
-        return Verdict(
-            result=TestStatus.FAIL,
-            confidence=Confidence.HIGH,
-            expected_summary=exp_summary,
-            actual_summary=(
-                f"HTTP {response.status_code}; the response disclosed "
-                f"{len(leaked_markers)} protected marker(s) belonging to another identity"
-            ),
-            reason=(
-                "The mutated request returned data belonging to another "
-                "identity/object. Server-side authorization is not enforced "
-                "for the requested object — the response correlates a "
-                "cross-identity data leak, not merely a success status. The "
-                "disclosed values are visible in the captured response body "
-                "evidence for this execution."
-            ),
-        )
-
     # --- 3. Directly observed missing controls. ----------------------------
     # Response headers and rate limits are observed, not inferred: either the
     # header is there or it is not. These are evaluated BEFORE the status-code
@@ -143,9 +141,34 @@ def evaluate(
         )
 
     # --- 4. Positive control: was the attack even capable of succeeding? ---
-    # This gate sits above every PASS below. A control cannot be shown to hold
-    # against an attack that never reached anything.
+    # This gate sits above every FAIL/PASS below EXCEPT verification_proof
+    # (tier 1, checked above): that tier is state persistence, proven by
+    # re-reading the object — it needs no other identity's response to mean
+    # something. Correlated disclosure (tier 2, next) is not independent that
+    # way: "the response disclosed another identity's data" is only a
+    # meaningful claim if we know what a legitimate response looks like, and
+    # that is exactly what the positive control establishes. When the
+    # entitled identity could not reach the target either, a marker "match" in
+    # that same unreachable response is far more likely a coincidental
+    # substring in shared boilerplate (an error page, a generic template) than
+    # a real leak, so it must not be allowed to silently outrank this gate.
     if baseline_ok is False:
+        leak_caveat = ""
+        reason_caveat = ""
+        if leaked_markers:
+            leak_caveat = (
+                " (a marker match was also found in this response, but it is not "
+                "trusted as disclosure — see reason)"
+            )
+            reason_caveat = (
+                " A marker match was flagged in the same response, but a marker "
+                "match against a target that is unreachable even for its rightful "
+                "owner cannot be trusted as cross-identity disclosure — it is far "
+                "more likely a coincidental substring in shared boilerplate (the "
+                "same error page every caller gets) than a real leak. It is not "
+                "reported as a finding here for that reason; if the marker choice "
+                "itself is too short or generic, tighten it and re-run."
+            )
         return Verdict(
             result=TestStatus.INCONCLUSIVE,
             confidence=Confidence.LOW,
@@ -153,6 +176,7 @@ def evaluate(
             actual_summary=(
                 f"HTTP {response.status_code}, but the positive control failed"
                 + (f" ({baseline_summary})" if baseline_summary else "")
+                + leak_caveat
             ),
             reason=(
                 "The identity that legitimately owns this object/function could not "
@@ -160,6 +184,77 @@ def evaluate(
                 "the attack's rejection proves nothing about authorization. Fix the "
                 "test data (stale or wrong object id, missing persona entitlement) "
                 "and re-run. Reporting this as PASS would be a false negative."
+                + reason_caveat
+            ),
+        )
+
+    # --- 4b. Correlated cross-identity disclosure. --------------------------
+    # Only reached once the positive control has NOT ruled itself out (it
+    # succeeded, or none was configured) — see the gate above.
+    if leaked_markers:
+        # Only the COUNT, never the values. `actual_summary` and `reason` are
+        # narrative fields: they are stored, exported via export.json, rendered
+        # into reports and posted to Jira, and — unlike request/response — they
+        # get no redact_*() pass of their own. A leaked marker is frequently a
+        # session token or an API key, and a victim's email is PII either way,
+        # so writing it here would make the platform re-disclose the very data
+        # it is reporting as disclosed. The runner already applies exactly this
+        # rule to its execution log; the verdict was the remaining hole.
+        #
+        # The values stay discoverable where a reader should look for them: the
+        # captured response body, which IS redacted before storage.
+        return Verdict(
+            result=TestStatus.FAIL,
+            confidence=Confidence.HIGH,
+            expected_summary=exp_summary,
+            actual_summary=(
+                f"HTTP {response.status_code}; the response disclosed "
+                f"{len(leaked_markers)} protected marker(s) belonging to another identity"
+            ),
+            reason=(
+                "The mutated request returned data belonging to another "
+                "identity/object. Server-side authorization is not enforced "
+                "for the requested object — the response correlates a "
+                "cross-identity data leak, not merely a success status. The "
+                "disclosed values are visible in the captured response body "
+                "evidence for this execution."
+            ),
+        )
+
+    # --- 4c. Auth check demonstrably did not run. ---------------------------
+    # Scoped narrowly to mutations that remove/tamper the credential itself
+    # (API2). For these, "rejected, but not with the specific auth-rejection
+    # code the expected set requires" is not ambiguous the way it is for BOLA
+    # or BFLA: the positive control (baseline_ok is True, checked explicitly —
+    # not merely "not False") proves the endpoint works for a credentialed
+    # caller, so the only way a credential-less/tampered request reaches a
+    # business-logic-style rejection (a validation 400/422, or worse a 2xx
+    # handled elsewhere) instead of 401/403 is that nothing checked the
+    # credential before that logic ran. That is deterministic, not inferred —
+    # no AI or human needed for this specific pattern.
+    if (
+        baseline_ok is True
+        and not status_ok
+        and test.attack_mutation.kind in _AUTH_BYPASS_MUTATION_KINDS
+        and response.status_code not in (401, 403)
+        and response.status_code < 500
+    ):
+        return Verdict(
+            result=TestStatus.FAIL,
+            confidence=Confidence.HIGH,
+            expected_summary=exp_summary,
+            actual_summary=(
+                f"HTTP {response.status_code} (expected {expected.status_in}); the "
+                f"credentialed baseline succeeded ({baseline_summary})" if baseline_summary
+                else f"HTTP {response.status_code} (expected {expected.status_in})"
+            ),
+            reason=(
+                "The mutation removed or invalidated the credential, the endpoint is "
+                "proven reachable (the credentialed positive control succeeded), and "
+                f"yet the attack did not receive {expected.status_in} — it received a "
+                "response that looks like business-logic processing instead of an "
+                "authentication rejection. The credential was never actually checked "
+                "before the request was handled."
             ),
         )
 
@@ -218,15 +313,27 @@ def evaluate(
             reason="Server error during the attack; result is indeterminate.",
         )
 
-    # --- 8. Anything else: rejected in a way not in the expected set, no leak.
+    # --- 8. Rejected, but not with a status in the expected set, and no leak.
+    # This is NOT "control held": the expected set encodes what a secure system
+    # should specifically do (e.g. 401 for "no credential"), and a different
+    # rejection can itself be the finding — a 400 instead of a 401 typically
+    # means the request passed the authentication check and was rejected by
+    # business-logic validation instead, i.e. the control being tested never
+    # ran. Concluding "safe" here from the status code alone is exactly the
+    # mirror-image anti-pattern this module refuses for a bare 404 (see module
+    # docstring), so an unmatched status is undecided, not a confident PASS.
     return Verdict(
-        result=TestStatus.PASS,
-        confidence=Confidence.MEDIUM,
+        result=TestStatus.INCONCLUSIVE,
+        confidence=Confidence.LOW,
         expected_summary=exp_summary,
-        actual_summary=f"HTTP {response.status_code}, no disclosure",
+        actual_summary=f"HTTP {response.status_code} (expected {expected.status_in})",
         reason=(
-            f"Attack was not successful (status {response.status_code}); no "
-            "protected data disclosed. Treated as control-held."
+            f"The attack was rejected (status {response.status_code}) but not with a "
+            f"status in the expected set {expected.status_in}. No disclosure was found, "
+            "but a different rejection than the one a secure system should give is not "
+            "confidently 'control held' — e.g. a 400 instead of a 401 can mean the "
+            "request reached business-logic validation before any authentication check "
+            "ran. Manual review required."
         ),
     )
 

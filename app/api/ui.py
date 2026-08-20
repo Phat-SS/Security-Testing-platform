@@ -131,6 +131,41 @@ THEME_JS = """
 """
 
 
+# -- language -----------------------------------------------------------------
+#
+# Unlike the theme toggle, this is resolved server-side (see
+# app.core.i18n.get_lang / main.py's lang_middleware): the choice has to be
+# known before the page is rendered, not patched in afterwards by JS, since it
+# changes which strings the page builders emit in the first place. The links
+# just reload the current URL with `?lang=` swapped — the middleware persists
+# that as a cookie, so every page after this one keeps the choice without it
+# needing to appear in every link on the site.
+
+def lang_toggle_html(current_lang: str) -> str:
+    def _link(code: str, label: str) -> str:
+        cls = " active" if current_lang == code else ""
+        return f'<a class="lang-link{cls}" href="#" data-lang="{attr(code)}">{label}</a>'
+
+    return (
+        f'<span class="lang-switch">{_link("en", "EN")}<span class="lang-sep">/</span>'
+        f'{_link("vi", "VI")}</span>'
+    )
+
+
+LANG_JS = """
+(function () {
+  document.querySelectorAll('a[data-lang]').forEach(function (a) {
+    a.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      var url = new URL(location.href);
+      url.searchParams.set('lang', a.getAttribute('data-lang'));
+      location.href = url.toString();
+    });
+  });
+})();
+"""
+
+
 # -- sections ---------------------------------------------------------------
 
 

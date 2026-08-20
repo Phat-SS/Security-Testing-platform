@@ -99,6 +99,29 @@ def test_a_bola_family_mutation_without_a_victim_is_refused():
     assert "no target_persona" in result.rejected[0]
 
 
+def test_an_auth_bypass_proposal_against_a_declared_public_endpoint_is_refused():
+    result = _planner().accept(
+        [_proposal(owasp_category="API2:2023", persona="anonymous", target_persona=None,
+                   method="GET", path="/health", mutation_kind="drop_auth",
+                   expected_status_in=[401])],
+        existing=[],
+        expected_public={("GET", "/health")},
+    )
+    assert result.tests == []
+    assert "expected-public" in result.rejected[0]
+
+
+def test_an_auth_bypass_proposal_elsewhere_is_unaffected_by_the_public_set():
+    result = _planner().accept(
+        [_proposal(owasp_category="API2:2023", persona="anonymous", target_persona=None,
+                   method="GET", path="/customers/{id}", mutation_kind="drop_auth",
+                   expected_status_in=[401])],
+        existing=[],
+        expected_public={("GET", "/health")},
+    )
+    assert result.tests, "a path not declared public must be unaffected"
+
+
 def test_an_empty_expected_set_is_refused():
     # Nothing to evaluate the result against means the test can never decide
     # anything, which is worse than not running it.

@@ -140,6 +140,79 @@ def test_the_verdict_never_repeats_the_leaked_value_it_is_reporting():
     assert "beth@x.com" in execution.response.body
 
 
+def test_boilerplate_body_does_not_fabricate_a_leak_when_baseline_also_fails():
+    """Regression for BH-217: an endpoint that rejects every caller — attacker
+    and rightful owner alike — with the identical generic error body must not
+    be sealed as a confirmed cross-identity leak just because a short/generic
+    secret marker happens to be a substring of that shared boilerplate.
+
+    Both the attack and the baseline hit the exact same handler here, so their
+    bodies are identical up to nothing (there is no per-request variation at
+    all) — the worst case, and the one the real bug report showed: a marker
+    match that is present in literally every response this endpoint ever
+    sends, including to the entitled owner's own positive-control request.
+    """
+
+    async def always_rejects(request):
+        # A generic problem+json body, same shape the real target returned:
+        # no path/persona-specific content, so any marker match in it is
+        # necessarily unrelated to who is asking.
+        return JSONResponse(
+            {"type": "https://tools.ietf.org/html/rfc9110#section-15.5.16",
+             "title": "Unsupported Media Type", "status": 415},
+            status_code=415,
+        )
+
+    vault = PersonaVault([
+        Persona("agent_A", {"Authorization": "Bearer tokenA"}, "agent", {"customer_id": "1001"}, []),
+        # A short, generic marker that coincidentally substring-matches the
+        # boilerplate above (present in the RFC url's version-looking text).
+        Persona("agent_B", {"Authorization": "Bearer tokenB"}, "agent", {"customer_id": "2002"},
+                ["9110"]),
+    ])
+    client = TestClient(_app(Route("/customers/{cid}", always_rejects)), base_url=_BASE_URL)
+    client.follow_redirects = False
+    scope = ScopeValidator(ScopePolicy(allowed_hosts={_HOST}), resolver=lambda h: "203.0.113.10")
+    runner = HttpRunner(_BASE_URL, scope, vault, Settings.from_env(), client=client)
+
+    execution = runner.run(_bola_test(), "E3d")
+
+    assert execution.verdict.result == TestStatus.INCONCLUSIVE
+    assert "positive control failed" in execution.verdict.actual_summary.lower()
+    assert "protected marker" not in execution.verdict.actual_summary
+
+
+def test_short_marker_alone_is_never_treated_as_a_leak():
+    """A minimum-length floor on marker matching: below it, a substring hit
+    proves nothing (a bare id or area code will coincidentally appear in all
+    kinds of unrelated response text), mirroring the length floor the
+    adjudicator already applies to its own byte-identical-body check."""
+
+    async def scoped(request):
+        cid = request.path_params["cid"]
+        owner = {"1001": "Bearer tokenA", "2002": "Bearer tokenB"}.get(cid)
+        if request.headers.get("authorization") != owner:
+            # "2" is a substring of practically anything, including this
+            # rejection's own status code rendered into the body.
+            return JSONResponse({"error": "forbidden", "status": 403}, status_code=403)
+        return JSONResponse({"id": cid})
+
+    vault = PersonaVault([
+        Persona("agent_A", {"Authorization": "Bearer tokenA"}, "agent", {"customer_id": "1001"}, []),
+        Persona("agent_B", {"Authorization": "Bearer tokenB"}, "agent", {"customer_id": "2002"}, ["2"]),
+    ])
+    client = TestClient(_app(Route("/customers/{cid}", scoped)), base_url=_BASE_URL)
+    client.follow_redirects = False
+    scope = ScopeValidator(ScopePolicy(allowed_hosts={_HOST}), resolver=lambda h: "203.0.113.10")
+    runner = HttpRunner(_BASE_URL, scope, vault, Settings.from_env(), client=client)
+
+    execution = runner.run(_bola_test(), "E3e")
+
+    # 403 is in the expected set and no *trustworthy* leak was found, despite
+    # "2" being technically present in the response body.
+    assert execution.verdict.result == TestStatus.PASS
+
+
 def test_a_missing_baseline_persona_does_not_fabricate_a_result():
     """'We could not check' must not read as 'the target was unreachable', and
     neither may quietly become a PASS."""

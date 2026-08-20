@@ -80,6 +80,7 @@ def _persona_from_config(p: dict) -> Persona:
         owns=p.get("owns", {}),
         secret_markers=p.get("secret_markers", []),
         missing_env=tuple(dict.fromkeys(missing)),
+        scoping_headers=tuple(p.get("scoping_headers", [])),
     )
 
 
@@ -158,7 +159,6 @@ def load_engagement(path: str | None = None) -> Engagement:
 RUNNER_KEYS = (
     "timeout_s",
     "max_response_bytes",
-    "max_redirects",
     "max_requests_per_test",
 )
 
@@ -303,6 +303,7 @@ def save_persona(
     role: str = "user",
     owns: dict[str, str] | None = None,
     secret_markers: list[str] | None = None,
+    scoping_headers: list[str] | None = None,
 ) -> None:
     """Add or replace one persona by name, keeping the order of the others."""
     data = read_config(path)
@@ -313,6 +314,7 @@ def save_persona(
         "role": role,
         "owns": owns or {},
         "secret_markers": secret_markers or [],
+        "scoping_headers": scoping_headers or [],
     }
     for i, p in enumerate(personas):
         if p.get("name") == name:

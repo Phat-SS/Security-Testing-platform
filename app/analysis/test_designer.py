@@ -126,8 +126,11 @@ class TestDesigner:
         for ep in analysis.endpoints:
             if OwaspApiCategory.API1 in applicable and ep.object_id_params:
                 tests += self._api1(ep, counters)
-            if OwaspApiCategory.API2 in applicable and ep.auth_required:
-                tests += self._api2(ep, counters)
+            if OwaspApiCategory.API2 in applicable:
+                if ep.expected_public:
+                    tests += self._api2_expected_public(ep, counters)
+                elif ep.auth_required:
+                    tests += self._api2(ep, counters)
             if OwaspApiCategory.API3 in applicable and ep.writes_properties:
                 tests += self._api3(ep, counters)
             if OwaspApiCategory.API4 in applicable and self._is_expensive(ep):
@@ -216,6 +219,25 @@ class TestDesigner:
         return tests
 
     # -- API2: authentication -----------------------------------------------
+
+    def _api2_expected_public(self, ep: Endpoint, c) -> list[TestCase]:
+        """The endpoint is declared intentionally public: the secure/correct
+        behaviour IS to answer without a credential, so a 200 here is PASS and
+        a 401/403 is the regression worth a look. No tamper_token/JWT variants
+        — there is no credential in play to tamper with."""
+        return [
+            self._mk(
+                OwaspApiCategory.API2, c, Severity.INFO, ep,
+                title=f"Expected public: {ep.signature} answers without a credential",
+                objective="Confirm the endpoint declared expected-public is still "
+                          "reachable without a credential; a 401/403 here means the "
+                          "declared access policy no longer matches reality (a "
+                          "regression, not a fix).",
+                auth=AuthContext(persona="anonymous"),
+                mutation=Mutation(kind="drop_auth"),
+                expected=ExpectedResult(status_in=[200, 201, 202, 204]),
+            )
+        ]
 
     def _api2(self, ep: Endpoint, c) -> list[TestCase]:
         # The endpoint answering normally for a credentialed identity is what

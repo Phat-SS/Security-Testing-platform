@@ -276,7 +276,7 @@ def test_the_log_shows_the_request_that_would_be_sent_again():
     _first_run(orch, client)
 
     html = _report(orch)
-    assert "<summary>request</summary>" in html
+    assert "<h4>Request" in html
     assert "/customers/2002" in html  # the mutated path, query included
     assert "Credentials are masked" in html
 
@@ -304,8 +304,10 @@ def test_a_report_with_no_assessment_behind_it_offers_no_button():
     )
     assert "data-rerun" not in standalone
     assert "<th>Re-run</th>" not in standalone
-    # The request panel is not a server feature, so it stays.
-    assert "<summary>request</summary>" in standalone
+    # The request panel is not a server feature, so it stays. Copy cURL is,
+    # so it should not appear either (no assessment_id was passed).
+    assert "<h4>Request" in standalone
+    assert "data-curl=" not in standalone
 
 
 def test_a_destructive_row_carries_the_confirmation_flag_into_the_page():
@@ -319,7 +321,7 @@ def test_a_destructive_row_carries_the_confirmation_flag_into_the_page():
 
     html = _report(orch)
     assert 'data-destructive="1"' in html
-    assert "Type ' + ISSUE + ' to confirm" in html
+    assert "Type {issue} to confirm" in html
 
 
 # -- the HTTP endpoint the report's button posts to --------------------------

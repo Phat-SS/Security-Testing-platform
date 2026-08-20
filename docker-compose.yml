@@ -1,0 +1,59 @@
+# One-command way to run the platform itself. For the isolated
+# arbitrary-Python PoC sandbox instead, see docker/docker-compose.yml — that
+# one is a separate, unrelated concern (network-isolated execution of a
+# reviewed PoC), not how you normally run the app.
+#
+# Quick start (SQLite, zero extra services):
+#   cp .env.example .env
+#   cp config/engagement.example.json config/engagement.json   # then edit it
+#   docker compose up --build
+#   open http://127.0.0.1:8100
+#
+# With Postgres instead of SQLite:
+#   echo "POSTGRES_PASSWORD=<something>" >> .env
+#   echo "DATABASE_URL=postgresql+psycopg://sectest:<something>@db/sectest" >> .env
+#   docker compose --profile postgres up --build   # start `db` first if this
+#                                                   # is the very first run
+
+services:
+  platform:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8100:8100"
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config:ro
+      - sectest-data:/app/data
+      - ./reports:/app/reports
+    # Read-only app dir on purpose: a security-testing tool whose own code
+    # could be rewritten from inside its own container is a worse finding
+    # than the ones it's there to look for. The two paths above (and /tmp,
+    # for libraries — fpdf2, openpyxl — that expect a writable temp dir) are
+    # the only writable filesystem this process has.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+  db:
+    image: postgres:16-alpine
+    profiles: ["postgres"]  # not started by a plain `docker compose up`
+    environment:
+      POSTGRES_DB: sectest
+      POSTGRES_USER: sectest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env when using the postgres profile}
+    volumes:
+      - sectest-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sectest"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  sectest-data:
+  sectest-pgdata:

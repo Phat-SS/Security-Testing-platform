@@ -53,6 +53,34 @@ def test_every_owasp_category_has_at_least_one_mutation():
         assert kinds_for(category), f"{category.value} has no mutation"
 
 
+def test_verbatim_replay_is_a_true_noop():
+    """Used only by ticket_poc mode: method/path/headers/body must survive
+    completely unchanged — the point is to send exactly the request a
+    ticket's PoC already proved works, not attack it a second time."""
+    base = RequestSpec(method="PUT", path="/dealer/vehicles/999999999/change-ownership",
+                       headers={"User-Agent": "tin-ss"},
+                       body={"status": "NotOwned", "customerId": 999999999})
+    prepared = _apply("verbatim_replay", detail={"headers": {"User-Agent": "tin-ss"}},
+                      base=base, target=None)
+    assert prepared.method == "PUT"
+    assert prepared.path == "/dealer/vehicles/999999999/change-ownership"
+    assert prepared.headers == {"User-Agent": "tin-ss"}
+    assert prepared.body == {"status": "NotOwned", "customerId": 999999999}
+
+
+def test_verbatim_replay_strips_the_attackers_own_credential():
+    """The whole point of the PoC this replays is 'no credential needed' —
+    apply_mutation merges the attacker persona's auth_headers into every
+    request by default, and verbatim_replay must undo exactly that, or a
+    'ran with no auth' PoC would silently gain one on replay."""
+    base = RequestSpec(method="GET", path="/dealer/vehicles/generate-link",
+                       headers={"User-Agent": "tin-ss"})
+    prepared = _apply("verbatim_replay", detail={"headers": {"User-Agent": "tin-ss"}},
+                      base=base, target=None)
+    assert "Authorization" not in prepared.headers
+    assert prepared.headers == {"User-Agent": "tin-ss"}
+
+
 def test_unknown_mutation_kind_is_rejected_not_improvised():
     with pytest.raises(MutationError, match="Unknown mutation kind"):
         _apply("definitely_not_a_real_kind")
@@ -252,3 +280,86 @@ def test_escalate_persona_strips_client_controlled_scoping_headers():
     prepared = _apply("escalate_persona")
     assert "X-Role" not in _apply("escalate_persona", base=base).headers
     assert prepared.note
+
+
+def test_escalate_persona_also_strips_headers_the_persona_declares():
+    """A real target's scoping header ("entity-context") is rarely one of the
+    generic hard-coded guesses (X-Role/X-Scope/...), so the attacker persona's
+    own `scoping_headers` must be stripped too, with no per-test detail needed."""
+    attacker = Persona("agent_A", {}, "agent", {"customer_id": "1001"}, [],
+                        scoping_headers=("entity-context",))
+    base = RequestSpec(method="GET", path="/reports", headers={"entity-context": "tenant-1001"})
+
+    prepared = apply_mutation(base, Mutation(kind="escalate_persona", detail={}),
+                               attacker, _VICTIM, _VAULT, {})
+
+    assert "entity-context" not in prepared.headers
+
+
+# -- API4/API8/API9/API10: GraphQL, host-header trust, OAuth redirects --------
+
+
+def test_graphql_introspection_probe_sends_the_introspection_query_as_post():
+    prepared = _apply("graphql_introspection_probe")
+    assert prepared.method == "POST"
+    assert "__schema" in prepared.body["query"]
+
+
+def test_graphql_introspection_probe_accepts_a_custom_query():
+    prepared = _apply("graphql_introspection_probe", {"query": "{ __typename }"})
+    assert prepared.body == {"query": "{ __typename }"}
+
+
+def test_graphql_batching_abuse_batches_n_operations_into_one_request():
+    prepared = _apply("graphql_batching_abuse", {"count": 5, "query": "{ me { id } }"})
+    assert prepared.method == "POST"
+    assert prepared.body == [{"query": "{ me { id } }"}] * 5
+    # The amplification lives in the payload, not in repeated HTTP requests.
+    assert prepared.repeat == 1
+
+
+def test_graphql_batching_abuse_count_is_capped():
+    prepared = _apply("graphql_batching_abuse", {"count": 100_000})
+    assert len(prepared.body) == _MAX_REPEAT
+
+
+def test_host_header_injection_sets_host_and_forwarded_host_by_default():
+    prepared = _apply("host_header_injection")
+    assert prepared.headers["Host"] == "evil.attacker.example"
+    assert prepared.headers["X-Forwarded-Host"] == "evil.attacker.example"
+
+
+def test_host_header_injection_accepts_a_custom_host_and_header_list():
+    prepared = _apply("host_header_injection",
+                       {"host": "attacker.test", "headers": ["X-Forwarded-Host"]})
+    assert prepared.headers["X-Forwarded-Host"] == "attacker.test"
+    assert "Host" not in prepared.headers
+
+
+def test_oauth_redirect_uri_bypass_defaults_to_the_redirect_uri_query_param():
+    base = RequestSpec(method="GET", path="/oauth/authorize", query={"client_id": "abc"})
+    prepared = _apply("oauth_redirect_uri_bypass", base=base)
+    assert prepared.query["redirect_uri"] == "https://evil.attacker.example/callback"
+    assert prepared.query["client_id"] == "abc"  # untouched
+
+
+def test_oauth_redirect_uri_bypass_accepts_a_custom_field_and_value():
+    prepared = _apply("oauth_redirect_uri_bypass",
+                       {"field": "callback_url", "value": "https://attacker.test/cb"})
+    assert prepared.query["callback_url"] == "https://attacker.test/cb"
+
+
+def test_escalate_persona_persona_headers_are_additive_to_an_explicit_list():
+    """detail['strip_headers'] overrides the generic hard-coded default, but
+    the persona's own declared scoping headers are unioned in regardless —
+    they describe a persistent fact about that identity's session, not a
+    per-test-case choice."""
+    attacker = Persona("agent_A", {}, "agent", {}, [], scoping_headers=("entity-context",))
+    base = RequestSpec(method="GET", path="/reports",
+                        headers={"entity-context": "tenant-1001", "X-Role": "agent"})
+
+    prepared = apply_mutation(base, Mutation(kind="escalate_persona", detail={"strip_headers": ["X-Role"]}),
+                               attacker, _VICTIM, _VAULT, {})
+
+    assert "entity-context" not in prepared.headers
+    assert "X-Role" not in prepared.headers

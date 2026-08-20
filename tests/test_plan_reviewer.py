@@ -126,6 +126,13 @@ def test_the_structural_review_labels_itself_as_having_no_ai():
     assert review.reviewer == "deterministic"
 
 
+def test_the_structural_review_has_no_requirement_digest():
+    """Restating intent from prose is a reading task — the deterministic
+    review must not guess at it from a bullet's grammar alone."""
+    review = structural_review(_analysis(), [_test()])
+    assert review.requirement_digest == []
+
+
 # -- the AI review: additive, and floored by structure ------------------------
 
 
@@ -211,6 +218,51 @@ def test_a_reviewer_whose_api_call_fails_degrades_and_says_why():
     review = PlanReviewer(_BrokenLLM()).review(_analysis(), [_test()])
     assert review.reviewer == "deterministic"
     assert "upstream said no" in review.degraded_reason
+
+
+def test_the_ai_reviewer_restates_a_requirement_as_a_checkable_expectation():
+    requirement = RequirementItem(item_id="R-02", text="No unauthorized ownership changes",
+                                  owasp_hints=[OwaspApiCategory.API5])
+    reply = (
+        '{"verdict": "REVISE", "gaps": [], '
+        '"requirement_digest": [{"item_id": "R-02", '
+        '"requirement": "No unauthorized ownership changes", '
+        '"expected": "PUT /vehicles/{id}/change-ownership must return 401 for an '
+        'anonymous caller, not fall through to validation."}]}'
+    )
+    review = PlanReviewer(_ScriptedLLM(reply)).review(
+        _analysis(requirements=[requirement]), [_test()], [requirement])
+    assert len(review.requirement_digest) == 1
+    row = review.requirement_digest[0]
+    assert row.item_id == "R-02"
+    assert "401" in row.expected
+
+
+def test_a_requirement_digest_row_for_an_unknown_item_id_is_dropped():
+    """An invented id would show a tester a confident restatement of a
+    requirement that does not exist in this ticket."""
+    requirement = RequirementItem(item_id="R-01", text="x", owasp_hints=[OwaspApiCategory.API1])
+    reply = (
+        '{"verdict": "REVISE", "gaps": [], '
+        '"requirement_digest": [{"item_id": "R-99", "requirement": "made up", '
+        '"expected": "made up too"}]}'
+    )
+    review = PlanReviewer(_ScriptedLLM(reply)).review(
+        _analysis(requirements=[requirement]), [_test()], [requirement])
+    assert review.requirement_digest == []
+
+
+def test_a_duplicate_item_id_in_the_digest_is_not_listed_twice():
+    requirement = RequirementItem(item_id="R-01", text="x", owasp_hints=[OwaspApiCategory.API1])
+    reply = (
+        '{"verdict": "REVISE", "gaps": [], '
+        '"requirement_digest": ['
+        '{"item_id": "R-01", "expected": "first"}, '
+        '{"item_id": "R-01", "expected": "second"}]}'
+    )
+    review = PlanReviewer(_ScriptedLLM(reply)).review(
+        _analysis(requirements=[requirement]), [_test()], [requirement])
+    assert len(review.requirement_digest) == 1
 
 
 def test_the_prompt_shows_the_reviewer_the_requirements_and_the_structural_gaps():
