@@ -582,6 +582,7 @@ def assessment_page(
     plan_review=None,
     run_assessment=None,
     triage: dict | None = None,
+    uncovered_poc_endpoints: list[str] | None = None,
 ) -> str:
     """The assessment screen. Its structure lives in `views_assessment` — it is
     the one page with enough moving parts to be worth its own module, and
@@ -612,6 +613,7 @@ def assessment_page(
         triage=triage or {},
         flash=flash,
         ticket_url=ticket_url,
+        uncovered_poc_endpoints=uncovered_poc_endpoints or [],
     )
     return page(f"Assessment {assessment.issue_key}", body)
 

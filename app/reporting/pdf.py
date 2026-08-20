@@ -50,9 +50,12 @@ def export_pdf(
     executions: list[Execution],
     findings: list[Finding],
     coverage: list[dict] | None = None,
+    plan_stale: bool = False,
+    uncovered_endpoints: list[str] | None = None,
 ) -> bytes:
     from fpdf import FPDF
 
+    uncovered_endpoints = uncovered_endpoints or []
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -64,6 +67,20 @@ def export_pdf(
     pdf.cell(0, 6, _s(f"Target: {target}   Baseline: OWASP API Security Top 10 (2023)"),
              new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
+    if plan_stale:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(156, 87, 0)
+        pdf.multi_cell(0, 6, _s("Warning: the endpoint list was edited after this test plan "
+                                "was designed. The tests below may not reflect the current "
+                                "attack surface."), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
+    if uncovered_endpoints:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(156, 87, 0)
+        pdf.multi_cell(0, 6, _s("Warning: the following test(s) target an endpoint that is not "
+                                "in the endpoint list: " + ", ".join(uncovered_endpoints)),
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
     # Summary

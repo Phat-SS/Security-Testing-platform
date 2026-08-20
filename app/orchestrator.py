@@ -252,6 +252,20 @@ class Orchestrator:
             return None
         return IssueAnalysis.model_validate(assessment.analysis_json)
 
+    def uncovered_poc_endpoints(self, assessment_id: str) -> list[str]:
+        """Endpoint signatures a PoC-derived test hits that never made the
+        endpoint list — see `app.owasp.coverage.uncovered_poc_endpoints` for
+        why the two lists can disagree from the very first design. Always
+        computed against the full test set, never the filtered/paged view a
+        caller might otherwise have on hand: a filter that hides every
+        PoC-sourced row must not make the gap look closed."""
+        from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
+
+        analysis = self.get_analysis(assessment_id)
+        if analysis is None:
+            return []
+        return _uncovered(analysis, self._repo.get_test_cases(assessment_id))
+
     def upsert_endpoint(self, assessment_id: str, endpoint, replaces: str = "",
                         actor: str = "tester") -> None:
         """Add an endpoint, or replace the one whose signature is `replaces`.
@@ -1210,33 +1224,48 @@ class Orchestrator:
         return diff, prev.id
 
     def export_json(self, assessment_id: str) -> str:
+        from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.exports import export_json as _json
 
         a = self._repo.get_assessment(assessment_id)
+        analysis = self.get_analysis(assessment_id)
+        tests = self._repo.get_test_cases(assessment_id)
         return _json(a.issue_key, a.target_base_url or "(not executed)",
-                     self._repo.get_test_cases(assessment_id),
+                     tests,
                      self._repo.get_executions(assessment_id),
                      self._repo.get_findings(assessment_id), a.coverage_json,
                      plan_review=self._repo.get_plan_review(assessment_id),
-                     run_assessment=self._repo.get_run_assessment(assessment_id))
+                     run_assessment=self._repo.get_run_assessment(assessment_id),
+                     plan_stale=bool(analysis and analysis.plan_is_stale()),
+                     uncovered_endpoints=_uncovered(analysis, tests) if analysis else [])
 
     def export_xlsx(self, assessment_id: str) -> bytes:
+        from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.exports import export_xlsx as _xlsx
 
         a = self._repo.get_assessment(assessment_id)
+        analysis = self.get_analysis(assessment_id)
+        tests = self._repo.get_test_cases(assessment_id)
         return _xlsx(a.issue_key, a.target_base_url or "(not executed)",
-                     self._repo.get_test_cases(assessment_id),
+                     tests,
                      self._repo.get_executions(assessment_id),
-                     self._repo.get_findings(assessment_id), a.coverage_json)
+                     self._repo.get_findings(assessment_id), a.coverage_json,
+                     plan_stale=bool(analysis and analysis.plan_is_stale()),
+                     uncovered_endpoints=_uncovered(analysis, tests) if analysis else [])
 
     def export_pdf(self, assessment_id: str) -> bytes:
+        from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.pdf import export_pdf as _pdf
 
         a = self._repo.get_assessment(assessment_id)
+        analysis = self.get_analysis(assessment_id)
+        tests = self._repo.get_test_cases(assessment_id)
         return _pdf(a.issue_key, a.target_base_url or "(not executed)",
-                    self._repo.get_test_cases(assessment_id),
+                    tests,
                     self._repo.get_executions(assessment_id),
-                    self._repo.get_findings(assessment_id), a.coverage_json)
+                    self._repo.get_findings(assessment_id), a.coverage_json,
+                    plan_stale=bool(analysis and analysis.plan_is_stale()),
+                    uncovered_endpoints=_uncovered(analysis, tests) if analysis else [])
 
     def export_postman(self, assessment_id: str) -> str:
         from app.adapters.postman_export import export_postman_collection
@@ -1265,14 +1294,17 @@ class Orchestrator:
         beside the request/response evidence it refers to, which is where a
         reader who wants that depth is going anyway.
         """
+        from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.jira_comment import build_comment
 
         assessment = self._repo.get_assessment(assessment_id)
         executions = self._repo.get_executions(assessment_id)
+        analysis = self.get_analysis(assessment_id)
+        tests = self._repo.get_test_cases(assessment_id)
         return build_comment(
             issue_key=assessment.issue_key,
             target=assessment.target_base_url or "(not executed)",
-            tests={t.test_id: t for t in self._repo.get_test_cases(assessment_id)},
+            tests={t.test_id: t for t in tests},
             executions=executions,
             findings=self._repo.get_findings(assessment_id),
             # The one-line answer a stakeholder reading the ticket wants:
@@ -1286,6 +1318,8 @@ class Orchestrator:
             # nothing about whether the rows were edited afterwards, and this
             # comment is about to assert the chain is intact.
             evidence_chain_ok=verify_chain(executions),
+            plan_stale=bool(analysis and analysis.plan_is_stale()),
+            uncovered_endpoints=_uncovered(analysis, tests) if analysis else [],
         )
 
     async def post_comment(self, assessment_id: str, actor: str = "tester") -> str:

@@ -310,3 +310,106 @@ def test_a_filter_that_matches_nothing_does_not_hide_the_stale_warning(client):
     assert "Nothing matches this filter" in page, "the filter should have emptied the page"
     assert "different endpoint list" in page
     assert "Regenerate test plan" in page
+
+
+# -- the stale warning must also travel with anything exported ---------------
+#
+# The dashboard's own banner (above) only reaches someone looking at the web
+# UI. A tester who edits endpoints and then downloads a report, or posts the
+# Jira comment, without revisiting the dashboard must not walk away with an
+# artefact that silently claims a plan built for the old endpoint list is
+# current.
+
+
+def _stale_assessment(client) -> str:
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+    client.post(f"/assessment/{aid}/endpoints", follow_redirects=True,
+                data={"method": "GET", "path": "/v2/new-surface", "auth_required": "true"})
+    return aid
+
+
+def test_json_export_flags_a_stale_plan(client):
+    import json
+
+    import app.api.main as main
+
+    aid = _stale_assessment(client)
+    payload = json.loads(main.state.orch.export_json(aid))
+
+    assert payload["plan_stale"] is True
+
+
+def test_json_export_does_not_flag_a_fresh_plan(client):
+    import json
+
+    import app.api.main as main
+
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+    payload = json.loads(main.state.orch.export_json(aid))
+
+    assert payload["plan_stale"] is False
+
+
+def test_xlsx_export_flags_a_stale_plan(client):
+    import io
+
+    from openpyxl import load_workbook
+
+    import app.api.main as main
+
+    aid = _stale_assessment(client)
+    wb = load_workbook(io.BytesIO(main.state.orch.export_xlsx(aid)))
+
+    assert "Test Cases (STALE)" in wb.sheetnames
+    summary_cells = [str(c.value) for row in wb["Summary"].iter_rows() for c in row if c.value]
+    assert any("stale" in v.lower() for v in summary_cells)
+
+
+def test_xlsx_export_does_not_flag_a_fresh_plan(client):
+    import io
+
+    from openpyxl import load_workbook
+
+    import app.api.main as main
+
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+    wb = load_workbook(io.BytesIO(main.state.orch.export_xlsx(aid)))
+
+    assert "Test Cases" in wb.sheetnames
+    assert "Test Cases (STALE)" not in wb.sheetnames
+
+
+def test_pdf_export_is_told_the_plan_is_stale(client, monkeypatch):
+    import app.api.main as main
+    import app.reporting.pdf as pdf_module
+
+    captured = {}
+    monkeypatch.setattr(pdf_module, "export_pdf",
+                        lambda *a, **kw: captured.update(kw) or b"%PDF-fake")
+
+    aid = _stale_assessment(client)
+    main.state.orch.export_pdf(aid)
+
+    assert captured.get("plan_stale") is True
+
+
+def test_jira_comment_flags_a_stale_plan(client):
+    import app.api.main as main
+
+    aid = _stale_assessment(client)
+    comment = main.state.orch.comment_preview(aid)
+
+    assert "edited after this test plan" in comment
+
+
+def test_jira_comment_does_not_flag_a_fresh_plan(client):
+    import app.api.main as main
+
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+    comment = main.state.orch.comment_preview(aid)
+
+    assert "edited after this test plan" not in comment

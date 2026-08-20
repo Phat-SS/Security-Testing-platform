@@ -526,11 +526,19 @@ reanalyze_note_text = (
     "OWASP mapping is rebuilt from scratch, which is the only operation allowed to "
     "drop a category."
 )
+uncovered_headline_text = "The test plan targets an endpoint that is not in this list."
+uncovered_body_text = (
+    "This is not a stale-plan problem: the endpoint list is read from ticket prose, "
+    "while a PoC's request can be built from a variable the extractor never sees. Add "
+    "the endpoint below if it is real attack surface, or leave it if the test is an "
+    "intentional negative control."
+)
 
 
 def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: bool,
                        requirements: list[dict] | None = None,
-                       coverage_items: list | None = None) -> str:
+                       coverage_items: list | None = None,
+                       uncovered_poc_endpoints: list[str] | None = None) -> str:
     rows = ""
     for i, ep in enumerate(endpoints):
         sig = f'{str(ep.get("method", "")).upper()} {ep.get("path", "")}'
@@ -604,6 +612,15 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
             f"<p style='margin:10px 0 0'><a class='btn sec' href='#s-design'>"
             f"{_t('Go to step 2')}</a></p></div>"
         )
+    if uncovered_poc_endpoints:
+        sigs = "".join(f'<span class="kchip mono">{e(sig)}</span>'
+                       for sig in uncovered_poc_endpoints)
+        body += (
+            "<div class='card pad warn stale' style='margin-top:12px'>"
+            f"<b>&#9888; {_t(uncovered_headline_text)}</b>"
+            f"<p class='muted' style='margin:6px 0 0'>{_t(uncovered_body_text)}</p>"
+            f"<p style='margin:10px 0 0'>{sigs}</p></div>"
+        )
 
     actions = (
         f'<form method="post" action="/assessment/{attr(aid)}/reanalyze" style="margin:0" '
@@ -621,6 +638,9 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
         summary += _t(" · {n} hand-entered").format(n=n_manual)
     if stale:
         summary += " · " + _t("plan is stale")
+    if uncovered_poc_endpoints:
+        summary += " · " + _t("{n} test(s) target an endpoint not listed").format(
+            n=len(uncovered_poc_endpoints))
 
     return ui.section(
         # Retitled when the requirement list is present, because the step now
@@ -632,7 +652,7 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
         summary=summary,
         actions=actions,
         open=opened,
-        tone="stale" if stale else "",
+        tone="stale" if (stale or uncovered_poc_endpoints) else "",
         tip=_t(
             "Everything downstream is derived from this list: the designer builds one "
             "test set per endpoint, and the OWASP mapping is computed from these "
@@ -723,6 +743,17 @@ VI.update({
         "bỏ một danh mục.",
     "{n} endpoint(s)": "{n} endpoint", "{n} requirement(s) · ": "{n} yêu cầu · ",
     " · {n} hand-entered": " · {n} nhập tay", "plan is stale": "kế hoạch đã cũ",
+    "{n} test(s) target an endpoint not listed": "{n} test nhắm vào endpoint chưa có trong danh sách",
+    "The test plan targets an endpoint that is not in this list.":
+        "Kế hoạch test đang nhắm vào một endpoint không có trong danh sách này.",
+    "This is not a stale-plan problem: the endpoint list is read from ticket prose, "
+    "while a PoC's request can be built from a variable the extractor never sees. Add "
+    "the endpoint below if it is real attack surface, or leave it if the test is an "
+    "intentional negative control.":
+        "Đây không phải lỗi kế hoạch cũ: danh sách endpoint được đọc từ văn xuôi ticket, "
+        "trong khi request của PoC có thể được dựng từ một biến mà bộ trích xuất không "
+        "bao giờ thấy. Thêm endpoint bên dưới nếu đó là bề mặt tấn công thật, hoặc bỏ qua "
+        "nếu test đó là một control âm tính có chủ đích.",
     "Requirements & endpoints": "Yêu cầu & endpoint",
     "Everything downstream is derived from this list: the designer builds one "
     "test set per endpoint, and the OWASP mapping is computed from these "
@@ -1947,6 +1978,7 @@ def body(
     triage: dict | None = None,
     flash: str = "",
     ticket_url: str = "",
+    uncovered_poc_endpoints: list[str] | None = None,
 ) -> str:
     verdicts = verdicts or {}
     aid = assessment.id
@@ -1993,7 +2025,8 @@ def body(
 {_step_nav(st)}
 {_endpoints_section(aid, endpoints, stale, opens["endpoints"],
                    requirements=analysis.get("requirements") or [],
-                   coverage_items=(run_assessment.items if run_assessment else []))}
+                   coverage_items=(run_assessment.items if run_assessment else []),
+                   uncovered_poc_endpoints=uncovered_poc_endpoints or [])}
 {_design_section(aid, analysis.get("detected_poc_source") or "", st.n_tests > 0, opens["design"])}
 {_coverage_section(aid, coverage or [], opens["coverage"])}
 {_plan_section(aid, plan, filters, opens["plan"], review=plan_review)}

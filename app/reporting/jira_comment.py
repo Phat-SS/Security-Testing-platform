@@ -269,12 +269,24 @@ def build_comment(
     max_finding_rows: int = 20,
     max_table_rows: int = 60,
     max_chars: int = 30_000,
+    plan_stale: bool = False,
+    uncovered_endpoints: list[str] | None = None,
 ) -> str:
     """Summary + the full results table. Explanation lives in the report.
 
     `run_assessment` is the agent-reviewed run verdict (passed/failed plus
     requirement coverage). It is optional: absent, the comment omits those rows
     rather than inventing a number.
+
+    `plan_stale` says the tests below were designed from an endpoint list that
+    has since been edited on the platform. The ticket is often the only place a
+    stakeholder ever looks, so this warning has to travel here too — the
+    dashboard's own staleness banner never reaches a reader who only opens Jira.
+
+    `uncovered_endpoints` names endpoint signatures a PoC-derived test actually
+    hits that never made the endpoint list at all — a gap present from the
+    first design, not from any later edit (see
+    `app.owasp.coverage.uncovered_poc_endpoints`).
 
     The old `max_detail_blocks` parameter is gone along with the blocks it
     bounded. Callers passing it will fail loudly rather than silently getting a
@@ -289,6 +301,23 @@ def build_comment(
         "",
         f"**Environment tested:** {_code(target, 120)}",
         "",
+    ]
+    if plan_stale:
+        lines += [
+            "_⚠️ The endpoint list for this assessment was edited after this test plan "
+            "was designed. The results below may not reflect the current attack surface — "
+            "re-run Design before relying on this as a final answer._",
+            "",
+        ]
+    if uncovered_endpoints:
+        lines += [
+            "_⚠️ The following test(s) target an endpoint that was never added to this "
+            f"assessment's endpoint list: {', '.join(_cell(s, 60) for s in uncovered_endpoints)}. "
+            "Review whether that endpoint belongs on the list before treating these results "
+            "as covering it._",
+            "",
+        ]
+    lines += [
         "| Metric | Value |",
         "|---|---|",
         f"| Tests executed | {len(executions)} |",

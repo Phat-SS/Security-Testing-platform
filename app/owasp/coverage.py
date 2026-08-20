@@ -8,10 +8,11 @@ which new tests to generate.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.schemas.analysis import IssueAnalysis
-from app.schemas.enums import Applicability, OwaspApiCategory
+from app.schemas.enums import Applicability, OwaspApiCategory, TestSource
 from app.schemas.testcase import TestCase
 
 
@@ -79,6 +80,55 @@ def coverage_summary(rows: list[CoverageRow]) -> dict:
         "partial": partial,
         "missing": missing,
     }
+
+
+_ID_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
+
+
+def uncovered_poc_endpoints(analysis: IssueAnalysis, tests: list[TestCase]) -> list[str]:
+    """Endpoint signatures a PoC-derived test actually sends but that never
+    made it into the endpoint list.
+
+    The endpoint list is extracted by a regex over ticket prose
+    (`extract_endpoints`, matching literal "METHOD /path" text). A PoC's real
+    request is extracted by parsing its AST instead, so a request built from a
+    variable (`requests.get(BASE + TARGET)`) has no literal "METHOD /path"
+    text for the regex to ever see. A test plan can therefore cover more
+    surface than the Endpoint panel shows — from the very first design, not
+    from anyone editing anything afterwards, so `IssueAnalysis.plan_is_stale()`
+    (which only compares the endpoint list against its own past self) cannot
+    catch it. Recomputed from whatever the endpoint list holds right now, so
+    adding the missing endpoint later clears the warning without a re-design.
+
+    Compared with the object id generalised out of the last path segment
+    (`parameterise_object_id`, the same convention `classify()` uses), then
+    with any remaining `{placeholder}` name flattened to a common token:
+    otherwise `/customers/{customerId}` in the endpoint list (a human's or
+    the regex's own naming) would never match `/customers/2002` (the PoC's
+    literal test id) or `/customers/{victim_id}` (classify's own naming),
+    and every ordinary BOLA replay would misreport as "uncovered".
+    """
+    known = {_normalised_signature(ep.method, ep.path) for ep in analysis.endpoints}
+    found: list[str] = []
+    for t in tests:
+        if t.source != TestSource.POC:
+            continue
+        sig = _normalised_signature(t.request.method, t.request.path)
+        if sig not in known and sig not in found:
+            found.append(f"{t.request.method.upper()} {_without_query(t.request.path)}")
+    return found
+
+
+def _normalised_signature(method: str, path: str) -> str:
+    from app.poc.classify import parameterise_object_id
+
+    generalised, _ = parameterise_object_id(_without_query(path))
+    generalised = _ID_PLACEHOLDER_RE.sub("{id}", generalised)
+    return f"{method.upper()} {generalised}"
+
+
+def _without_query(path: str) -> str:
+    return path.split("?", 1)[0]
 
 
 def _count_by_cat(tests: list[TestCase]) -> dict[OwaspApiCategory, int]:
