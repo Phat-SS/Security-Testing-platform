@@ -56,6 +56,29 @@ class OwaspMapping(BaseModel):
     coverage_pct: int = 0
 
 
+class DetectedPocScript(BaseModel):
+    """One PoC script found in the ticket, kept as its own file.
+
+    Mirrors `app.poc.jira_extract.PocScript` — a schema type rather than the
+    dataclass because this is persisted inside the analysis blob and has to
+    validate on the way back out of the database.
+    """
+
+    filename: str
+    code: str
+    # "description", "comment #2", "attachment: 02_write.py".
+    origin: str = "description"
+    language: str = "python"
+    # The block carried no language tag and was accepted because it parses as
+    # Python and calls an HTTP library. Surfaced so a reviewer gives the inferred
+    # ones a harder look before approving anything generated from them.
+    inferred: bool = False
+
+    @property
+    def label(self) -> str:
+        return f"{self.filename} ({self.origin})"
+
+
 class IssueAnalysis(BaseModel):
     issue_key: str
     business_summary: str = ""
@@ -76,10 +99,24 @@ class IssueAnalysis(BaseModel):
 
     # PoC signals detected in the ticket (references, not executed code).
     detected_pocs: list[str] = Field(default_factory=list)
-    # Raw PoC source extracted from the ticket description, pending a human's
-    # review in the Design step — never transpiled/executed until the tester
-    # looks at it and submits the design form themselves.
+    # Raw PoC source extracted from the ticket, pending a human's review in the
+    # Design step — never transpiled/executed until the tester looks at it and
+    # submits the design form themselves. Several scripts are banner-separated
+    # (`app/poc/jira_extract.combined_poc_source`); this is the *presentation*
+    # of the list below, which is what the transpiler is driven from.
     detected_poc_source: str = ""
+    # The scripts as separate files. A ticket with two PoCs is the normal case,
+    # not the edge case, and the two have to stay apart: transpiling a merged
+    # blob resolves one file's requests against the other file's constants,
+    # because the transpiler tracks assignments in one symbol table in source
+    # order. Kept so the Design step can show "2 scripts found: 01_reach.py,
+    # 02_write.py" and every generated test can name which one it came from.
+    detected_poc_scripts: list[DetectedPocScript] = Field(default_factory=list)
+    # `.py` files attached to the ticket whose contents the connector could not
+    # download. Recorded rather than dropped: a ticket reporting one script while
+    # silently missing the other reads as "this ticket has one PoC", which is
+    # worse than saying a file needs pasting in by hand.
+    unreachable_poc_attachments: list[str] = Field(default_factory=list)
 
     # The ticket text the analysis was derived from (summary + description +
     # acceptance criteria + comments, as joined by the analyzer). Kept so that
@@ -88,6 +125,12 @@ class IssueAnalysis(BaseModel):
     # recompute mappings from endpoints alone, which silently loses every
     # signal that lives in prose ("bulk export", "admin role", "JWT").
     source_text: str = ""
+    # Provenance of the fuzzy extraction stage. Empty on the deterministic
+    # analyzer; populated by Claude so model/prompt drift is auditable.
+    ai_metadata: dict[str, object] = Field(default_factory=dict)
+    # Jira input manifest (including completeness flags and content hash). A
+    # coverage claim without this provenance cannot say what it covered.
+    input_snapshot: dict[str, object] = Field(default_factory=dict)
 
     # Fingerprint of the endpoint list at the moment the current test plan was
     # generated. Compared against the live endpoints to tell a tester their

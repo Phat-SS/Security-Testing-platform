@@ -79,3 +79,36 @@ def test_parse_tool_result_from_content_blocks():
 
 def test_parse_tool_result_plain_dict():
     assert _parse_tool_result({"key": "CRM-1"})["key"] == "CRM-1"
+
+
+def test_acceptance_criteria_uses_jira_field_display_names():
+    raw = {
+        "key": "CRM-2",
+        "names": {"customfield_12345": "Acceptance Criteria"},
+        "fields": {
+            "summary": "x",
+            "customfield_12345": "- Must reject another tenant's object",
+        },
+    }
+
+    issue = normalize_issue(raw)
+
+    assert issue.acceptance_criteria == ["Must reject another tenant's object"]
+
+
+def test_snapshot_marks_a_paginated_comment_block_incomplete():
+    raw = {
+        "key": "CRM-3",
+        "fields": {
+            "summary": "x",
+            "comment": {"total": 3, "comments": [{"body": "first"}]},
+        },
+    }
+
+    issue = normalize_issue(raw)
+    snapshot = issue.snapshot()
+
+    assert not issue.comments_complete
+    assert not snapshot["complete"]
+    assert len(snapshot["snapshot_hash"]) == 64
+    assert "3 comment" in snapshot["warnings"][0]

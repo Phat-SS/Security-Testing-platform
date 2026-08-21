@@ -7,11 +7,13 @@ works in Pydantic models; everything below is storage detail.
 from __future__ import annotations
 
 import json
+import uuid
 
 from typing import ClassVar
 
 from pydantic import ValidationError
 from sqlalchemy import case, func
+from sqlalchemy.exc import IntegrityError
 
 from app.database.models import (
     AgentRecordRow,
@@ -19,18 +21,31 @@ from app.database.models import (
     AuditLog,
     ExecutionRow,
     FindingRow,
+    JobRow,
     TestCaseRow,
 )
 from app.schemas.agent import PlanReview, RunAssessment
 from app.schemas.analysis import IssueAnalysis
+from app.schemas.decision import DerivedVerdictEvent
 from app.schemas.execution import Execution
 from app.schemas.finding import Finding
+from app.schemas.job import Job
+from app.schemas.manifest import ReportManifest
 from app.schemas.testcase import DESTRUCTIVE_METHODS, TestCase
 
 
 # Approval states that represent a decision a person made about a specific test.
 # PENDING is the absence of one, so it is never carried across a regeneration.
 _HUMAN_DECISIONS = {"APPROVED", "REJECTED", "DISABLED"}
+
+
+def _job_from_row(row: JobRow) -> Job:
+    return Job(
+        job_id=row.job_id, assessment_id=row.assessment_id, kind=row.kind,
+        state=row.state, idempotency_key=row.idempotency_key,
+        result=dict(row.result_json or {}), error=row.error or "",
+        created_at=row.created_at, updated_at=row.updated_at,
+    )
 
 
 class Repository:
@@ -535,6 +550,34 @@ class Repository:
             s.add(AgentRecordRow(assessment_id=assessment_id, kind=kind, data_json=payload))
             s.commit()
 
+    def get_agent_records(self, assessment_id: str, kind: str) -> list[dict]:
+        """All records of a kind in append order, for auditable event streams."""
+        with self._sf() as s:
+            rows = (
+                s.query(AgentRecordRow)
+                .filter_by(assessment_id=assessment_id, kind=kind)
+                .order_by(AgentRecordRow.id.asc())
+                .all()
+            )
+            return [dict(row.data_json) for row in rows]
+
+    def get_derived_verdicts(self, assessment_id: str) -> list[DerivedVerdictEvent]:
+        events: list[DerivedVerdictEvent] = []
+        for payload in self.get_agent_records(assessment_id, "derived_verdict"):
+            try:
+                events.append(DerivedVerdictEvent.model_validate(payload))
+            except ValidationError:
+                continue
+        return events
+
+    def save_derived_verdict(self, assessment_id: str, event: DerivedVerdictEvent) -> bool:
+        """Append once; deterministic event ids make repeated review idempotent."""
+        existing = {item.event_id for item in self.get_derived_verdicts(assessment_id)}
+        if event.event_id in existing:
+            return False
+        self.save_agent_record(assessment_id, "derived_verdict", event.model_dump(mode="json"))
+        return True
+
     def _latest_agent_record(self, assessment_id: str, kind: str) -> dict | None:
         with self._sf() as s:
             row = (
@@ -576,6 +619,20 @@ class Repository:
         self.save_agent_record(assessment_id, "run_assessment",
                                assessment.model_dump(mode="json"))
 
+    def get_report_manifest(self, assessment_id: str) -> ReportManifest | None:
+        payload = self._latest_agent_record(assessment_id, "report_manifest")
+        if payload is None:
+            return None
+        try:
+            return ReportManifest.model_validate(payload)
+        except ValidationError:
+            return None
+
+    def save_report_manifest(self, assessment_id: str, manifest: ReportManifest) -> None:
+        self.save_agent_record(
+            assessment_id, "report_manifest", manifest.model_dump(mode="json")
+        )
+
     def clone_agent_records(self, source_id: str, target_id: str, kinds=("plan_review",)) -> int:
         """Carry an agent record onto a re-run's new assessment.
 
@@ -601,6 +658,61 @@ class Repository:
             s.commit()
         return copied
 
+    # -- persistent jobs ---------------------------------------------------
+
+    def create_job(
+        self, assessment_id: str, kind: str, idempotency_key: str
+    ) -> tuple[Job, bool]:
+        """Create QUEUED once; return the existing job on a duplicate request."""
+        with self._sf() as s:
+            existing = s.query(JobRow).filter_by(
+                assessment_id=assessment_id, kind=kind, idempotency_key=idempotency_key
+            ).first()
+            if existing is not None:
+                return _job_from_row(existing), False
+            row = JobRow(
+                job_id=f"J-{uuid.uuid4().hex}", assessment_id=assessment_id,
+                kind=kind, state="QUEUED", idempotency_key=idempotency_key,
+                result_json={}, error="",
+            )
+            s.add(row)
+            try:
+                s.commit()
+            except IntegrityError:
+                s.rollback()
+                existing = s.query(JobRow).filter_by(
+                    assessment_id=assessment_id, kind=kind, idempotency_key=idempotency_key
+                ).one()
+                return _job_from_row(existing), False
+            s.refresh(row)
+            return _job_from_row(row), True
+
+    def transition_job(
+        self, job_id: str, state: str, *, result: dict | None = None, error: str = ""
+    ) -> Job:
+        allowed = {
+            "QUEUED": {"RUNNING", "FAILED"},
+            "RUNNING": {"SUCCEEDED", "FAILED"},
+            "SUCCEEDED": set(),
+            "FAILED": set(),
+        }
+        with self._sf() as s:
+            row = s.query(JobRow).filter_by(job_id=job_id).one()
+            if state not in allowed.get(row.state, set()):
+                raise ValueError(f"Invalid job transition {row.state} -> {state}")
+            row.state = state
+            if result is not None:
+                row.result_json = result
+            row.error = error
+            s.commit()
+            s.refresh(row)
+            return _job_from_row(row)
+
+    def get_job(self, job_id: str) -> Job | None:
+        with self._sf() as s:
+            row = s.query(JobRow).filter_by(job_id=job_id).first()
+            return _job_from_row(row) if row else None
+
     # -- audit --------------------------------------------------------------
 
     def audit(self, action: str, assessment_id: str = "", actor: str = "system", detail: str = "") -> None:
@@ -617,8 +729,28 @@ class Repository:
 
 
 def _test_fingerprint(data: dict) -> str:
-    """Order-insensitive equality check for a test case's stored JSON."""
-    return json.dumps(data, sort_keys=True, default=str)
+    """Order-insensitive equality check for a test case's stored JSON.
+
+    Normalized through the current schema first, so that ADDING a defaulted field
+    to `TestCase` does not silently invalidate every approval in the database.
+    Without this, a row written before the field existed lacks the key, the row
+    being written has it at its default, the two blobs differ, and the next
+    "Regenerate test plan" quietly resets a plan a human had already approved —
+    for a schema change that altered nothing about what any test does.
+
+    An unparseable blob (a row from a future schema, a hand-edited one) falls
+    back to comparing it raw. That can only ever fail to carry an approval over,
+    which is the safe direction: a test goes back to PENDING and someone reads it
+    again.
+    """
+    try:
+        normalized = TestCase.model_validate(
+            {**data, "approval_status": "PENDING"}
+        ).model_dump(mode="json")
+        normalized.pop("approval_status", None)
+    except Exception:  # noqa: BLE001 - any validation failure means "compare raw"
+        normalized = data
+    return json.dumps(normalized, sort_keys=True, default=str)
 
 
 def _search_text(data: dict) -> str:

@@ -180,6 +180,19 @@ def extract_requirements(issue: NormalizedIssue) -> list[RequirementItem]:
         kind = "security_control" if _is_security(text) else "business_rule"
         add(text, kind, "description")
 
+    # Security requirements are routinely added during Jira discussion after
+    # the description was written. Treat requirement-like comment lines as
+    # first-class input; PoCs already read comments, so ignoring their stated
+    # expected behaviour would make the plan and its coverage denominator drift.
+    for comment_index, comment in enumerate(issue.comments or [], start=1):
+        for raw in (comment or "").splitlines():
+            bullet = _BULLET_RE.match(raw)
+            text = (bullet.group(1) if bullet else raw).strip()
+            if len(text) > 400 or not _looks_like_requirement(text):
+                continue
+            kind = "security_control" if _is_security(text) else "business_rule"
+            add(text, kind, f"comment:{comment_index}")
+
     if not items and issue.summary:
         # The floor. A ticket with no criteria and no bullets still asked for
         # *something*, and an empty requirement list would report 0% coverage on

@@ -10,12 +10,21 @@ both drive.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 from app.analysis import TestDesigner, build_analyzer
-from app.analysis.adjudicator import assess_run, build_adjudicator, triage
+from app.analysis.adjudicator import (
+    assess_run,
+    build_adjudicator,
+    reproduced_on_rerun,
+    triage,
+    triage_detail,
+)
+from app.analysis.evidence_signals import analyze_evidence, body_shape, measure
 from app.analysis.extractor import build_signals, map_owasp, ticket_text
 from app.analysis.plan_reviewer import build_reviewer
+from app.analysis.promotion import evaluate_promotion
 from app.analysis.requirements import (
     extract_requirements,
     extract_requirements_from_text,
@@ -26,19 +35,122 @@ from app.core.scope import ScopeValidator
 from app.database.repository import Repository
 from app.execution.evidence import verify_chain
 from app.execution.http_runner import HttpRunner
+from app.execution.oast import build_oast_verifier
 from app.owasp.coverage import (
     apply_coverage_to_analysis,
     compute_coverage,
 )
 from app.pipeline.findings import build_findings, leads
-from app.poc.jira_extract import combined_poc_source, extract_poc_scripts
+from app.poc.jira_extract import (
+    PocExtraction,
+    extract_from_issue,
+    render_combined,
+    split_combined_source,
+)
 from app.poc.transpiler import to_test_cases, transpile_curl, transpile_python
 from app.reporting.curl import render_curl
 from app.reporting.html import render_report
+from app.reporting.manifest import build_manifest
 from app.schemas.agent import Adjudication
 from app.schemas.enums import ApprovalStatus, TestSource
 from app.schemas.testcase import RequestSpec
 from app.vault.personas import PersonaVault
+
+
+async def _detect_pocs(jira_client, issue) -> PocExtraction:
+    """Every PoC script the ticket carries — description, comments, attachments.
+
+    Attachment bodies are only fetched when the ticket actually lists a `.py`
+    file, so the common ticket costs no extra call. A connector that cannot
+    download attachments (the interface allows it: `get_attachments` returns bare
+    bytes and the live client returns none yet) leaves those filenames in
+    `unreachable`, where the Design step tells the tester to paste them in — a
+    silently half-covered plan is the outcome worth avoiding.
+    """
+    bodies: list[bytes] = []
+    if any(str(name).lower().endswith(".py") for name in (issue.attachments or [])):
+        try:
+            bodies = list(await jira_client.get_attachments(issue.issue_key) or [])
+        except Exception:  # noqa: BLE001 - an import must not fail over an attachment
+            bodies = []
+    for name, body in zip(issue.attachments or [], bodies):
+        issue.attachment_hashes[str(name)] = hashlib.sha256(body).hexdigest()
+    if issue.attachments and len(bodies) < len(issue.attachments):
+        issue.attachments_complete = False
+        warning = (
+            f"Only {len(bodies)} of {len(issue.attachments)} attachment body/bodies "
+            "were available to the assessment."
+        )
+        if warning not in issue.completeness_warnings:
+            issue.completeness_warnings.append(warning)
+    return extract_from_issue(issue, bodies)
+
+
+def _apply_poc_extraction(analysis, extraction: PocExtraction) -> None:
+    """Put the detected scripts on the analysis, as files and as one blob.
+
+    Both forms are stored deliberately: the blob is what a textarea holds and
+    what a tester edits, and the file list is what `design()` transpiles. Deriving
+    either from the other at read time would mean the tester's edits and the
+    transpiler's input could drift apart without anything saying so.
+    """
+    from app.schemas.analysis import DetectedPocScript
+
+    if extraction.scripts:
+        analysis.detected_poc_scripts = [
+            DetectedPocScript(filename=s.filename, code=s.code, origin=s.origin,
+                              language=s.language, inferred=s.inferred)
+            for s in extraction.scripts
+        ]
+        analysis.detected_poc_source = render_combined(extraction.scripts)
+    analysis.unreachable_poc_attachments = list(extraction.unreachable)
+
+
+def _propagated(leader, execution, signals, cluster_id: str, cluster_size: int):
+    """One result's reading, carried to a sibling that poses the identical question.
+
+    Every field that is an *opinion* is copied; every field that is a *fact about
+    this execution* is this execution's own. So the rationale, the result and the
+    recommended action come from the row that was actually read, while the
+    signals are re-measured here and `read_from` names the sibling — a reader who
+    distrusts the grouping can open both rows and check.
+
+    `advisory` and `sealed_result` are untouched, as everywhere else: this cannot
+    become a verdict, and it certainly cannot become a verdict for a row nobody
+    looked at.
+    """
+    from app.schemas.agent import Adjudication
+
+    return Adjudication(
+        execution_id=execution.execution_id,
+        test_id=execution.test_id,
+        sealed_result=execution.verdict.result,
+        needs_manual_review=leader.needs_manual_review,
+        triage_reason=leader.triage_reason,
+        blocker=leader.blocker,
+        assessed_result=leader.assessed_result,
+        confidence=leader.confidence,
+        rationale=(
+            f"{leader.rationale} [Carried from {leader.execution_id}: same mutation "
+            "against the same endpoint, same response status and body shape, positive "
+            "control in the same state, and the same answer to whether the entitled "
+            "owner's data came back. The two rows pose one question, and it was read "
+            "once.]"
+        ),
+        evidence_cited=list(leader.evidence_cited),
+        recommended_action=leader.recommended_action,
+        adjudicator=leader.adjudicator,
+        resolution="propagated",
+        rule=leader.rule,
+        signals=signals.lines(),
+        challenged=leader.challenged,
+        challenge_agreed=leader.challenge_agreed,
+        challenge_note=leader.challenge_note,
+        cluster_id=cluster_id,
+        cluster_size=cluster_size,
+        read_from=leader.execution_id,
+        degraded_reason=leader.degraded_reason,
+    )
 
 
 class Orchestrator:
@@ -64,6 +176,10 @@ class Orchestrator:
         """Swap the Jira client after construction (used when a live MCP server
         turns out to be unreachable and the app falls back to the mock)."""
         self._jira = jira_client
+
+    def set_analyzer(self, analyzer) -> None:
+        """Swap ticket analysis after runtime AI configuration changes."""
+        self._analyzer = analyzer
 
     def set_reviewer(self, reviewer) -> None:
         """Swap the plan-reviewing agent (used by tests and by a config reload)."""
@@ -110,9 +226,9 @@ class Orchestrator:
         # Set on `analysis` before the single save below, not as a second
         # write after — a second save_analysis() call would leave a window
         # where a concurrent read sees the row without detected_poc_source.
-        poc_source = combined_poc_source(issue.description)
-        if poc_source:
-            analysis.detected_poc_source = poc_source
+        extraction = await _detect_pocs(self._jira, issue)
+        _apply_poc_extraction(analysis, extraction)
+        analysis.input_snapshot = issue.snapshot()
 
         # Keep the text the analysis was derived from. Editing the endpoint list
         # later has to re-derive the OWASP signals that live in prose ("bulk
@@ -134,10 +250,21 @@ class Orchestrator:
                          detail=f"{len(analysis.endpoints)} endpoints, "
                                 f"{len(analysis.applicable_categories())} applicable categories, "
                                 f"{len(analysis.requirements)} requirement item(s)")
-        if poc_source:
-            self._repo.audit("poc_detected", assessment_id,
-                             detail=f"{len(extract_poc_scripts(issue.description))} "
-                                    "script(s) found in issue description, pending review")
+        if extraction.scripts:
+            self._repo.audit(
+                "poc_detected", assessment_id,
+                detail=(f"{len(extraction.scripts)} script(s) found, pending review: "
+                        + "; ".join(s.label for s in extraction.scripts)),
+            )
+        if extraction.unreachable:
+            # Named, not counted. "One attachment could not be read" leaves the
+            # tester nothing to go and fetch.
+            self._repo.audit(
+                "poc_attachment_unreachable", assessment_id,
+                detail=("the connector could not download these PoC attachment(s), so "
+                        "they are not in the plan — paste them into the Design step: "
+                        + ", ".join(extraction.unreachable)),
+            )
         return assessment_id
 
     async def import_and_plan(self, issue_key: str, depth: str | None = None,
@@ -197,8 +324,14 @@ class Orchestrator:
         analysis = self.get_analysis(assessment_id)
         poc = analysis.detected_poc_source if analysis else ""
         if not poc:
-            self._repo.audit("ticket_poc_missing", assessment_id, actor=actor,
-                             detail="no embedded PoC script found in ticket description")
+            unreachable = getattr(analysis, "unreachable_poc_attachments", None) or []
+            self._repo.audit(
+                "ticket_poc_missing", assessment_id, actor=actor,
+                detail=("no PoC script found in the ticket's description, comments or "
+                        "readable attachments"
+                        + (f"; {', '.join(unreachable)} is attached but could not be "
+                           "downloaded by the connector" if unreachable else "")),
+            )
             return assessment_id, None, False
         try:
             self.design(assessment_id, poc_python=poc, use_planner=False,
@@ -352,9 +485,8 @@ class Orchestrator:
                     analysis.requirements, previous.requirements
                 )
 
-        poc_source = combined_poc_source(issue.description)
-        if poc_source:
-            analysis.detected_poc_source = poc_source
+        _apply_poc_extraction(analysis, await _detect_pocs(self._jira, issue))
+        analysis.input_snapshot = issue.snapshot()
         self._repo.save_analysis(assessment_id, analysis)
         self._repo.audit("reanalyze", assessment_id, actor=actor,
                          detail=f"{len(analysis.endpoints)} endpoints "
@@ -415,11 +547,39 @@ class Orchestrator:
         # Transpile any provided PoC into scoped, PENDING test cases. Never run.
         poc_tests = []
         if poc_python:
-            r = transpile_python(poc_python)
-            poc_tests += to_test_cases(r, verbatim=verbatim)
-            if not r.is_safe:
-                self._repo.audit("poc_flagged", assessment_id,
-                                 detail=f"dangerous constructs: {r.dangerous_constructs}")
+            # One transpile per PoC file, never one over the concatenation.
+            # `transpile_python` walks a single symbol table in source order, so
+            # two scripts that each set `BASE = "https://..."` — or each define
+            # their own `def send(...)`, which is worse — resolve the *second*
+            # file's definitions into the *first* file's requests. A ticket that
+            # files two PoCs gets two independent readings, and the id counters
+            # are shared across the calls so no two tests collide on `test_id`.
+            counters: dict[str, int] = {}
+            for script in split_combined_source(poc_python):
+                r = transpile_python(script.code)
+                ref = (f"PoC {script.filename}" if script.filename else "pasted PoC")
+                poc_tests += to_test_cases(r, verbatim=verbatim, source_ref=ref,
+                                           counters=counters)
+                if not r.is_safe:
+                    self._repo.audit(
+                        "poc_flagged", assessment_id,
+                        detail=f"{ref}: dangerous constructs: {r.dangerous_constructs}",
+                    )
+                if r.unsupported:
+                    # A second PoC that failed to parse used to vanish into a
+                    # combined blob's syntax error, taking the first one with it.
+                    # Per-file, the working script still produces its tests and
+                    # the broken one is named.
+                    self._repo.audit(
+                        "poc_unsupported", assessment_id,
+                        detail=f"{ref}: {'; '.join(r.unsupported[:4])}",
+                    )
+                if not r.requests:
+                    self._repo.audit(
+                        "poc_no_requests", assessment_id,
+                        detail=(f"{ref}: no HTTP request could be read out of this script, "
+                                "so it contributed no test"),
+                    )
         if poc_curl:
             poc_tests += to_test_cases(transpile_curl(poc_curl), verbatim=verbatim)
         if poc_postman:
@@ -661,7 +821,9 @@ class Orchestrator:
         """
         settings = settings or Settings.from_env()
         self._repo.set_target(assessment_id, base_url)
-        runner = HttpRunner(base_url, scope, vault, settings, client=client)
+        runner = HttpRunner(
+            base_url, scope, vault, settings, client=client, oast=build_oast_verifier()
+        )
 
         tests = [t for t in self._repo.get_test_cases(assessment_id) if t.is_runnable()]
         if not include_destructive:
@@ -722,7 +884,9 @@ class Orchestrator:
         # export and Jira comment counted the same finding twice.
         all_executions = prior + executions
         all_tests = {t.test_id: t for t in self._repo.get_test_cases(assessment_id)}
-        findings = build_findings(all_tests, all_executions)
+        findings = build_findings(
+            all_tests, all_executions, self._repo.get_derived_verdicts(assessment_id)
+        )
         self._repo.replace_findings(assessment_id, findings)
         self._repo.audit("findings", assessment_id,
                          detail=f"{len(findings)} findings over {len(all_executions)} execution(s), "
@@ -854,7 +1018,9 @@ class Orchestrator:
 
         settings = settings or Settings.from_env()
         self._repo.set_target(assessment_id, target)
-        runner = HttpRunner(target, scope, vault, settings, client=client)
+        runner = HttpRunner(
+            target, scope, vault, settings, client=client, oast=build_oast_verifier()
+        )
 
         prior = self._repo.get_executions(assessment_id)
         prev_hash = prior[-1].evidence_hash if prior else None
@@ -873,7 +1039,12 @@ class Orchestrator:
         # leave a finding standing on evidence that no longer supports it.
         all_executions = prior + [replay]
         all_tests = {t.test_id: t for t in self._repo.get_test_cases(assessment_id)}
-        self._repo.replace_findings(assessment_id, build_findings(all_tests, all_executions))
+        self._repo.replace_findings(
+            assessment_id,
+            build_findings(
+                all_tests, all_executions, self._repo.get_derived_verdicts(assessment_id)
+            ),
+        )
 
         chain_ok = verify_chain(all_executions)
         self._repo.audit(
@@ -981,12 +1152,11 @@ class Orchestrator:
     # reading task. So the results are triaged first (deterministic, always) and
     # only the reading tasks are handed to an agent.
     #
-    # Nothing here writes `execution.verdict`. The sealed verdict is what the
-    # evidence hash covers and the only thing `build_findings` reads, so an
-    # adjudication is stored beside it, marked advisory, with the sealed value
-    # carried alongside its opinion. An agent that reads a result as FAIL does
-    # not create a finding and does not change what this platform reports as
-    # confirmed - it changes what a tester has to read, and says what it thinks.
+    # Nothing here writes `execution.verdict`. An adjudication is stored beside
+    # it. Only a named deterministic measurement or a HIGH-confidence AI answer
+    # that survives an adversarial challenge can create a separate, hash-bound
+    # derived-verdict event; build_findings may consume that event without ever
+    # changing the sealed evidence it cites.
 
     def latest_executions(self, assessment_id: str) -> list:
         """One row per test: the most recent attempt.
@@ -1043,20 +1213,148 @@ class Orchestrator:
     # one click is dozens of API calls and a bill nobody agreed to. The cap is
     # announced rather than applied silently — a result that was never read must
     # not be indistinguishable from one that was read and found unclear.
+    #
+    # Two things now spend this budget far more slowly than they used to:
+    # measurement settles a large share of undecided results before a model is
+    # ever consulted (see `app/analysis/evidence_signals.measure`), and results
+    # that are measurably the same reading task are read once for the group.
     MAX_AI_ADJUDICATIONS = 40
 
+    # How many transient failures one review pass will re-send when asked to.
+    # A re-run sends real traffic, so it is opt-in per call and bounded: a run
+    # where fifty tests errored has an environment problem, and firing fifty
+    # more requests at it is not the fix.
+    MAX_AUTO_RERUNS = 10
+
+    def _reading_cluster_key(self, test, execution, signals) -> str:
+        """A fingerprint of the *reading task*, not of the result.
+
+        Two undecided results with the same key present a reader with the same
+        question: the same mutation against the same endpoint shape, answered by
+        the same layer with the same shape of body, with the positive control in
+        the same state and the same answer to "does this share the owner's
+        data". Reading the second one cannot reach a different conclusion than
+        the first, so it is read once and the reading is carried — which is what
+        turns "forty undecided rows" into "four questions".
+
+        Everything in the key is a *decision input*. Values are deliberately
+        excluded via `body_shape`: two BOLA probes against two different victim
+        ids are the same question, and clustering them is the entire point. What
+        is NOT excluded is `shared_values > 0` — whether the response carries
+        the owner's data is the thing the reading turns on, so a row that does
+        and a row that does not can never share a cluster.
+        """
+        import hashlib
+
+        response = execution.response
+        parts = [
+            test.owasp_category.value if test else "",
+            test.attack_mutation.kind if test else "",
+            f"{test.request.method} {test.request.path}" if test else "",
+            str(response.status_code if response else "none"),
+            signals.attack_layer,
+            body_shape(response.body if response else ""),
+            f"baseline={signals.baseline_ok}",
+            f"shared={signals.shared_values > 0}",
+            f"similar={round(signals.similarity, 1)}",
+            f"refusal={signals.refusal_in_body}",
+        ]
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+    def _rerun_transient(self, assessment_id: str, executions: list, by_id: dict,
+                         scope, vault, settings, base_url: str, client,
+                         actor: str) -> tuple[list[str], set[str]]:
+        """Re-send the results triage says need no reader, only another attempt.
+
+        A 5xx during the attack, or a runner error, carries no security signal —
+        there is nothing to read and nothing for a person to decide. Today that
+        bucket sits in the queue until somebody clicks re-run on each row. This
+        does the clicking, bounded and audited, and only when the caller asked
+        for it: it sends real requests, which is not something a read-only review
+        pass may do as a side effect.
+
+        A destructive test is skipped rather than re-fired — `rerun_execution`
+        refuses without explicit confirmation, and that gate exists precisely so
+        a write probe cannot fire again from an automated pass.
+
+        Returns (ids re-sent, test ids whose replay reproduced the same result).
+        The second half is what stops the bucket from being offered forever: a
+        result that fails identically on a second attempt is a broken test or a
+        broken environment, not a flake, and it belongs with the things a person
+        has to fix.
+        """
+        reran: list[str] = []
+        reproduced: set[str] = set()
+        for execution in executions:
+            if len(reran) >= self.MAX_AUTO_RERUNS:
+                self._repo.audit(
+                    "auto_rerun_capped", assessment_id, actor=actor,
+                    detail=(f"stopped after {self.MAX_AUTO_RERUNS} re-run(s); the rest are "
+                            "reported as needing a re-run. A run with this many transient "
+                            "failures usually has an environment problem, not a flaky test."),
+                )
+                break
+            test = by_id.get(execution.test_id)
+            if triage_detail(test, execution).klass != "rerun":
+                continue
+            try:
+                _original, replay = self.rerun_execution(
+                    assessment_id, execution.execution_id, scope, vault,
+                    settings=settings, base_url=base_url, client=client,
+                    actor=f"{actor} (review pass)",
+                )
+                if replay is not None and replay.verdict.result == execution.verdict.result:
+                    reproduced.add(execution.test_id)
+            except self.RerunRefused as exc:
+                self._repo.audit(
+                    "auto_rerun_skipped", assessment_id, actor=actor,
+                    detail=f"{execution.execution_id}: {exc}",
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 - one bad re-run must not lose the pass
+                self._repo.audit(
+                    "auto_rerun_failed", assessment_id, actor=actor,
+                    detail=f"{execution.execution_id}: {type(exc).__name__}: {exc}",
+                )
+                continue
+            reran.append(execution.execution_id)
+        if reproduced:
+            self._repo.audit(
+                "auto_rerun_reproduced", assessment_id, actor=actor,
+                detail=(f"{len(reproduced)} re-run(s) failed exactly as before, so they are "
+                        "reported as needing a person rather than another attempt: "
+                        + ", ".join(sorted(reproduced))),
+            )
+        return reran, reproduced
+
     def adjudicate(self, assessment_id: str, actor: str = "tester",
-                   max_ai_calls: int | None = None):
+                   max_ai_calls: int | None = None, *, cluster: bool = True,
+                   rerun_transient: bool = False, scope=None, vault=None,
+                   settings: Settings | None = None, base_url: str = "", client=None):
         """Review every undecided result, then answer the run-level question.
 
         Returns a `RunAssessment`: passed / failed / incomplete, the share of the
         ticket's requirements a decided test covered, and one advisory
         `Adjudication` per result the runner left open.
 
-        Triage runs over *every* undecided result — it is free and it is most of
-        the value. Only the reading tasks reach the model, and only up to
-        `max_ai_calls` of them; the rest are returned as needing a person, saying
-        so.
+        Four things happen, in strictly increasing cost:
+
+        1. **Triage** over every undecided result. Free, no model, and it says
+           which bucket each result is in and what is in the way.
+        2. **Measurement** of every undecided result's evidence against its
+           positive control. Free, no model, and it settles the cases where the
+           differential is decisive on its own — the largest single reduction in
+           review work here, and the only one that also works with no API key.
+        3. **Clustering** of what is left, when `cluster` is on: results that are
+           measurably the same reading task are read once and the reading is
+           carried to the rest, each row saying which sibling it came from.
+        4. **Reading** by the model, up to `max_ai_calls` representatives, each
+           auto-resolved answer challenged by a second adversarial pass.
+
+        `rerun_transient=True` (with `scope` and `vault`) additionally re-sends
+        the results that need no reader at all — a 5xx or a runner error. That
+        sends real traffic, so it is off by default and never a side effect of
+        asking for a review.
         """
         analysis = self.get_analysis(assessment_id)
         if analysis is None:
@@ -1080,20 +1378,87 @@ class Orchestrator:
         by_id = {t.test_id: t for t in tests}
         executions = self.latest_executions(assessment_id)
 
-        budget = self.MAX_AI_ADJUDICATIONS if max_ai_calls is None else max(0, max_ai_calls)
-        adjudications = []
-        capped = 0
+        reran: list[str] = []
+        reproduced: set[str] = set()
+        if rerun_transient and scope is not None and vault is not None:
+            reran, reproduced = self._rerun_transient(
+                assessment_id, executions, by_id, scope, vault,
+                settings, base_url, client, actor,
+            )
+            if reran:
+                # The re-runs appended new executions; the review has to be about
+                # the current state, not the state before it re-sent them.
+                executions = self.latest_executions(assessment_id)
+
+        # The measured differential for every execution, computed once and passed
+        # into the adjudicator so a reading, its cluster key and its budget
+        # decision all reason over exactly the same measurement.
+        signals = {
+            execution.execution_id: analyze_evidence(by_id.get(execution.test_id), execution)
+            for execution in executions
+        }
+
+        undecided = []
         for execution in executions:
-            test = by_id.get(execution.test_id)
-            klass, reason = triage(test, execution)
-            if klass == "decided":
+            detail = triage_detail(by_id.get(execution.test_id), execution)
+            if execution.test_id in reproduced and detail.klass == "rerun":
+                # This pass already sent it again and got the same answer. Saying
+                # "needs only a re-run" now would be offering work that has just
+                # been done and did not help.
+                detail = reproduced_on_rerun(detail)
+            if detail.klass == "decided":
                 # The runner already decided it from correlated evidence. Asking
                 # an agent to re-read a sealed PASS/FAIL would spend a call to
                 # produce an opinion that cannot change anything, and would put
                 # a second, differently-derived verdict next to the one the
                 # evidence chain covers.
                 continue
-            if klass == "agent" and self._adjudicator.ai_enabled:
+            undecided.append((execution, detail))
+
+        # Cluster the reading tasks only. A measured reading is free and exact,
+        # so a result that measurement can settle is always settled on its own
+        # evidence rather than inheriting a sibling's answer.
+        cluster_keys: dict[str, str] = {}
+        cluster_sizes: dict[str, int] = {}
+        if cluster:
+            for execution, detail in undecided:
+                test = by_id.get(execution.test_id)
+                if detail.klass != "agent":
+                    continue
+                if measure(test, execution, signals[execution.execution_id]) is not None:
+                    continue
+                key = self._reading_cluster_key(test, execution, signals[execution.execution_id])
+                cluster_keys[execution.execution_id] = key
+                cluster_sizes[key] = cluster_sizes.get(key, 0) + 1
+
+        budget = self.MAX_AI_ADJUDICATIONS if max_ai_calls is None else max(0, max_ai_calls)
+        adjudications = []
+        representatives: dict[str, Adjudication] = {}
+        capped = 0
+        propagated = 0
+        for execution, detail in undecided:
+            test = by_id.get(execution.test_id)
+            sig = signals[execution.execution_id]
+            key = cluster_keys.get(execution.execution_id, "")
+            size = cluster_sizes.get(key, 0)
+
+            leader = representatives.get(key) if key else None
+            if leader is not None:
+                adjudications.append(_propagated(leader, execution, sig, key, size))
+                propagated += 1
+                continue
+
+            # Only a result that will actually reach the model spends budget.
+            # Deciding that here rather than from the triage class alone matters:
+            # measurement settles a large share of the `agent` bucket for free,
+            # and charging those to the cap used to exhaust it on results no
+            # model was ever going to see.
+            needs_model = (
+                detail.klass == "agent"
+                and self._adjudicator.ai_enabled
+                and measure(test, execution, sig) is None
+            )
+            if needs_model:
                 if budget <= 0:
                     capped += 1
                     adjudications.append(Adjudication(
@@ -1101,7 +1466,10 @@ class Orchestrator:
                         test_id=execution.test_id,
                         sealed_result=execution.verdict.result,
                         needs_manual_review=True,
-                        triage_reason=reason,
+                        triage_reason=detail.reason,
+                        blocker="unread",
+                        resolution="capped",
+                        signals=sig.lines(),
                         rationale=execution.verdict.reason,
                         recommended_action=(
                             "Read this one yourself, or review again to spend a fresh "
@@ -1114,15 +1482,33 @@ class Orchestrator:
                     ))
                     continue
                 budget -= 1
-            adjudications.append(
-                self._adjudicator.adjudicate(analysis, test, execution)
-            )
+
+            adjudication = self._adjudicator.adjudicate(analysis, test, execution, signals=sig)
+            if key and size > 1:
+                adjudication.cluster_id = key
+                adjudication.cluster_size = size
+                # Only a reading the model actually produced is worth carrying:
+                # a measured reading reproduces on each sibling's own evidence
+                # for free, and inheriting it would hide which row it was
+                # measured from.
+                if adjudication.adjudicator == "ai":
+                    representatives[key] = adjudication
+            adjudications.append(adjudication)
+
         if capped:
             self._repo.audit(
                 "adjudicate_capped", assessment_id, actor=actor,
                 detail=(f"{capped} reading task(s) were not sent to the model: the pass "
                         f"cap is {self.MAX_AI_ADJUDICATIONS}. They are reported as needing "
                         "a person rather than as read-and-unclear."),
+            )
+        if propagated:
+            self._repo.audit(
+                "adjudicate_clustered", assessment_id, actor=actor,
+                detail=(f"{propagated} result(s) were measurably the same reading task as "
+                        "one already read and carry that reading, naming the sibling it "
+                        "came from. Same evidence shape, same status, same answer to "
+                        "whether the owner's data came back."),
             )
 
         # The run-level note prefers a reason that is not the cap: hitting the cap
@@ -1137,14 +1523,46 @@ class Orchestrator:
             assessment_id=assessment_id,
             reviewer="ai" if self._adjudicator.ai_enabled else "deterministic",
             degraded_reason=degraded,
+            n_reran=len(reran),
         )
         self._repo.save_run_assessment(assessment_id, run)
+        by_execution = {execution.execution_id: execution for execution in executions}
+        promoted = 0
+        rejected = 0
+        for adjudication in adjudications:
+            execution = by_execution.get(adjudication.execution_id)
+            if execution is None:
+                continue
+            event = evaluate_promotion(execution, adjudication)
+            if event is None or not self._repo.save_derived_verdict(assessment_id, event):
+                continue
+            if event.promoted:
+                promoted += 1
+            else:
+                rejected += 1
+        if promoted or rejected:
+            current_tests = {test.test_id: test for test in tests}
+            self._repo.replace_findings(
+                assessment_id,
+                build_findings(
+                    current_tests, executions,
+                    self._repo.get_derived_verdicts(assessment_id),
+                ),
+            )
+            self._repo.audit(
+                "derived_verdict", assessment_id, actor="promotion_policy",
+                detail=(f"{promoted} decision(s) promoted and {rejected} rejected by "
+                        "derived-verdict.v1; sealed executions were unchanged."),
+            )
         self._repo.audit(
             "adjudicate", assessment_id, actor=f"{run.reviewer}_adjudicator",
             detail=(f"{run.overall}: coverage {run.coverage_pct}%, decided {run.decided_pct}%, "
-                    f"{run.n_auto_resolved} undecided result(s) settled by the agent, "
+                    f"{run.n_auto_resolved} undecided result(s) settled by the agent "
+                    f"({run.n_measured} by measurement alone, {run.n_propagated} carried from "
+                    f"an identical sibling, {run.n_consensus} confirmed by a challenge pass), "
                     f"{run.n_manual_review} still need a person, "
                     f"{run.n_rerun} need a re-run"
+                    + (f", {len(reran)} were re-sent by this pass" if reran else "")
                     + (f", {capped} over the review cap" if capped else "")
                     + (f"; degraded: {degraded}" if degraded else "")),
         )
@@ -1176,14 +1594,26 @@ class Orchestrator:
     # 7. report -------------------------------------------------------------
 
     def build_report_html(self, assessment_id: str, lang: str = "en") -> str:
+        from app.reporting.quality import build_finding_drafts, verify_report
+
         assessment = self._repo.get_assessment(assessment_id)
         tests = {t.test_id: t for t in self._repo.get_test_cases(assessment_id)}
         executions = self._repo.get_executions(assessment_id)
         findings = self._repo.get_findings(assessment_id)
+        analysis = self.get_analysis(assessment_id)
         # Re-verify at the point evidence is actually read, not just once at
         # execute() time: a hash computed correctly during the run says
         # nothing about whether the DB rows were edited afterwards.
         chain_ok = verify_chain(executions)
+        drafts = build_finding_drafts(findings, tests, executions)
+        report_verification = verify_report(findings, drafts, executions)
+        derived_verdicts = self._repo.get_derived_verdicts(assessment_id)
+        report_manifest = build_manifest(
+            assessment_id, assessment.issue_key,
+            analysis.input_snapshot if analysis else {},
+            executions, findings, drafts, report_verification, derived_verdicts,
+        )
+        self._repo.save_report_manifest(assessment_id, report_manifest)
         html = render_report(
             title=f"Security Assessment — {assessment.issue_key}",
             target=assessment.target_base_url or "(not executed)",
@@ -1198,9 +1628,17 @@ class Orchestrator:
             # for it and where the raw evidence it refers to already is.
             plan_review=self._repo.get_plan_review(assessment_id),
             run_assessment=self._repo.get_run_assessment(assessment_id),
+            report_verification=report_verification,
+            report_manifest=report_manifest,
+            input_snapshot=(analysis.input_snapshot if analysis else {}),
             lang=lang,
         )
-        self._repo.audit("report", assessment_id, detail=f"html report generated; evidence_chain_ok={chain_ok}")
+        self._repo.audit(
+            "report", assessment_id,
+            detail=(f"html report generated; evidence_chain_ok={chain_ok}; "
+                    f"report_quality_ok={report_verification.ok}; "
+                    f"quality_issues={len(report_verification.issues)}"),
+        )
         return html
 
     # regression: diff this assessment's findings against the previous run -----
@@ -1236,6 +1674,8 @@ class Orchestrator:
                      self._repo.get_findings(assessment_id), a.coverage_json,
                      plan_review=self._repo.get_plan_review(assessment_id),
                      run_assessment=self._repo.get_run_assessment(assessment_id),
+                     derived_verdicts=self._repo.get_derived_verdicts(assessment_id),
+                     report_manifest=self._repo.get_report_manifest(assessment_id),
                      plan_stale=bool(analysis and analysis.plan_is_stale()),
                      uncovered_endpoints=_uncovered(analysis, tests) if analysis else [])
 

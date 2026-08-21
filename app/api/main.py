@@ -10,6 +10,7 @@ Run:  uvicorn app.api.main:app --reload
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -19,6 +20,8 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -28,16 +31,20 @@ import psutil
 from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.analysis import TestDesigner, build_analyzer
 from app.analysis.attack_planner import build_planner
+from app.analysis.adjudicator import build_adjudicator
 from app.analysis.claude_analyzer import ClaudeAnalyzer
+from app.analysis.plan_reviewer import build_reviewer
 from app.api import views
 from app.core.auth import AuthManager, User
 from app.core.config import settings_with_overrides
 from app.core import i18n, preflight
 from app.core.i18n import normalize_lang
 from app.core.logging_config import configure_error_tracking, configure_logging
+from app.core.redaction import redact_text
 from app.core.engagement import (
     allow_host,
     delete_environment,
@@ -66,6 +73,25 @@ from app.schemas.testcase import RequestSpec
 logger = logging.getLogger(__name__)
 
 
+def _create_operation_job(aid: str, kind: str, idempotency_key: str | None):
+    key = (idempotency_key or f"ui-{uuid.uuid4().hex}").strip()[:128]
+    return state.repo.create_job(aid, kind, key)
+
+
+async def _run_operation_job(job, operation):
+    state.repo.transition_job(job.job_id, "RUNNING")
+    try:
+        result = await run_in_threadpool(operation)
+    except Exception as exc:
+        state.repo.transition_job(
+            job.job_id, "FAILED",
+            error=redact_text(f"{type(exc).__name__}: {exc}")[:2000],
+        )
+        raise
+    state.repo.transition_job(job.job_id, "SUCCEEDED", result={"completed": True})
+    return result
+
+
 class State:
     def __init__(self) -> None:
         engine = make_engine()
@@ -78,6 +104,7 @@ class State:
         # ENGAGEMENT_CONFIG was set at startup (that only gates what gets
         # auto-loaded on boot, per the default-deny design above).
         self.engagement_path = os.getenv("ENGAGEMENT_CONFIG", "") or "config/engagement.json"
+        self.runtime_env_path = os.getenv("RUNTIME_ENV_PATH", ".env")
         self.auth = AuthManager()
         planner = build_planner(self.engagement.vault.names())
         views.configure(auth_enabled=self.auth.enabled, planner_enabled=planner is not None)
@@ -107,13 +134,28 @@ class State:
         # save — silently, as "not defined in the engagement vault".
         self.orch.set_planner(build_planner(self.engagement.vault.names()))
 
+    def reload_ai_runtime(self) -> None:
+        """Rebuild every Claude-backed component after a UI runtime save."""
+        planner = build_planner(self.engagement.vault.names())
+        self.orch.set_analyzer(build_analyzer())
+        self.orch.set_planner(planner)
+        self.orch.set_reviewer(build_reviewer())
+        self.orch.set_adjudicator(build_adjudicator())
+        views.configure(auth_enabled=self.auth.enabled, planner_enabled=planner is not None)
+
 
 state: State | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Before anything reads a setting: `uvicorn app.api.main:app` is a
+    # first-class way to start this app, and it does not go through the Node
+    # launcher that used to be the only thing parsing .env.
+    loaded = preflight.load_dotenv(os.getenv("RUNTIME_ENV_PATH", ".env"))
     configure_logging()
+    if loaded:
+        logger.info("loaded %d setting(s) from the .env file", len(loaded))
     configure_error_tracking()
     global state
     state = State()
@@ -130,6 +172,8 @@ async def lifespan(app: FastAPI):
         await fallback.connect()
         state._rebind_jira(fallback)
     yield
+    # Shut the connector down in the task that owns it. See _close_quietly.
+    await _close_quietly(state.jira)
 
 
 app = FastAPI(title="AI-assisted API Security Testing Platform", lifespan=lifespan)
@@ -224,9 +268,7 @@ def _current_user(x_api_key: str | None = Header(None),
     key = x_api_key
     if not key and authorization and authorization.lower().startswith("bearer "):
         key = authorization.split(" ", 1)[1]
-    if not key:
-        key = session_key
-    user = state.auth.authenticate(key)
+    user = state.auth.authenticate(key) if key else state.auth.authenticate_session(session_key)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return user
@@ -253,16 +295,20 @@ async def login_submit(api_key: str = Form(...)):
     # be used to probe for valid keys in that mode.
     if not user or not state.auth.enabled:
         return RedirectResponse("/login?flash=Invalid+API+key", status_code=303)
+    session_token = state.auth.issue_session(user)
     resp = RedirectResponse(f"/?flash=Logged+in+as+{quote(user.name, safe='')}", status_code=303)
     resp.set_cookie(
-        "session_key", api_key, httponly=True, samesite="lax",
-        max_age=60 * 60 * 12,  # 12h; re-login after that rather than an eternal cookie
+        "session_key", session_token, httponly=True, samesite="lax",
+        secure=(os.getenv("AUTH_COOKIE_SECURE", "").lower() == "true"
+                or os.getenv("PLATFORM_BASE_URL", "").lower().startswith("https://")),
+        max_age=state.auth.session_ttl_s,
     )
     return resp
 
 
 @app.post("/logout")
-async def logout():
+async def logout(session_key: str | None = Cookie(None)):
+    state.auth.revoke_session(session_key)
     resp = RedirectResponse("/?flash=Logged+out", status_code=303)
     resp.delete_cookie("session_key")
     return resp
@@ -360,7 +406,7 @@ def _execute_error(base_url: str, exc: Exception) -> tuple[str, str]:
             f"Running tests against {base_url} failed: {detail}",
             "Generated tests reference identities by name, and this one is not "
             "in the persona vault. Add it under "
-            "<a href='/config?tab=personas'>Configuration &rarr; Personas</a> "
+            "<a href='/config?tab=identities'>Configuration &rarr; Identities</a> "
             "(name, auth headers, and the object ids it owns), or point the "
             "attacker/victim roles at personas that already exist. "
             "<a href='/config'>Readiness</a> lists every setting a run needs "
@@ -438,6 +484,7 @@ def _render_config(tab: str = "readiness", flash: str = "", error: str = "") -> 
         engagement_path=state.engagement_path,
         limits=settings_with_overrides(eng.runner).limits,
         runtime=preflight.runtime_facts(),
+        ai_evidence=preflight.ai_evidence_config_state(),
         jira_mode=describe_jira_client(state.jira),
         jira_live=not isinstance(state.jira, MockJiraMCPClient),
         jira_warning=state.jira_warning,
@@ -502,7 +549,7 @@ async def save_environment_route(
                 f"{name!r} is not a valid environment name.",
                 "Use letters, digits, <code>-</code> or <code>_</code> only "
                 "(e.g. <code>dev</code>, <code>staging</code>).",
-                back_href="/config?tab=environments", back_label="← Back to environments",
+                back_href="/config?tab=target", back_label="← Back to target",
             ),
             status_code=400,
         )
@@ -512,7 +559,7 @@ async def save_environment_route(
                 "Invalid URL",
                 f"{url!r} is not a valid base URL.",
                 "It must start with <code>http://</code> or <code>https://</code>.",
-                back_href="/config?tab=environments", back_label="← Back to environments",
+                back_href="/config?tab=target", back_label="← Back to target",
             ),
             status_code=400,
         )
@@ -547,6 +594,84 @@ async def activate_environment_route(name: str, user: User = Depends(require("te
 
 def _lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
+
+# The token variable names the quick setup writes. They match
+# config/engagement.example.json and .env.example, so a config produced here and
+# one copied from the examples are the same shape.
+_QUICK_SETUP_VARS = {"agent_A": "PERSONA_A_TOKEN", "agent_B": "PERSONA_B_TOKEN"}
+
+
+@app.post("/config/quick-setup")
+async def quick_setup_route(
+    env_name: str = Form("staging"),
+    url: str = Form(...),
+    attacker_token: str = Form(...),
+    victim_token: str = Form(...),
+    owns_key: str = Form("customer_id"),
+    owns_value: str = Form(""),
+    user: User = Depends(require("admin")),
+):
+    """Everything an empty engagement needs, written in one submit.
+
+    Admin rather than tester because it writes credentials to .env, the same
+    reason /config/ai-evidence does. The order matters: the tokens land in the
+    environment *before* the personas that reference them are saved, so the
+    readiness panel this redirects to evaluates the finished state rather than
+    reporting two unset variables it is about to be given.
+    """
+    env_name = env_name.strip()
+    url = url.strip().rstrip("/")
+    owns_key = owns_key.strip()
+    owns_value = owns_value.strip()
+
+    def fail(message: str) -> RedirectResponse:
+        return _config_redirect("readiness", message)
+
+    if not env_name or not all(c.isalnum() or c in "-_" for c in env_name):
+        return fail(f"{env_name or '(blank)'} is not a valid environment name — letters, digits, - _ only")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return fail("The base URL must start with http:// or https://")
+    host = preflight.host_of(url)
+    if not host:
+        return fail("That base URL has no hostname")
+    if not attacker_token.strip() or not victim_token.strip():
+        return fail("Both tokens are required — an unset one blocks every run anyway")
+
+    try:
+        preflight.update_dotenv_values(
+            {
+                _QUICK_SETUP_VARS["agent_A"]: attacker_token.strip(),
+                _QUICK_SETUP_VARS["agent_B"]: victim_token.strip(),
+            },
+            state.runtime_env_path,
+            apply_to_environ=True,
+        )
+    except (OSError, ValueError) as exc:
+        # ValueError here means a token with a newline in it, which would have
+        # smuggled extra assignments into .env. Nothing is written on either.
+        return fail(f"The tokens were not saved: {type(exc).__name__}")
+
+    save_environment(state.engagement_path, env_name, url, make_active=True)
+    allow_host(state.engagement_path, host)
+    for name, variable in _QUICK_SETUP_VARS.items():
+        save_persona(
+            state.engagement_path,
+            name=name,
+            auth_headers={"Authorization": f"Bearer ${{{variable}}}"},
+            role="user",
+            owns=({owns_key: owns_value} if name == "agent_B" and owns_key and owns_value else {}),
+        )
+    save_identities(state.engagement_path, "agent_A", "agent_B")
+    state.reload_engagement()
+    state.repo.audit(
+        "quick_setup", actor=user.name,
+        detail=f"Created environment {env_name} ({host}), personas agent_A/agent_B; token values omitted.",
+    )
+    return _config_redirect(
+        "readiness", f"Engagement created — {env_name} authorized, agent_A attacks agent_B"
+    )
+
+
 
 
 @app.post("/config/scope")
@@ -652,6 +777,122 @@ async def save_runner_route(
     return _config_redirect("runner", "Runner limits saved")
 
 
+@app.post("/config/ai-evidence")
+async def save_ai_evidence_route(
+    request: Request,
+    user: User = Depends(require("admin")),
+):
+    """Save AI/evidence runtime settings without ever echoing stored secrets."""
+    form = await request.form()
+    secret_keys = (
+        "EVIDENCE_FINGERPRINT_KEY", "REPORT_SIGNING_KEY", "OAST_API_TOKEN",
+    )
+    public_keys = (
+        "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_EFFORT",
+        "REPORT_SIGNING_KEY_ID", "OAST_PUBLIC_URL", "OAST_POLL_URL", "OAST_TIMEOUT_S",
+    )
+    changes: dict[str, str | None] = {
+        key: "true" if form.get(key) else "false"
+        for key in ("USE_AI", "AI_REQUIRE_PINNED_MODEL", "AUTH_COOKIE_SECURE")
+    }
+
+    for key in public_keys:
+        value = str(form.get(key, "")).strip()
+        changes[key] = value or None
+    for key in secret_keys:
+        value = str(form.get(key, "")).strip()
+        clear = bool(form.get(f"clear_{key}"))
+        if value and clear:
+            return _config_redirect("ai-evidence", f"Choose set or clear for {key}, not both")
+        if value:
+            changes[key] = value
+        elif clear:
+            changes[key] = None
+        # blank without explicit clear deliberately preserves the secret
+
+    def prospective(key: str) -> str:
+        if key in changes:
+            return changes[key] or ""
+        return os.getenv(key, "")
+
+    fingerprint = prospective("EVIDENCE_FINGERPRINT_KEY")
+    if fingerprint and len(fingerprint) < 16:
+        return _config_redirect(
+            "ai-evidence", "EVIDENCE_FINGERPRINT_KEY must be at least 16 characters"
+        )
+    signing = prospective("REPORT_SIGNING_KEY")
+    if signing and len(signing) < 32:
+        return _config_redirect(
+            "ai-evidence", "REPORT_SIGNING_KEY must be at least 32 characters"
+        )
+
+    public_url = prospective("OAST_PUBLIC_URL")
+    poll_url = prospective("OAST_POLL_URL")
+    if bool(public_url) != bool(poll_url):
+        return _config_redirect(
+            "ai-evidence", "OAST public and poll URLs must be configured together"
+        )
+    for label, value in (("OAST_PUBLIC_URL", public_url), ("OAST_POLL_URL", poll_url)):
+        parsed = urlsplit(value) if value else None
+        if value and (parsed.scheme != "https" or not parsed.hostname):
+            return _config_redirect("ai-evidence", f"{label} must be an absolute HTTPS URL")
+
+    model = prospective("ANTHROPIC_MODEL")
+    if prospective("AI_REQUIRE_PINNED_MODEL") == "true" and not any(c.isdigit() for c in model):
+        return _config_redirect(
+            "ai-evidence", "Pinned-model mode requires a versioned ANTHROPIC_MODEL"
+        )
+    budget = prospective("AI_MAX_BUDGET_USD")
+    timeout = prospective("OAST_TIMEOUT_S")
+    for key, raw in (("AI_MAX_BUDGET_USD", budget), ("OAST_TIMEOUT_S", timeout)):
+        if not raw:
+            continue
+        try:
+            if float(raw) <= 0:
+                raise ValueError
+        except ValueError:
+            return _config_redirect("ai-evidence", f"{key} must be a positive number")
+    effort = prospective("AI_EFFORT")
+    if effort and not re.fullmatch(r"[a-zA-Z0-9_-]{1,32}", effort):
+        return _config_redirect("ai-evidence", "AI_EFFORT contains unsupported characters")
+
+    try:
+        preflight.update_dotenv_values(
+            changes, state.runtime_env_path, apply_to_environ=True
+        )
+        state.reload_ai_runtime()
+    except (OSError, ValueError) as exc:
+        return _config_redirect(
+            "ai-evidence", f"Runtime configuration was not saved: {type(exc).__name__}"
+        )
+    changed_names = sorted(changes)
+    state.repo.audit(
+        "runtime_config", actor=user.name,
+        detail=f"Updated {len(changed_names)} allowlisted AI/evidence setting(s); values omitted.",
+    )
+    return _config_redirect("ai-evidence", "AI and evidence configuration saved")
+
+
+async def _close_quietly(client) -> None:
+    """Release a Jira client we have stopped using.
+
+    Not optional hygiene: a live client holds an open HTTP transport and a task
+    running its receive loop (see LiveJiraMCPClient.close). Merely dropping the
+    reference on every Reconnect leaks both, and leaves the teardown to the
+    garbage collector at an arbitrary later moment.
+
+    Best-effort by design — a client we have already replaced failing to hang up
+    is not worth failing the request that replaced it.
+    """
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return  # the mock holds no transport
+    try:
+        await close()
+    except BaseException:
+        logger.debug("ignoring error while closing the previous Jira client", exc_info=True)
+
+
 async def _reconnect_jira() -> RedirectResponse:
     # Re-read .env first: a running process's os.environ is fixed at spawn
     # time, so a token refreshed on disk (npm run jira:token, or the
@@ -659,6 +900,9 @@ async def _reconnect_jira() -> RedirectResponse:
     # This is the one thing a restart would have done that a plain
     # build_jira_client() call here would not.
     preflight.reload_dotenv()
+    # The client being replaced, closed only once its successor is bound — a
+    # failed connect must not leave the platform with no Jira client at all.
+    previous = state.jira
     new_client = build_jira_client()
     try:
         await new_client.connect()
@@ -669,11 +913,13 @@ async def _reconnect_jira() -> RedirectResponse:
         fallback = MockJiraMCPClient()
         await fallback.connect()
         state._rebind_jira(fallback)
+        await _close_quietly(previous)
         return RedirectResponse(
-            f"/config?tab=mcp&error={quote(state.jira_warning, safe='')}", status_code=303
+            f"/config?tab=advanced&error={quote(state.jira_warning, safe='')}", status_code=303
         )
     state.jira_warning = ""
     state._rebind_jira(new_client)
+    await _close_quietly(previous)
     return _config_redirect("mcp", f"Reconnected — {describe_jira_client(new_client)}")
 
 
@@ -697,7 +943,7 @@ async def mcp_jira_refresh_token_route(user: User = Depends(require("tester"))):
     npx = shutil.which("npx")
     if not npx:
         return RedirectResponse(
-            "/config?tab=mcp&error=" + quote(
+            "/config?tab=advanced&error=" + quote(
                 "npx not found on PATH — install Node.js, or refresh the token "
                 "manually (see below).", safe=""),
             status_code=303,
@@ -717,7 +963,7 @@ async def mcp_jira_refresh_token_route(user: User = Depends(require("tester"))):
         )
     except OSError as exc:
         return RedirectResponse(
-            "/config?tab=mcp&error=" + quote(f"Could not start mcp-remote: {exc}", safe=""),
+            "/config?tab=advanced&error=" + quote(f"Could not start mcp-remote: {exc}", safe=""),
             status_code=303,
         )
 
@@ -733,7 +979,7 @@ async def mcp_jira_refresh_token_route(user: User = Depends(require("tester"))):
 
     if not token_path:
         return RedirectResponse(
-            "/config?tab=mcp&error=" + quote(
+            "/config?tab=advanced&error=" + quote(
                 "Timed out waiting for the Atlassian login in your browser — try "
                 "again and finish it there within 90s.", safe=""),
             status_code=303,
@@ -742,7 +988,7 @@ async def mcp_jira_refresh_token_route(user: User = Depends(require("tester"))):
     token = json.loads(token_path.read_text(encoding="utf-8")).get("access_token", "")
     if not token:
         return RedirectResponse(
-            "/config?tab=mcp&error=" + quote(f"{token_path} had no access_token", safe=""),
+            "/config?tab=advanced&error=" + quote(f"{token_path} had no access_token", safe=""),
             status_code=303,
         )
     preflight.write_dotenv_value("JIRA_MCP_URL", mcp_url)
@@ -999,7 +1245,8 @@ def _plan_filters(form) -> dict:
 
 @app.post("/assessment/{aid}/agent-plan")
 async def agent_plan(aid: str, depth: str = Form("standard"), rounds: int = Form(1),
-                     user: User = Depends(require("tester"))):
+                     user: User = Depends(require("tester")),
+                     idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     """Re-run the planning pipeline: design → plan → review → revise → re-review.
 
     Replaces the plan, exactly as the Design step does, and carries an approval
@@ -1008,10 +1255,19 @@ async def agent_plan(aid: str, depth: str = Form("standard"), rounds: int = Form
     batch a human has to read, and a reviewer that is never satisfied would
     otherwise loop until the batch cap swallowed the plan.
     """
+    job, created = _create_operation_job(aid, "agent_plan", idempotency_key)
+    if not created:
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(f'Existing job {job.job_id}: {job.state}')}#s-plan",
+            status_code=303,
+        )
     try:
-        _tests, review = state.orch.agent_plan(
-            aid, depth=depth or "standard", max_rounds=max(0, min(2, rounds)),
-            actor=user.name,
+        _tests, review = await _run_operation_job(
+            job,
+            partial(
+                state.orch.agent_plan, aid, depth=depth or "standard",
+                max_rounds=max(0, min(2, rounds)), actor=user.name,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - report it, do not 500 the page
         return HTMLResponse(
@@ -1029,15 +1285,41 @@ async def agent_plan(aid: str, depth: str = Form("standard"), rounds: int = Form
 
 
 @app.post("/assessment/{aid}/adjudicate")
-async def adjudicate(aid: str, user: User = Depends(require("tester"))):
-    """Review the results: triage every undecided one, then answer pass/fail.
+async def adjudicate(request: Request, aid: str, user: User = Depends(require("tester")),
+                     idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    """Review the results: triage, measure, cluster, then answer pass/fail.
 
-    Sends nothing. It reads evidence that already exists, which is why it is safe
-    to run, disagree with, and run again — and why it is a separate button from
-    Execute rather than something that happens automatically at the end of a run.
+    Sends nothing by default. It reads evidence that already exists, which is why
+    it is safe to run, disagree with, and run again — and why it is a separate
+    button from Execute rather than something that happens automatically at the
+    end of a run.
+
+    The one exception is explicit and comes from its own button: `rerun_transient`
+    re-sends the results that carry no security signal at all (a 5xx during the
+    attack, a runner error). That fires real requests, bounded and audited, and
+    only ever from a form that says so — never as a side effect of asking for a
+    review.
     """
+    form = await request.form()
+    rerun_transient = bool(form.get("rerun_transient"))
+    eng = state.engagement
+    job, created = _create_operation_job(aid, "adjudicate", idempotency_key)
+    if not created:
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(f'Existing job {job.job_id}: {job.state}')}#s-results",
+            status_code=303,
+        )
     try:
-        run = state.orch.adjudicate(aid, actor=user.name)
+        run = await _run_operation_job(
+            job,
+            partial(
+                state.orch.adjudicate, aid, actor=user.name,
+                rerun_transient=rerun_transient,
+                scope=eng.scope if rerun_transient else None,
+                vault=eng.vault if rerun_transient else None,
+                settings=settings_with_overrides(eng.runner) if rerun_transient else None,
+            ),
+        )
     except ValueError as exc:
         return RedirectResponse(
             f"/assessment/{aid}?flash={quote(str(exc))}#s-results", status_code=303
@@ -1052,8 +1334,11 @@ async def adjudicate(aid: str, user: User = Depends(require("tester"))):
             ),
             status_code=500,
         )
+    settled = (f"{run.n_auto_resolved} settled by review "
+               f"({run.n_measured} by measurement)") if run.n_auto_resolved else "none settled"
     flash = (f"Reviewed: {run.overall}, {run.coverage_pct}% of the ticket covered, "
-             f"{run.n_manual_review} still need you")
+             f"{settled}, {run.n_manual_review} still need you"
+             + (f", {run.n_reran} re-sent" if run.n_reran else ""))
     return RedirectResponse(f"/assessment/{aid}?flash={quote(flash)}#s-results",
                             status_code=303)
 
@@ -1173,7 +1458,8 @@ async def test_detail_save(
 @app.post("/assessment/{aid}/execute")
 async def execute(aid: str, environment: str = Form(""), include_destructive: bool = Form(False),
                   adaptive: bool = Form(False),
-                  user: User = Depends(require("tester"))):
+                  user: User = Depends(require("tester")),
+                  idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     eng = state.engagement
     base_url = eng.environments.get(environment or eng.active_environment, eng.target_base_url)
     if not base_url:
@@ -1184,10 +1470,21 @@ async def execute(aid: str, environment: str = Form(""), include_destructive: bo
     # than being independently switchable: a tester who kept write probes out
     # of a reviewed plan did not thereby consent to unreviewed ones.
     budget = AdaptiveBudget(allow_destructive=include_destructive) if adaptive else None
+    job, created = _create_operation_job(aid, "execute", idempotency_key)
+    if not created:
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(f'Existing job {job.job_id}: {job.state}')}",
+            status_code=303,
+        )
     try:
-        execs = state.orch.execute(aid, base_url, eng.scope, eng.vault,
-                                   settings_with_overrides(eng.runner),
-                                   include_destructive=include_destructive, adaptive=budget)
+        execs = await _run_operation_job(
+            job,
+            partial(
+                state.orch.execute, aid, base_url, eng.scope, eng.vault,
+                settings_with_overrides(eng.runner),
+                include_destructive=include_destructive, adaptive=budget,
+            ),
+        )
     except Exception as exc:
         headline, hint = _execute_error(base_url, exc)
         return HTMLResponse(
@@ -1222,7 +1519,8 @@ async def execute(aid: str, environment: str = Form(""), include_destructive: bo
 @app.post("/assessment/{aid}/execution/rerun")
 async def rerun_execution(aid: str, execution_id: str = Form(...),
                           environment: str = Form(""), confirm: str = Form(""),
-                          user: User = Depends(require("tester"))):
+                          user: User = Depends(require("tester")),
+                          idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     assessment = state.repo.get_assessment(aid)
     if not assessment:
         return JSONResponse({"ok": False, "error": "Assessment not found."}, status_code=404)
@@ -1247,11 +1545,19 @@ async def rerun_execution(aid: str, execution_id: str = Form(...),
     # gate and refuses without an explicit confirmation either way.
     confirmed = confirm.strip() == assessment.issue_key
 
+    job, created = _create_operation_job(aid, "rerun_execution", idempotency_key)
+    if not created:
+        return JSONResponse({"ok": job.state == "SUCCEEDED", "job_id": job.job_id,
+                             "state": job.state, "duplicate": True}, status_code=200)
+
     try:
-        original, replay = state.orch.rerun_execution(
-            aid, execution_id, eng.scope, eng.vault,
-            settings_with_overrides(eng.runner),
-            base_url=base_url, confirm_destructive=confirmed, actor=user.name,
+        original, replay = await _run_operation_job(
+            job,
+            partial(
+                state.orch.rerun_execution, aid, execution_id, eng.scope, eng.vault,
+                settings_with_overrides(eng.runner), base_url=base_url,
+                confirm_destructive=confirmed, actor=user.name,
+            ),
         )
     except Orchestrator.RerunRefused as exc:
         return JSONResponse(
@@ -1453,17 +1759,31 @@ async def comment_preview(aid: str) -> str:
 
 
 @app.post("/assessment/{aid}/comment")
-async def comment_post(aid: str, user: User = Depends(require("tester"))):
+async def comment_post(aid: str, user: User = Depends(require("tester")),
+                       idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     a = state.repo.get_assessment(aid)
+    preview = state.orch.comment_preview(aid)
+    stable_key = idempotency_key or hashlib.sha256(preview.encode("utf-8")).hexdigest()
+    job, created = _create_operation_job(aid, "jira_comment", stable_key)
+    if not created:
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(f'Jira comment job {job.job_id}: {job.state}')}",
+            status_code=303,
+        )
+    state.repo.transition_job(job.job_id, "RUNNING")
     try:
         await state.orch.post_comment(aid, actor=user.name)
     except Exception as exc:
+        state.repo.transition_job(
+            job.job_id, "FAILED", error=redact_text(f"{type(exc).__name__}: {exc}")[:2000]
+        )
         headline, hint = _comment_error(a.issue_key if a else aid, exc)
         return HTMLResponse(
             views.error_page("Posting to Jira failed", headline, hint,
                              back_href=f"/assessment/{aid}", back_label="← Back to assessment"),
             status_code=400,
         )
+    state.repo.transition_job(job.job_id, "SUCCEEDED", result={"posted": True})
     target = f"/assessment/{aid}?flash=Posted+to+Jira"
     # Only the live client can resolve a real browse URL (JIRA_SITE_URL
     # configured) — the offline mock has no site to link to, so this is
@@ -1475,6 +1795,14 @@ async def comment_post(aid: str, user: User = Depends(require("tester"))):
 
 
 # -- JSON API (automation) --------------------------------------------------
+
+
+@app.get("/api/jobs/{job_id}")
+async def api_job(job_id: str, user: User = Depends(require("viewer"))):
+    job = state.repo.get_job(job_id)
+    if job is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return job.model_dump(mode="json")
 
 
 @app.post("/api/assessments")

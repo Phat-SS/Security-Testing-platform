@@ -380,7 +380,7 @@ class _CountingAdjudicator:
     def ai_enabled(self) -> bool:
         return True
 
-    def adjudicate(self, analysis, test, execution):
+    def adjudicate(self, analysis, test, execution, *, signals=None):
         from app.analysis.adjudicator import triage as _triage
         from app.schemas.agent import Adjudication
 

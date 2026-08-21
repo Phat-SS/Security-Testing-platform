@@ -111,9 +111,9 @@ TIP = _TipDict({
                   "must never happen — rather than the ticket's own, often "
                   "vaguer, wording. Only appears when the AI reviewer ran.",
     "review": "What the reviewing agent made of a result the runner left "
-              "undecided. Advisory: it never overwrites the sealed verdict and "
-              "never creates a finding — it tells you whether you still have to "
-              "read this one yourself.",
+              "undecided. It never overwrites the sealed verdict. Only a named "
+              "measurement or challenged HIGH-confidence consensus may create a "
+              "separate derived finding.",
     "gap": "Something the reviewing agent says the plan does not cover. A "
            "blocking gap is a security-relevant requirement with no test at all. "
            "Gaps are fed back to the planner for a bounded revision round; what "
@@ -769,9 +769,62 @@ VI.update({
 # -- 2. design --------------------------------------------------------------
 
 
-def _design_section(aid: str, detected_poc: str, has_tests: bool, opened: bool) -> str:
-    notice = ""
-    if detected_poc:
+def _poc_files_notice(scripts: list, unreachable: list) -> str:
+    """Which PoC files the ticket carried, named, before anything is generated.
+
+    A ticket with two PoC scripts is the normal case for an automated intake
+    tool, and the textarea below shows them as one banner-separated blob because
+    that is what an editable field can hold. That is exactly the presentation
+    that used to hide the second file: nothing on the page said how many there
+    were or where each came from, so a tester scrolling a textarea had no way to
+    notice a script was missing. This says it explicitly, and it names the
+    attachments the connector could not download so the gap is visible rather
+    than absent.
+    """
+    if not scripts and not unreachable:
+        return ""
+    out = ""
+    if scripts:
+        chips = ""
+        for script in scripts:
+            filename = script.get("filename", "") if isinstance(script, dict) else ""
+            origin = script.get("origin", "") if isinstance(script, dict) else ""
+            inferred = bool(script.get("inferred")) if isinstance(script, dict) else False
+            hint = _t("found in {origin}").format(origin=origin) if origin else ""
+            if inferred:
+                hint += " · " + _t("no language tag — read as Python because it parses "
+                                   "as Python and calls an HTTP library; give this one a "
+                                   "closer look")
+            chips += (f"<span class='pill info' title='{attr(hint)}'>"
+                      f"<span class='mono'>{e(filename)}</span></span> ")
+        headline = _t("{n} PoC script(s) found in this ticket").format(n=len(scripts))
+        out += (
+            f"<p style='margin:0 0 6px'>\U0001F7E1 <b>{headline}</b> "
+            f"<span class='muted'>" + _t(
+                "— pre-filled below, one banner-separated block per file. Each file is "
+                "transpiled on its own, so two scripts cannot resolve each other's "
+                "variables. <b>Review them</b>, then click Generate test plan. Nothing "
+                "runs automatically."
+            ) + "</span></p>"
+            f"<div class='row' style='gap:6px;flex-wrap:wrap;margin:0 0 10px'>{chips}</div>"
+        )
+    if unreachable:
+        names = ", ".join(e(str(n)) for n in unreachable)
+        out += (
+            "<p class='muted' style='margin:0 0 10px'>\u26A0 " + _t(
+                "This ticket also attaches {names}, which the Jira connector cannot "
+                "download. Open the attachment in Jira and paste it in below, or the "
+                "plan will cover only the script(s) above."
+            ).format(names=names) + "</p>"
+        )
+    return out
+
+
+def _design_section(aid: str, detected_poc: str, has_tests: bool, opened: bool,
+                    poc_scripts: list | None = None,
+                    unreachable_pocs: list | None = None) -> str:
+    notice = _poc_files_notice(poc_scripts or [], unreachable_pocs or [])
+    if detected_poc and not notice:
         notice = (
             "<p class='muted' style='margin:0 0 10px'>"
             "\U0001F7E1 " + _t(
@@ -1150,7 +1203,12 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
             f'<div><div class="glabel" style="margin:0">{_t("Expected status")}</div>'
             f'<span class="mono">{e(", ".join(str(s) for s in t.expected.status_in))}</span></div>'
             f'<div><div class="glabel" style="margin:0">{_t("Source")}</div>'
-            f'<span class="mono">{e(t.source.value)}</span></div>'
+            f'<span class="mono">{e(t.source.value)}'
+            # Which artefact, not just what kind. A ticket with two PoC scripts
+            # produces two groups of tests, and "which script is this replaying"
+            # is the first thing a reviewer needs before approving either group.
+            f'{" &middot; " + e(getattr(t, "source_ref", "")) if getattr(t, "source_ref", "") else ""}'
+            f'</span></div>'
             f'</div></td></tr>'
         )
 
@@ -1623,7 +1681,8 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
             "The reviewing agent triages every undecided result — which need you, which "
             "only need re-running, which can be settled by reading the captured response "
             "— then answers whether this run passed and how much of the ticket it "
-            "covered. It never overwrites a sealed verdict and never creates a finding."
+            "covered. It never overwrites a sealed verdict; strong proof may be "
+            "recorded separately by the audited promotion policy."
         )
         return (
             "<div class='card pad' style='margin-bottom:14px'>"
@@ -1637,25 +1696,7 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
 
     tone = _OVERALL_TONE.get(run.overall, "info")
     manual = run.manual_review_items
-    manual_rows = ""
-    for adjudication in manual[:12]:
-        manual_rows += (
-            f'<tr><td class="mono">{e(adjudication.test_id)}</td>'
-            f'<td>{e(adjudication.triage_reason)}</td>'
-            f'<td class="muted">{e(adjudication.recommended_action)}</td></tr>'
-        )
-    manual_html = ""
-    if manual_rows:
-        manual_html = (
-            f'<div class="glabel" style="margin-top:12px">{_t("Still needs you")}'
-            f'{info(TIP["review"], _t("Review"))}</div>'
-            + ui.table([_t("Test"), _t("Why it is undecided"), _t("What would settle it")],
-                       manual_rows, cls="compact",
-                       scroll=len(manual) > 8)
-        )
-        if len(manual) > 12:
-            more_label = _t("{n} more in the report.").format(n=len(manual) - 12)
-            manual_html += f"<p class='muted' style='margin:6px 0 0'>{more_label}</p>"
+    manual_html = _blocker_groups(manual) + _manual_table(manual)
 
     resolved = run.auto_resolved
     resolved_html = ""
@@ -1665,15 +1706,20 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
             f'<tr><td class="mono">{e(a.test_id)}</td>'
             f'<td>{ui.pill(_t(a.assessed_result), ui.VERDICT_CLASS.get(a.assessed_result, "info"))}'
             f' <span class="muted">{advisory_word}</span></td>'
+            f'<td class="muted">{_resolution_label(a)}</td>'
             f'<td>{e(a.rationale)}</td></tr>'
             for a in resolved[:12]
         )
-        settled_note = _t("(advisory — the sealed verdict and the finding count are unchanged)")
+        settled_note = _t(
+            "(advisory — the sealed verdict and the finding count are unchanged directly; "
+            "derived promotion is audited separately)"
+        )
         resolved_html = (
             f'<div class="glabel" style="margin-top:12px">{_t("Settled by review")} '
             f'<span class="muted">{settled_note}</span></div>'
-            + ui.table([_t("Test"), _t("Read as"), _t("Why")], rows, cls="compact",
+            + ui.table([_t("Test"), _t("Read as"), _t("How"), _t("Why")], rows, cls="compact",
                        scroll=len(resolved) > 8)
+            + _how_settled_line(run)
         )
 
     degraded = (f"<p class='muted' style='margin:6px 0 0'>&#9888; {e(run.degraded_reason)}</p>"
@@ -1692,8 +1738,140 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
         f"{manual_html}{resolved_html}"
         f"<form method='post' action='/assessment/{attr(aid)}/adjudicate' class='js-busy' "
         f"style='margin:12px 0 0'>"
-        f"<button class='btn ghost'>&#8635; {_t('Review again')}</button></form></div>"
+        f"<button class='btn ghost'>&#8635; {_t('Review again')}</button>"
+        + _rerun_transient_control(run) +
+        "</form></div>"
     )
+
+
+def _rerun_transient_control(run) -> str:
+    """The one part of a review pass that sends traffic, behind its own checkbox.
+
+    Only offered when there is actually something to re-send. A checkbox rather
+    than a second button because the re-run is part of the same pass — re-sending
+    the transient failures and then not reviewing them would leave the run in a
+    state nobody asked for.
+    """
+    if not run.n_rerun:
+        return ""
+    label = _t(
+        "also re-send the {n} result(s) that need only another attempt (a server "
+        "error or a runner failure) — this sends real requests"
+    ).format(n=run.n_rerun)
+    return (
+        "<label class='muted' style='display:inline-flex;gap:6px;align-items:center;"
+        "margin-left:12px'>"
+        "<input type='checkbox' name='rerun_transient' value='1'>"
+        f"<span>{label}</span></label>"
+    )
+
+
+# What kind of thing is in the way, and therefore what clears it. Grouping the
+# queue by this is the difference between "14 results need you" (a wall) and
+# "9 of them are one stale object id" (a first move).
+_BLOCKER_LABEL = {
+    "test_data": ("Test data", "A stale object id or a persona without the entitlement — "
+                              "the positive control failed, so nothing about the attack's "
+                              "rejection means anything yet. Fix the data and re-run."),
+    "config": ("Configuration", "Scope, policy or the network stopped the request before it "
+                                "was sent. Nothing ran, so there is nothing to read."),
+    "no_evidence": ("No evidence captured", "It ran, but captured nothing readable either "
+                                            "way. Add a secret marker on the target persona "
+                                            "or a verification read-back, then re-run."),
+    "ambiguous": ("Genuinely ambiguous", "There is readable evidence and it does not settle "
+                                         "the question. This is the bucket that actually "
+                                         "needs your judgement."),
+    "unread": ("Not read", "No reader was available — the AI adjudicator is not configured, "
+                           "or this pass ran out of its review budget."),
+}
+
+
+def _blocker_groups(manual: list) -> str:
+    """"What would clear these" as counts, above the row-by-row list."""
+    if not manual:
+        return ""
+    counts: dict[str, int] = {}
+    for adjudication in manual:
+        counts[adjudication.blocker or "ambiguous"] = counts.get(
+            adjudication.blocker or "ambiguous", 0) + 1
+    if len(counts) <= 1 and len(manual) < 3:
+        return ""
+    chips = ""
+    for key, (label, why) in _BLOCKER_LABEL.items():
+        if not counts.get(key):
+            continue
+        chips += (
+            f"<span class='pill info' title='{attr(_t(why))}'>"
+            f"<b>{counts[key]}</b> {_t(label)}</span> "
+        )
+    if not chips:
+        return ""
+    intro = _t("What is in the way")
+    return (f"<div class='glabel' style='margin-top:12px'>{intro}</div>"
+            f"<div class='row' style='gap:6px;flex-wrap:wrap;margin:0 0 4px'>{chips}</div>")
+
+
+def _manual_table(manual: list) -> str:
+    if not manual:
+        return ""
+    rows = ""
+    for adjudication in manual[:12]:
+        note = adjudication.challenge_note or adjudication.recommended_action
+        rows += (
+            f'<tr><td class="mono">{e(adjudication.test_id)}</td>'
+            f'<td>{e(adjudication.triage_reason)}</td>'
+            f'<td class="muted">{e(note)}</td></tr>'
+        )
+    html = (
+        f'<div class="glabel" style="margin-top:8px">{_t("Still needs you")}'
+        f'{info(TIP["review"], _t("Review"))}</div>'
+        + ui.table([_t("Test"), _t("Why it is undecided"), _t("What would settle it")],
+                   rows, cls="compact", scroll=len(manual) > 8)
+    )
+    if len(manual) > 12:
+        more_label = _t("{n} more in the report.").format(n=len(manual) - 12)
+        html += f"<p class='muted' style='margin:6px 0 0'>{more_label}</p>"
+    return html
+
+
+def _resolution_label(adjudication) -> str:
+    """How this row was settled — never left for the reader to guess.
+
+    "Measured" and "read by the agent" are different assurances: the first
+    reproduces on the same evidence with no model involved, the second is an
+    opinion that survived a challenge. Collapsing them into one "settled" column
+    would be the most misleading thing on the page.
+    """
+    resolution = getattr(adjudication, "resolution", "")
+    if resolution == "measured":
+        rule = getattr(adjudication, "rule", "")
+        measured = _t("measured")
+        return f"{measured}<span class='muted'> · {e(rule)}</span>" if rule else measured
+    if resolution == "ai_consensus":
+        return _t("read, then challenged")
+    if resolution == "propagated":
+        source = getattr(adjudication, "read_from", "")
+        carried = _t("carried from an identical result")
+        return f"{carried}<span class='muted'> · {e(source)}</span>" if source else carried
+    if resolution == "ai":
+        return _t("read by the agent")
+    return _t("settled")
+
+
+def _how_settled_line(run) -> str:
+    parts = []
+    if run.n_measured:
+        parts.append(_t("{n} by measuring the evidence (no model involved)").format(
+            n=run.n_measured))
+    if run.n_consensus:
+        parts.append(_t("{n} read and then challenged by a second pass").format(
+            n=run.n_consensus))
+    if run.n_propagated:
+        parts.append(_t("{n} carried from an identical reading task").format(
+            n=run.n_propagated))
+    if not parts:
+        return ""
+    return f"<p class='muted' style='margin:6px 0 0'>{', '.join(parts)}.</p>"
 
 
 def _results_section(aid: str, issue_key: str, st: _State, findings, verdicts: dict,
@@ -1794,8 +1972,8 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
         summary=summary,
         open=opened,
         tip=_t(
-            "A finding is only minted from a test the runner judged FAIL — a confirmed "
-            "control break with disclosure in the response."
+            "A finding requires either a sealed runner FAIL or a hash-bound derived "
+            "decision accepted by the conservative promotion policy."
         ),
     )
 
@@ -1825,6 +2003,12 @@ VI.update({
     "advisory": "tham khảo", "Settled by review": "Đã giải quyết qua đánh giá",
     "(advisory — the sealed verdict and the finding count are unchanged)":
         "(chỉ tham khảo — kết luận đã niêm phong và số finding không đổi)",
+    "(sealed verdict unchanged; derived promotion is audited separately)":
+        "(kết luận niêm phong không đổi; việc nâng cấp dẫn xuất được audit riêng)",
+    "(advisory — the sealed verdict and the finding count are unchanged directly; "
+    "derived promotion is audited separately)":
+        "(chỉ tham khảo — kết luận niêm phong và số finding không đổi trực tiếp; "
+        "việc nâng cấp dẫn xuất được audit riêng)",
     "Read as": "Đọc là", "Why": "Vì sao",
     "AI reviewer": "AI reviewer", "deterministic triage only": "chỉ phân loại tất định",
     "· {decided}% of executions decided · reviewed by {who}":
@@ -1868,6 +2052,10 @@ VI.update({
     "control break with disclosure in the response.":
         "Một finding chỉ được tạo từ test mà runner đánh giá là LỖI — control thực sự bị "
         "phá vỡ và phản hồi có để lộ điều đó.",
+    "A finding requires either a sealed runner FAIL or a hash-bound derived "
+    "decision accepted by the conservative promotion policy.":
+        "Finding cần runner niêm phong FAIL hoặc một quyết định dẫn xuất gắn hash "
+        "được policy nâng cấp thận trọng chấp nhận.",
     "opening the report…": "đang mở báo cáo…", "View report now": "Xem báo cáo ngay",
     "Open ticket": "Mở ticket",
 })
@@ -2027,7 +2215,10 @@ def body(
                    requirements=analysis.get("requirements") or [],
                    coverage_items=(run_assessment.items if run_assessment else []),
                    uncovered_poc_endpoints=uncovered_poc_endpoints or [])}
-{_design_section(aid, analysis.get("detected_poc_source") or "", st.n_tests > 0, opens["design"])}
+{_design_section(aid, analysis.get("detected_poc_source") or "", st.n_tests > 0,
+                 opens["design"],
+                 poc_scripts=analysis.get("detected_poc_scripts") or [],
+                 unreachable_pocs=analysis.get("unreachable_poc_attachments") or [])}
 {_coverage_section(aid, coverage or [], opens["coverage"])}
 {_plan_section(aid, plan, filters, opens["plan"], review=plan_review)}
 {_execute_section(aid, assessment.issue_key, st, environments or {}, active_environment,

@@ -20,10 +20,11 @@ Jira → Normalize → Requirements + OWASP Rule Engine + AI → Declarative Tes
      → Evidence → Findings → Result Review (agent) → Report
 ```
 
-The two **agent** stages are advisory and bracket the human one. The plan
-reviewer adds tests and names gaps; it cannot approve anything. The result
-reviewer reads results the runner left undecided and says what it thinks they
-are; it cannot rewrite a sealed verdict or mint a finding.
+The plan reviewer adds tests and names gaps; it cannot approve anything. The
+result reviewer cannot rewrite a sealed verdict. A named deterministic
+measurement, or a HIGH-confidence AI result that survives an adversarial
+challenge and cites captured evidence, may instead produce an append-only,
+hash-bound derived verdict. The promotion decision stays separate and auditable.
 
 Untrusted PoC code is **never executed**. A PoC is parsed statically and
 transpiled into a declarative `TestCase` (data, not code). The only thing that
@@ -58,6 +59,25 @@ Evidence is ranked, strongest first: verification read-back → correlated
 disclosure → directly observed missing header/limit → status code (weakest,
 never decisive alone).
 
+Production evidence correlation uses `EVIDENCE_FINGERPRINT_KEY` (HMAC, so raw
+identity values are not stored). OAST-backed SSRF/redirect tests use the
+provider-neutral `OAST_PUBLIC_URL`/`OAST_POLL_URL` contract. Reports include a
+manifest signed with `REPORT_SIGNING_KEY` (32+ characters). See
+[docs/configuration.md](docs/configuration.md).
+These settings can also be managed under **Configuration → Advanced**;
+stored secret values are never sent back to the browser, and saving requires
+the admin role when authentication is enabled.
+
+Before promoting a new Claude model or prompt, score its captured shadow output
+against a reviewed JSONL golden set:
+
+```bash
+python -m app.evals candidate.jsonl --baseline production.jsonl
+```
+
+The gate checks finding precision/recall, invented evidence references, and
+the share of executions still requiring manual review.
+
 ## Quick start (Windows / PowerShell)
 
 ```bash
@@ -87,10 +107,13 @@ the correlated data leak as evidence; `API2-001` (unauth read) → **PASS**.
 # terminal 1 — a target to test (the bundled vulnerable app)
 python -m uvicorn demo.vulnerable_api:app --port 8000
 # terminal 2 — the platform
+cp .env.example .env                                       # then set the two tokens
 cp config/engagement.example.json config/engagement.json
-$env:ENGAGEMENT_CONFIG="config/engagement.json"
 python -m uvicorn app.api.main:app --port 8100
 ```
+
+`.env` is read at startup by the app itself, so this and `npm run security:ui`
+see the same configuration. Real environment variables still win over the file.
 
 Open `http://127.0.0.1:8100`: import `CRM-1234`, check the extracted
 **Endpoints** (edit them if the ticket's prose defeated the extractor), generate
@@ -264,16 +287,19 @@ scope allow/block lists, and persona credentials (see
 nothing runs. Authorization is explicit and reviewable, never inferred from a
 ticket.
 
-The **Configuration** tab edits that same file, one pane per thing a run needs:
+The **Configuration** tab edits that same file, in four tabs ordered the way a
+new engagement needs them:
 
-| Pane | Writes | Blocks a run when unset |
+| Tab | Writes | Blocks a run when unset |
 |---|---|---|
-| Readiness | — (read-only verdict) | — |
-| Environments | `environments`, `active_environment` | yes — no target, no run |
-| Scope | `scope.allowed_hosts` / `blocked_hosts` / `allow_private_ranges` | yes — every request comes back `BLOCKED` |
-| Personas | `personas`, `attacker`, `victim` | yes — the runner resolves the attacker before scope is even checked |
-| Runner limits | `runner` (timeout, caps) | no — blank falls back to `.env` |
-| Runtime | nothing (read-only) | — env-only settings, restart to change |
+| Readiness | — (read-only verdict, plus quick setup while the engagement is empty) | — |
+| Target | `environments`, `active_environment`, `scope.*` | yes — no target and no approved host mean every request comes back `BLOCKED` |
+| Identities | `personas`, `attacker`, `victim` | yes — the runner resolves the attacker before scope is even checked |
+| Advanced | `runner` limits, plus AI/evidence settings written to `.env` | no — everything there has a working default |
+
+**Quick setup** on the Readiness tab does the whole first-run sequence in one
+submit: the environment, its scope authorization, both personas, and both tokens
+(to `.env`, referenced from the engagement file as `${PERSONA_A_TOKEN}`).
 
 Every writer reads the whole document, changes only the keys it owns, and
 writes it back, so hand-written comments and keys the UI does not expose
@@ -281,7 +307,7 @@ survive a save made through the browser.
 
 **Persona tokens are references, not values.** `engagement.json` is the artifact
 a tester reads, diffs and attaches to a ticket, so a live bearer token does not
-belong in it. Write `"Authorization": "Bearer ${DEV_CRM_TOKEN_A}"` and keep the
+belong in it. Write `"Authorization": "Bearer ${PERSONA_A_TOKEN}"` and keep the
 token in `.env`; `load_engagement` resolves `${VAR}` from the environment at load
 time. An unset or empty variable **withholds the header and fails readiness**
 rather than falling back, because both fallbacks corrupt the result instead of
@@ -331,7 +357,7 @@ tests/         # scope, redaction, rules, verdict, evidence, approval, analysis,
 | A working report link in the Jira comment | `PLATFORM_BASE_URL=https://…` |
 | Live Jira instead of the mock | `JIRA_MCP_URL=…` `JIRA_CLOUD_ID=…` (+ `pip install mcp`) |
 | PostgreSQL instead of SQLite | `DATABASE_URL=postgresql+psycopg://…` |
-| Reach a lab target on a private IP | **Configuration → Scope → allow private ranges** (lab only) |
+| Reach a lab target on a private IP | **Configuration → Target → allow private / loopback ranges** (lab only) |
 | Run reviewed arbitrary-Python PoCs | `ENABLE_PYTHON_RUNNER=true` **and** `EGRESS_PROXY=…` (see below) |
 
 ## Importing existing artifacts
@@ -350,6 +376,39 @@ And you can **export** the approved plan back out:
 - **Postman/Newman** — `/export.postman` emits a collection with `{{baseUrl}}` +
   `{{token_*}}` variables (never real secrets) and per-request assertions.
 - **Report** — HTML, **PDF** (`/export.pdf`), **XLSX**, **JSON**.
+
+### A ticket with two PoC scripts
+
+A ticket that files an unauthenticated-reach script *and* a cross-tenant-write
+script is describing one finding in two steps, and a plan built from the first
+one covers half of it. `app/poc/jira_extract.py` finds all of them:
+
+* **everywhere they hide** — description, follow-up comments, and `.py`
+  attachments when the connector can supply the bytes. A `.py` attachment it
+  cannot download is *named* on the Design step rather than silently absent,
+  because a ticket with two PoCs reported as a ticket with one is the failure
+  worth preventing;
+* **in the syntax they were written in** — markdown fences, Jira's native ADF
+  `codeBlock` (which contains no backticks at all, and so used to be invisible
+  to a fence scanner — `app/mcp/adf.py` now renders it as a real fenced block),
+  `{code:python}` wiki markup, and bare fences that actually parse as Python and
+  call an HTTP library. A JSON request body or a curl line in a bare fence is
+  left alone: `{"owner_id": 4711}` is valid Python, so parseability alone is not
+  enough to tell a payload from a PoC;
+* **named** — from a label line above the block (`**01_reach.py**`, `h3.
+  01_reach.py`, `PoC 1: 01_reach.py`), a `{code:title=…}`, or the script's own
+  first-line comment.
+
+The Design step's textarea shows them as one banner-separated blob, because that
+is what an editable field can hold — but the page now says how many scripts
+there are and where each came from, and **each file is transpiled on its own**.
+That last part is not cosmetic: `transpile_python` walks a single symbol table in
+source order, so two scripts that each open with `BASE = "https://…"` — or each
+define their own `def send(...)` — resolve the *second* file's definitions into
+the *first* file's requests, silently, producing test cases aimed at a path
+nobody wrote. Every generated test carries `source_ref` ("PoC
+02_change_ownership.py"), and a syntax error in one script no longer takes the
+other one down with it.
 
 ## Regression testing
 
@@ -502,13 +561,73 @@ measurably there.
 
 **4. Result adjudicator** (`app/analysis/adjudicator.py`) — `INCONCLUSIVE` is the
 runner being honest, and the bill for that honesty is paid by a person reading
-response bodies. Most of that is not judgement, it is reading. So results are
-**triaged** first (deterministic, no key needed): a failed positive control is a
+response bodies. Most of that is not judgement, it is reading, and a good deal
+of it is not even reading — it is *arithmetic over two responses*. So one review
+pass runs four tiers, cheapest and most reproducible first, and only what
+survives each tier goes on to the next:
+
+**Tier 1 — triage** (deterministic, no key needed). Which bucket is this result
+in, and *what kind of thing is in the way*: a failed positive control is a
 test-data problem only a person can fix, a 500 is transient and wants a re-run,
-and an accepted attack whose response body is sitting right there is a reading
-task. Then the reading tasks are decided — by measurement where possible (an
-attacker response byte-identical to the positive control's *is* correlated
-disclosure, no model required) and by the model otherwise.
+a blocked request is a config question, and an accepted attack whose response
+body is sitting right there is a reading task. The blocker is surfaced as its
+own field, so the queue groups by *what would clear it* — "nine of these are one
+stale object id" is a morning's work, "fourteen results need review" is a wall.
+
+**Tier 2 — measurement** (`app/analysis/evidence_signals.py`, deterministic, no
+key needed, and the tier that actually shrinks the queue). The evidence is
+measured against the positive control before anybody reads it: which *layer*
+answered (auth / object / input-validation / rate limiter, not just "a 4xx"),
+what shape each body is, and — the load-bearing one — what share of the
+*distinctive* values in the owner's response came back in the attacker's. Field
+names, status words and small integers are excluded, because every response in
+an API shares those and counting them would make every pair look like a leak.
+Six narrow rules settle a result outright from that:
+
+| Rule | Reads as | Why it is a measurement |
+|---|---|---|
+| `identical_body` | FAIL | the attacker got the owner's bytes |
+| `correlated_disclosure` | FAIL | ≥75% of the owner's distinctive values came back, bodies not byte-equal (a timestamp differs) |
+| `filtered_collection` | PASS | empty result set where the owner gets *n* records — the filter ran |
+| `refusal_in_body` | PASS | a 200 whose body is a refusal envelope, not a resource |
+| `throttled` | PASS | a rate limiter answered; the endpoint never processed it |
+| `equivalent_refusal` | PASS | 401/403/404 are one security decision with different disclosure trade-offs, and *which* one a test expected is a guess about the implementation |
+
+That last rule is the single largest source of avoidable review work in a real
+run, and it is deliberately narrow: every expected status must itself be a
+security refusal, the actual one too, and the response must share **none** of the
+owner's distinctive values. A 404 carrying the victim's record is a disclosure
+that happens to wear a refusal status, and it never reaches this rule. Nor does
+"expected 401, got 400" — a validation rejection where authentication was
+required is exactly the case where the control may never have run, which is what
+a reader is *for*.
+
+**Tier 3 — clustering.** What is left is grouped by the *reading task*, not the
+result: same mutation, same endpoint shape, same status, same body shape, same
+positive-control state, same answer to "did the owner's data come back". Rows
+with the same key pose one question, so it is read once and every row that
+inherited the answer names the sibling it came from. An aggressive run's forty
+undecided rows are usually four questions.
+
+**Tier 4 — reading**, by the model, on what is left, with the measured
+differential handed to it as fact rather than two JSON blobs to eyeball. When it
+wants to settle a result, a **second adversarial pass** is asked to refute its
+own answer (`_CHALLENGE_SYSTEM`); an objection sends the row back to a person
+with the objection attached. A challenge that cannot be obtained leaves the
+first answer standing and says so — the net failing to deploy must not leave you
+worse off than never having had one — but it never stamps "two passes agreed" on
+a reply that agreed with nothing. Set `ADJUDICATOR_CHALLENGE=false` to skip it.
+
+Every settled row says *how* it was settled (`resolution`: measured / read /
+read-and-challenged / carried), and `RunAssessment` counts them apart, because
+"twelve settled" and "twelve settled, ten of them by measurement with no model
+involved" are different claims about how much of this you are taking on trust.
+
+The review pass sends nothing by default. The one exception is opt-in from its
+own checkbox: **also re-send the results that need only another attempt** (a 5xx
+during the attack, a runner error) re-runs that bucket, bounded and audited,
+skipping destructive tests — `rerun_execution`'s confirmation gate is honoured,
+not worked around.
 
 The result is an `Adjudication`: an opinion stored **beside** the sealed verdict,
 carrying `advisory=True` and the sealed value alongside its own. It never writes
@@ -605,6 +724,8 @@ starting from without trying to re-create tables that are already there.
 ## Safety
 
 - Default-deny scope. Private/loopback/link-local ranges are blocked unless
-  `ALLOW_PRIVATE_RANGES=true` (lab only).
+  `scope.allow_private_ranges` is turned on in `config/engagement.json`
+  (lab only — and it lives in that file, not in `.env`, because it is part of
+  the authorization artifact a human reviews).
 - Only run this against systems you are explicitly authorized to test.
 - The bundled `demo/vulnerable_api.py` is intentionally insecure — never deploy it.

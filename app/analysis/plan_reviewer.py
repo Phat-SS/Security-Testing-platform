@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app.analysis.staged import LLMClient
+from app.analysis.staged import LLMClient, structured_completion
 from app.execution.mutations import MUTATION_KINDS
 from app.schemas.agent import PlanReview, PlanReviewGap, RequirementDigestItem, RequirementItem
 from app.schemas.analysis import IssueAnalysis
@@ -326,8 +326,9 @@ class PlanReviewer:
             return base
 
         try:
-            raw = self._llm.complete(
-                _SYSTEM, self._prompt(analysis, tests, requirements, base)
+            raw = structured_completion(
+                self._llm, _SYSTEM, self._prompt(analysis, tests, requirements, base),
+                _ProposedReview, "plan-review.v1",
             )
             payload = _extract_json_object(raw)
             proposed = _ProposedReview.model_validate(payload)
@@ -343,7 +344,12 @@ class PlanReviewer:
             base.degraded_reason = f"reviewer LLM call failed — {type(exc).__name__}: {exc}"
             return base
 
-        return self._merge(base, proposed, requirements)
+        merged = self._merge(base, proposed, requirements)
+        metadata = getattr(self._llm, "last_call_metadata", {}) or {}
+        merged.model_id = str(metadata.get("model_id", ""))
+        merged.prompt_version = str(metadata.get("prompt_version", ""))
+        merged.prompt_hash = str(metadata.get("prompt_hash", ""))
+        return merged
 
     def _merge(
         self, base: PlanReview, proposed: _ProposedReview,

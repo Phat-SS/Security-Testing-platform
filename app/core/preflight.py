@@ -149,14 +149,14 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
         checks.append(Check(
             "environments", "Target environment", FAIL,
             "No environment is configured, so execution is disabled.",
-            "Add one under <b>Environments</b> — a name and a base URL such as "
+            "Add one under <b>Target</b> — a name and a base URL such as "
             "<code>https://staging.example.com</code>.",
         ))
     elif active is None:
         checks.append(Check(
             "environments", "Target environment", FAIL,
             "No environment is marked as the default.",
-            "Pick one under <b>Environments</b>. Runs use the default unless "
+            "Pick one under <b>Target</b>. Runs use the default unless "
             "another is chosen in the dropdown next to Run approved tests.",
         ))
     else:
@@ -191,9 +191,9 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
         # In scope by name but still refused: a blocklist entry, a DNS failure,
         # or a private/link-local address with the lab escape hatch off. The
         # validator's own sentence is more precise than anything restated here.
-        hint = ("Turn on <b>Allow private ranges</b> under <b>Scope</b> if this "
-                "is a local lab target." if "blocked range" in active.reason else
-                "Fix the host, the DNS entry, or the block-list under <b>Scope</b>.")
+        hint = ("Turn on <b>Allow private / loopback ranges</b> under <b>Target</b> "
+                "if this is a local lab target." if "blocked range" in active.reason else
+                "Fix the host, the DNS entry, or the block-list under <b>Target</b>.")
         checks.append(Check("scope", "Scope authorization", FAIL, active.reason, hint))
 
     if not allowed:
@@ -234,7 +234,7 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
                     f"persona_{role}", f"{role.title()} identity", WARN,
                     f"{persona_name} has no auth headers — its requests go out unauthenticated.",
                     "Authorization tests need a real, logged-in identity. Add an "
-                    "<code>Authorization</code> header under <b>Personas</b>.",
+                    "<code>Authorization</code> header under <b>Identities</b>.",
                 ))
             else:
                 checks.append(Check(
@@ -246,7 +246,7 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
                 f"persona_{role}", f"{role.title()} identity", FAIL,
                 f"'{persona_name}' is not defined in the persona vault.",
                 "Every generated test references personas by name. Add it under "
-                "<b>Personas</b>, or point the "
+                "<b>Identities</b>, or point the "
                 f"<b>{role}</b> role at one of: "
                 + (", ".join(f"<code>{n}</code>" for n in real) or "<i>none defined yet</i>"),
             ))
@@ -274,7 +274,7 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
                 f"{engagement.victim} has no owned object ids.",
                 "BOLA cases are built by pointing the attacker at an id the victim "
                 "owns (e.g. <code>customer_id=2002</code>). Without one the "
-                "generated tests fall back to guessed ids.",
+                "generated tests fall back to guessed ids — set one under <b>Identities</b>.",
             ))
         else:
             checks.append(Check(
@@ -303,16 +303,17 @@ def jira_env_facts() -> list[tuple[str, str, str]]:
     ]
 
 
-def reload_dotenv(path: str = ".env") -> None:
-    """Re-read .env into this process's environment so Reconnect can pick up a
-    freshly refreshed token without a server restart.
+def parse_dotenv(path: str) -> dict[str, str]:
+    """The KEY=VALUE pairs in a .env file, or {} when it does not exist.
 
-    Minimal by design (KEY=VALUE lines, optional quotes, '#' comments) — this
-    only needs to mirror what scripts/security-ui.js already parses at
-    startup, not be a general-purpose dotenv implementation.
+    Minimal by design (optional quotes, '#' comments) — this only needs to
+    mirror what scripts/security-ui.js parses, not be a general-purpose dotenv
+    implementation. Last occurrence of a key wins, matching both that launcher
+    and docker-compose's own env_file handling.
     """
     if not os.path.exists(path):
-        return
+        return {}
+    values: dict[str, str] = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -324,7 +325,38 @@ def reload_dotenv(path: str = ".env") -> None:
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
             if key:
-                os.environ[key] = value
+                values[key] = value
+    return values
+
+
+def load_dotenv(path: str = ".env") -> list[str]:
+    """Nạp .env vào process này *một lần lúc khởi động*, biến shell thắng file.
+
+    Without this, only `npm run security:ui` (which parses .env in Node before
+    spawning uvicorn) and docker-compose (`env_file:`) ever saw the file — a
+    plain `uvicorn app.api.main:app` or `python -m app.cli` started with an
+    empty configuration and reported it as a readiness failure about personas
+    and Jira, never as "the file you edited was not read". Precedence matches
+    every other dotenv implementation: a variable already present in the
+    environment is left alone, so a shell/CI/compose value still overrides.
+
+    Returns the names of the keys it applied (values are never logged).
+    """
+    values = parse_dotenv(path)
+    applied = [key for key in values if key not in os.environ]
+    for key in applied:
+        os.environ[key] = values[key]
+    return applied
+
+
+def reload_dotenv(path: str = ".env") -> None:
+    """Re-read .env over the top of the current environment so Reconnect can
+    pick up a freshly refreshed token without a server restart.
+
+    Unlike `load_dotenv` this deliberately *overrides* what is already set —
+    it exists precisely to replace a token the process is holding.
+    """
+    os.environ.update(parse_dotenv(path))
 
 
 def newest_mcp_auth_token(base: Path, newer_than: float | None = None) -> Path | None:
@@ -344,17 +376,91 @@ def newest_mcp_auth_token(base: Path, newer_than: float | None = None) -> Path |
 def write_dotenv_value(key: str, value: str, path: str = ".env") -> None:
     """Set KEY=value in .env in place — replacing an existing line (commented
     or not) if present, else appending. Mirrors scripts/jira-token.js's own
-    rewrite so the two stay interchangeable. The value is never logged."""
-    line = f"{key}={value}"
-    pattern = re.compile(rf"^#?\s*{re.escape(key)}=.*$", re.MULTILINE)
+    rewrite so the two stay interchangeable. The value is never logged.
+
+    *Every* occurrence of the key collapses onto the first one. Replacing only
+    the first and leaving the rest is worse than not writing at all: .env is
+    last-one-wins (see reload_dotenv), so a duplicate further down keeps the
+    stale value winning and a freshly refreshed token gets written and then
+    ignored — which is exactly how a "Refresh token" click can appear to do
+    nothing at all.
+    """
+    update_dotenv_values({key: value}, path)
+
+
+def update_dotenv_values(
+    values: dict[str, str | None], path: str = ".env", *, apply_to_environ: bool = False
+) -> None:
+    """Atomically update several .env keys; ``None`` removes a key.
+
+    Newlines are refused so a submitted secret cannot smuggle additional
+    environment assignments into the file. Every duplicate occurrence is
+    collapsed, matching ``write_dotenv_value``'s historical contract.
+    """
+    for key, value in values.items():
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            raise ValueError(f"Invalid environment key: {key!r}")
+        if value is not None and ("\r" in value or "\n" in value):
+            raise ValueError(f"{key} must be a single line")
+
+    # Anchored per line, and the '=' is required: a `#  KEY  some prose`
+    # comment describing the key is documentation, not a line to overwrite.
     text = Path(path).read_text(encoding="utf-8") if os.path.exists(path) else ""
-    if pattern.search(text):
-        text = pattern.sub(line, text, count=1)
-    elif text and not text.endswith("\n"):
-        text += f"\n{line}\n"
-    else:
-        text += f"{line}\n"
-    Path(path).write_text(text, encoding="utf-8")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    out: list[str] = []
+    written: set[str] = set()
+    patterns = {
+        key: re.compile(rf"^#?[ \t]*{re.escape(key)}=") for key in values
+    }
+    for raw in text.splitlines():
+        matched = next((key for key, pattern in patterns.items() if pattern.match(raw)), None)
+        if matched is None:
+            out.append(raw)
+        elif matched not in written:
+            value = values[matched]
+            if value is not None:
+                out.append(f"{matched}={value}")
+            written.add(matched)
+        # duplicates and explicitly removed keys are omitted
+    for key, value in values.items():
+        if key not in written and value is not None:
+            out.append(f"{key}={value}")
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(newline.join(out) + newline, encoding="utf-8")
+    os.replace(temporary, destination)
+
+    if apply_to_environ:
+        # Runtime UI saves must be effective immediately. Other callers (most
+        # notably the Jira token writer) already perform an explicit reload;
+        # mutating the process implicitly here would leak state across tools
+        # and tests that only intended to edit a file.
+        for key, value in values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def ai_evidence_config_state() -> dict[str, object]:
+    """UI-safe runtime state. Secret values are reduced to booleans here."""
+    secret_keys = (
+        "EVIDENCE_FINGERPRINT_KEY", "REPORT_SIGNING_KEY", "OAST_API_TOKEN",
+    )
+    public_keys = (
+        "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_EFFORT",
+        "REPORT_SIGNING_KEY_ID", "OAST_PUBLIC_URL", "OAST_POLL_URL", "OAST_TIMEOUT_S",
+    )
+    return {
+        "secrets": {key: bool(os.getenv(key)) for key in secret_keys},
+        "values": {key: os.getenv(key, "") for key in public_keys},
+        "flags": {
+            key: os.getenv(key, "false").lower() == "true"
+            for key in ("USE_AI", "AI_REQUIRE_PINNED_MODEL", "AUTH_COOKIE_SECURE")
+        },
+    }
 
 
 def runtime_facts() -> list[tuple[str, str, str]]:
@@ -388,10 +494,6 @@ def runtime_facts() -> list[tuple[str, str, str]]:
          "enabled" if flag("ENABLE_PYTHON_RUNNER") else "disabled",
          "Off by default. Requires an isolated sandbox container and an egress "
          "proxy — the app itself is not a boundary for arbitrary code."),
-        ("Private IP ranges (env default)",
-         "allowed" if flag("ALLOW_PRIVATE_RANGES") else "blocked",
-         "ALLOW_PRIVATE_RANGES in .env. The engagement's own Scope setting is "
-         "what execution actually uses."),
         ("Database",
          os.getenv("DATABASE_URL", "sqlite:///sectest.db"),
          "DATABASE_URL."),

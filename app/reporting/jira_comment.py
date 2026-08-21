@@ -185,14 +185,30 @@ def _assessment_rows(run) -> list[str]:
         f"| Executions with a decisive result | {run.decided_pct}% |",
     ]
     if run.n_auto_resolved:
+        # How it was settled, in the cell. A ticket reader cannot open the
+        # evidence, so "settled" without saying by what invites them to read a
+        # model's opinion and a reproducible measurement as the same claim.
+        how = []
+        if getattr(run, "n_measured", 0):
+            how.append(f"{run.n_measured} by measuring the evidence")
+        if getattr(run, "n_consensus", 0):
+            how.append(f"{run.n_consensus} read and challenged")
+        if getattr(run, "n_propagated", 0):
+            how.append(f"{run.n_propagated} carried from an identical result")
+        detail = f" — {', '.join(how)}" if how else ""
         rows.append(
-            f"| Undecided results settled by review | {run.n_auto_resolved} "
+            f"| Undecided results settled by review | {run.n_auto_resolved}{detail} "
             f"(advisory — not counted as confirmed findings) |"
         )
     if run.n_manual_review:
         rows.append(f"| Still needs manual review | **{run.n_manual_review}** |")
     if run.n_rerun:
         rows.append(f"| Needs a re-run (server error / tooling) | {run.n_rerun} |")
+    if getattr(run, "n_reran", 0):
+        rows.append(
+            f"| Transient failures re-sent during review | {run.n_reran} "
+            "(their result below is the re-run's) |"
+        )
     return rows
 
 
@@ -212,7 +228,12 @@ def _review_cell(adjudication) -> str:
     if result == "INCONCLUSIVE":
         return "re-run"
     emoji = RESULT_EMOJI.get(result, "")
-    return f"{emoji} {result} (agent, advisory)"
+    # "measured" and "agent" are different assurances: the first reproduces on
+    # the same evidence with no model involved, the second is a reading. The
+    # word is the only thing distinguishing them for a reader who cannot open
+    # the report, so it goes in the cell.
+    who = "measured" if getattr(adjudication, "resolution", "") == "measured" else "agent"
+    return f"{emoji} {result} ({who}, advisory)"
 
 
 def _results_table(executions: list[Execution], tests: dict[str, TestCase],
@@ -345,8 +366,8 @@ def build_comment(
     else:
         lines += [("No confirmed findings. A confirmed finding requires correlated "
                    "evidence (disclosed data, or a verified state change) — an "
-                   "unexpected success status alone is reported as INCONCLUSIVE, "
-                   "never promoted to a finding."), ""]
+                   "unexpected success status alone remains INCONCLUSIVE unless "
+                   "the audited derived-verdict policy accepts independent proof."), ""]
 
     # 2. Everything, one row per test. Passes are coverage evidence: "we tested
     #    this and the control held" is the other half of the report.

@@ -58,6 +58,8 @@ def compute_hash(execution: Execution) -> str:
         "attack_note": execution.attack_note,
         "supporting": [s.model_dump() for s in execution.supporting],
         "repeat": execution.repeat.model_dump() if execution.repeat else None,
+        "correlation": execution.correlation.model_dump() if execution.correlation else None,
+        "oast": execution.oast.model_dump() if execution.oast else None,
         "log": execution.log,
         "prev_hash": execution.prev_hash,
     }

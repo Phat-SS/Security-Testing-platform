@@ -8,6 +8,7 @@ correlation evidence that justifies the verdict.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from .enums import Confidence, OwaspApiCategory, Severity
 
@@ -35,8 +36,8 @@ class Finding(BaseModel):
     confidence: Confidence
     endpoint: str
 
-    # Dedup key: (owasp_category, endpoint, mutation_kind). Findings sharing a
-    # key are one finding; the individual tests land in affected_tests.
+    # Stable root-cause fingerprint. Mutation variants are evidence for a
+    # weakness, not the weakness's identity.
     dedup_key: str
     affected_tests: list[str] = Field(default_factory=list)
 
@@ -45,7 +46,9 @@ class Finding(BaseModel):
     reproduction: list[str] = Field(default_factory=list)
     recommendation: str
     references: list[str] = Field(default_factory=list)  # CWE / OWASP / ASVS
+    decision_source: Literal["sealed_runner", "measured", "ai_consensus"] = "sealed_runner"
+    derived_event_id: str = ""
 
     @staticmethod
-    def make_dedup_key(category: OwaspApiCategory, endpoint: str, mutation_kind: str) -> str:
-        return f"{category.value}|{endpoint}|{mutation_kind}"
+    def make_dedup_key(category: OwaspApiCategory, endpoint: str, root_cause: str) -> str:
+        return f"{category.value}|{endpoint}|{root_cause}"

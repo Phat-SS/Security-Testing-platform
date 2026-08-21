@@ -8,6 +8,8 @@ one doesn't just outrun a stale sentence in the README, it fails CI.
 import json
 import subprocess
 
+from pydantic import BaseModel
+
 from app.analysis.staged import ClaudeLLM
 
 
@@ -79,3 +81,54 @@ def test_complete_raises_on_non_json_output(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "non-JSON" in str(exc)
+
+
+class _StructuredAnswer(BaseModel):
+    answer: str
+
+
+def test_structured_completion_uses_cli_json_schema_and_records_metadata(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({
+                "is_error": False,
+                "structured_output": {"answer": "ok"},
+                "model": "claude-test-pinned",
+                "duration_ms": 12,
+                "total_cost_usd": 0.001,
+                "num_turns": 1,
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    llm = ClaudeLLM(model="claude-test-pinned")
+
+    raw = llm.complete_with_schema(
+        "system", "user", _StructuredAnswer.model_json_schema(), "test.v1"
+    )
+
+    assert json.loads(raw) == {"answer": "ok"}
+    assert "--json-schema" in captured["cmd"]
+    assert llm.last_call_metadata["model_id"] == "claude-test-pinned"
+    assert llm.last_call_metadata["model_pinned"] is True
+    assert llm.last_call_metadata["prompt_version"] == "test.v1"
+    assert len(llm.last_call_metadata["prompt_hash"]) == 64
+
+
+def test_production_can_require_a_full_versioned_model_id(monkeypatch):
+    monkeypatch.setenv("AI_REQUIRE_PINNED_MODEL", "true")
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+
+    try:
+        ClaudeLLM()
+        assert False, "expected an unpinned production configuration to fail"
+    except RuntimeError as exc:
+        assert "versioned model id" in str(exc)
+
+    assert ClaudeLLM(model="claude-sonnet-4-20250514")

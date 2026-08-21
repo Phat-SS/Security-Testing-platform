@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app.analysis.staged import LLMClient
+from app.analysis.staged import LLMClient, structured_completion
 from app.execution.mutations import MUTATION_KINDS
 from app.schemas.analysis import IssueAnalysis
 from app.schemas.enums import (
@@ -51,6 +51,8 @@ from app.schemas.testcase import (
     BaselineSpec,
     ExpectedResult,
     Mutation,
+    InvariantAssertion,
+    OastExpectation,
     RequestSpec,
     TestCase,
     VerificationStep,
@@ -97,8 +99,15 @@ class ProposedTest(BaseModel):
     verification_method: str = "GET"
     verification_persona: str | None = None
     verification_proves_if_contains: list[str] = Field(default_factory=list)
+    verification_assertions: list[InvariantAssertion] = Field(default_factory=list)
+    oast: bool = False
+    oast_purpose: str = "ssrf"
 
     rationale: str = ""
+
+
+class _ProposedPlan(BaseModel):
+    tests: list[ProposedTest] = Field(default_factory=list)
 
 
 @dataclass
@@ -186,7 +195,10 @@ class AttackPlanner:
         """Propose additional test cases. Never raises: a planner failure must
         degrade to 'no extra tests', never to a broken design step."""
         try:
-            raw = self._llm.complete(_SYSTEM, self._user_prompt(analysis, existing or []))
+            raw = structured_completion(
+                self._llm, _SYSTEM, self._user_prompt(analysis, existing or []),
+                _ProposedPlan, "attack-plan.v1",
+            )
         except Exception as exc:  # noqa: BLE001 - any client/transport failure
             return PlanResult(error=f"{type(exc).__name__}: {exc}")
 
@@ -308,7 +320,9 @@ class AttackPlanner:
         )
 
         try:
-            raw = self._llm.complete(_SYSTEM, user)
+            raw = structured_completion(
+                self._llm, _SYSTEM, user, _ProposedPlan, "attack-plan-revision.v1"
+            )
         except Exception as exc:  # noqa: BLE001 - any client/transport failure
             return PlanResult(error=f"{type(exc).__name__}: {exc}")
 
@@ -379,7 +393,9 @@ class AttackPlanner:
         )
 
         try:
-            raw = self._llm.complete(_SYSTEM, user)
+            raw = structured_completion(
+                self._llm, _SYSTEM, user, _ProposedPlan, "attack-follow-up.v1"
+            )
         except Exception as exc:  # noqa: BLE001
             return PlanResult(error=f"{type(exc).__name__}: {exc}")
 
@@ -443,6 +459,10 @@ class AttackPlanner:
             )
         if not p.expected_status_in:
             return "expected_status_in is empty; there is nothing to evaluate the result against"
+        if p.oast and p.mutation_kind not in {
+            "ssrf_url", "ssrf_url_bypass", "unsafe_redirect_url", "oauth_redirect_uri_bypass"
+        }:
+            return "OAST is only valid for a reviewed callback/redirect mutation"
         return None
 
     # -- conversion ---------------------------------------------------------
@@ -465,6 +485,7 @@ class AttackPlanner:
                 as_persona=p.verification_persona or p.persona,
                 request=RequestSpec(method=p.verification_method.upper(), path=p.verification_path),
                 proves_exploit_if_contains=p.verification_proves_if_contains,
+                proves_exploit_when=p.verification_assertions,
                 description="Read-back proposed by the AI planner.",
             )
             if p.verification_path and p.verification_path.startswith("/")
@@ -484,6 +505,7 @@ class AttackPlanner:
             ),
             attack_mutation=Mutation(kind=p.mutation_kind, detail=p.mutation_detail),
             verification=verification,
+            oast=(OastExpectation(purpose=p.oast_purpose) if p.oast else None),
             expected=ExpectedResult(
                 status_in=p.expected_status_in,
                 body_must_not_contain=p.body_must_not_contain,

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
+import re
 import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -29,6 +31,10 @@ from app.schemas.testcase import DESTRUCTIVE_METHODS, AuthContext, Mutation, Req
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _DANGEROUS_CALLS = {"system", "popen", "eval", "exec", "compile", "spawn", "call", "run", "check_output"}
 _MAX_UNROLL = 25  # cap on iterations unrolled from a literal for-loop
+# Cap on statements one loop may expand into. Nested loops multiply: three
+# 25-iteration loops around a 3-statement body is ~47k statements, and the
+# per-loop cap above never sees that because each individual loop is within it.
+_MAX_UNROLL_STATEMENTS = 500
 _MAX_CALL_DEPTH = 6  # cap on nested helper-function inlining
 
 
@@ -162,10 +168,31 @@ def _walk_stmt(stmt, symbols: dict, ctx: _Ctx, in_progress: frozenset) -> None:
         # `for x in os.popen("..."):` hides the dangerous call in the
         # iterable expression, not the loop body.
         _scan_calls(stmt.iter, symbols, ctx, in_progress)
-        # Reaches here only when _unroll_block couldn't unroll it (dynamic
-        # iterable) — best-effort single pass, loop var unresolved.
+        # Reaches here only when _unroll_block declined it: the iterable is not
+        # a literal sequence (nor a name bound to one), or it is longer than the
+        # unroll caps. The best-effort single pass below leaves the loop
+        # variable unresolved, so a parametrised PoC yields ONE request with
+        # `{var}` still in its URL instead of one per iteration.
+        before = len(ctx.result.requests)
         _walk_block(stmt.body, dict(symbols), ctx, in_progress)
         _walk_block(stmt.orelse, dict(symbols), ctx, in_progress)
+        if len(ctx.result.requests) > before:
+            # Only a loop that actually yielded a request is worth reporting:
+            # said of the `for k, v in d.items()` inside a PoC's own output
+            # formatter it is pure noise, and noise in `unsupported` is audited
+            # and read by a human exactly like a real gap. Said of a loop that
+            # did produce one, it is the difference between a plan that holds 1
+            # test and a loop that made 6 real requests being visible or
+            # passing for coverage.
+            note = (
+                f"for-loop at line {getattr(stmt, 'lineno', '?')} over "
+                f"`{_describe(stmt.iter)}` not unrolled (not a literal sequence, or over "
+                f"{_MAX_UNROLL} iterations) — one representative request was extracted, "
+                "not one per iteration")
+            # De-duplicated: a loop inside a helper is walked once per inlined
+            # call site, and the same sentence six times says nothing more.
+            if note not in ctx.result.unsupported:
+                ctx.result.unsupported.append(note)
     elif isinstance(stmt, (ast.With, ast.AsyncWith)):
         # `with os.popen("...") as f:` hides the dangerous call in the
         # context-manager expression, not the body.
@@ -418,39 +445,128 @@ class _NameSubstituter(ast.NodeTransformer):
         return node
 
 
-def _unroll_block(stmts: list) -> list:
+def _unroll_block(stmts: list, constants: dict | None = None) -> list:
+    """Unroll the loops in a block, tracking literal sequence constants.
+
+    `constants` accumulates in source order — a `HOSTS = [...]` seen earlier in
+    this block (or in an enclosing one) is what makes `for host in HOSTS:`
+    unrollable at all. A real PoC almost never inlines its list into the `for`
+    statement; it names it at the top of the file, so resolving a plain
+    `ast.Name` iterable is the difference between reading a 2x3 nested loop as
+    the six requests it actually made and collapsing it into one request whose
+    URL is still `{host}/...{tid}`. Source order matters: a name resolves only
+    for the loops that follow its assignment, never for one above it.
+    """
+    scope = dict(constants or {})
     out = []
     for stmt in stmts:
-        out.extend(_unroll_stmt(stmt))
+        out.extend(_unroll_stmt(stmt, scope))
+        _track_constants(stmt, scope)
     return out
 
 
-def _unroll_stmt(stmt) -> list:
+def _unroll_stmt(stmt, constants: dict | None = None) -> list:
+    constants = constants if constants is not None else {}
     for field_name in ("body", "orelse", "finalbody"):
         if hasattr(stmt, field_name):
-            setattr(stmt, field_name, _unroll_block(getattr(stmt, field_name)))
+            setattr(stmt, field_name, _unroll_block(getattr(stmt, field_name), constants))
     if hasattr(stmt, "handlers"):
         for handler in stmt.handlers:
-            handler.body = _unroll_block(handler.body)
+            handler.body = _unroll_block(handler.body, constants)
 
-    if (
-        isinstance(stmt, ast.For)
-        and isinstance(stmt.target, ast.Name)
-        and isinstance(stmt.iter, (ast.Tuple, ast.List))
-    ):
+    if not (isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name)):
+        return [stmt]
+    items = _literal_sequence(stmt.iter, constants)
+    if items is None or len(items) > _MAX_UNROLL:
+        return [stmt]
+    # Nested loops are already expanded inside `stmt.body` by the recursion
+    # above, so this product is the real statement count this loop would emit.
+    if len(items) * max(len(stmt.body), 1) > _MAX_UNROLL_STATEMENTS:
+        return [stmt]
+    unrolled = []
+    for item in items:
+        substituter = _NameSubstituter(stmt.target.id, item)
+        for body_stmt in stmt.body:
+            unrolled.append(substituter.visit(copy.deepcopy(body_stmt)))
+    return unrolled
+
+
+def _track_constants(stmt, scope: dict) -> None:
+    """Record `NAME = [literal, ...]`, and drop a name that stops being one.
+
+    Dropping matters as much as recording: a name reassigned to something
+    dynamic (`IDS = r.json()["ids"]`), augmented, or rebound as a loop target
+    must stop resolving to the literal it used to hold, or a later loop is
+    unrolled against a value the PoC no longer has.
+    """
+    if isinstance(stmt, ast.Assign):
+        for target in stmt.targets:
+            if isinstance(target, ast.Name):
+                _bind_constant(target.id, stmt.value, scope)
+            else:  # tuple unpacking, subscript, attribute — not tracked
+                for node in ast.walk(target):
+                    if isinstance(node, ast.Name):
+                        scope.pop(node.id, None)
+    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        if stmt.value is None:
+            scope.pop(stmt.target.id, None)
+        else:
+            _bind_constant(stmt.target.id, stmt.value, scope)
+    elif isinstance(stmt, ast.AugAssign):
+        # `HOSTS += [...]`: the value is no longer what we recorded, and
+        # guessing the concatenation is not worth unrolling against a wrong
+        # list.
+        for node in ast.walk(stmt.target):
+            if isinstance(node, ast.Name):
+                scope.pop(node.id, None)
+    elif isinstance(stmt, ast.For):
+        # A loop variable shadows an outer constant of the same name. The
+        # loop's own body was already substituted with its real per-iteration
+        # value, so what leaks past the loop must not resolve to the constant.
+        for node in ast.walk(stmt.target):
+            if isinstance(node, ast.Name):
+                scope.pop(node.id, None)
+
+
+def _bind_constant(name: str, value_node, scope: dict) -> None:
+    sequence = _literal_sequence(value_node, scope)
+    if sequence is None:
+        scope.pop(name, None)
+    else:
+        scope[name] = sequence
+
+
+def _literal_sequence(node, constants: dict) -> tuple | None:
+    """The literal sequence `node` denotes, or None when it is not one.
+
+    Covers the three shapes a PoC's loop actually iterates: an inline
+    list/tuple, a name bound to one earlier (`TENANT_IDS`), and `range(...)`
+    over literal bounds. Anything else — a call, a comprehension, a field of a
+    live response — stays None, and the loop is left un-unrolled rather than
+    unrolled against a guess.
+    """
+    if isinstance(node, (ast.List, ast.Tuple)):
         try:
-            items = ast.literal_eval(stmt.iter)
+            return tuple(ast.literal_eval(node))
         except (ValueError, SyntaxError, TypeError):
-            return [stmt]
-        if len(items) > _MAX_UNROLL:
-            return [stmt]
-        unrolled = []
-        for item in items:
-            substituter = _NameSubstituter(stmt.target.id, item)
-            for body_stmt in stmt.body:
-                unrolled.append(substituter.visit(copy.deepcopy(body_stmt)))
-        return unrolled
-    return [stmt]
+            return None
+    if isinstance(node, ast.Name):
+        found = constants.get(node.id)
+        return tuple(found) if found is not None else None
+    if isinstance(node, ast.Call) and _call_name(node.func) == "range" and not node.keywords:
+        bounds = []
+        for arg in node.args:
+            try:
+                value = ast.literal_eval(arg)
+            except (ValueError, SyntaxError, TypeError):
+                return None
+            if isinstance(value, bool) or not isinstance(value, int):
+                return None
+            bounds.append(value)
+        if not 1 <= len(bounds) <= 3 or (len(bounds) == 3 and bounds[2] == 0):
+            return None
+        return tuple(range(*bounds))
+    return None
 
 
 def _call_name(func) -> str:
@@ -652,6 +768,17 @@ def _literal(node, symbols: dict | None = None):
     return _UNRESOLVED
 
 
+def _describe(node) -> str:
+    """Short source text for a node, for a message a human reads. `ast.unparse`
+    can be arbitrarily long (a nested comprehension), so it is truncated."""
+    try:
+        text = ast.unparse(node)
+    except Exception:  # noqa: BLE001 - a message must never break a transpile
+        return "?"
+    text = " ".join(text.split())
+    return text if len(text) <= 60 else f"{text[:57]}..."
+
+
 def _fmt_name(node) -> str:
     if isinstance(node, ast.Name):
         return node.id
@@ -707,6 +834,51 @@ def transpile_curl(command: str) -> TranspileResult:
 
 # -- PoC → TestCase ----------------------------------------------------------
 
+# A `{name}` left in an extracted path: a value the PoC held that could not be
+# read statically (a loop this module declined to unroll, a response field).
+_PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
+
+
+def _request_key(req: ExtractedRequest) -> str:
+    """Identity of a request *as the runner will send it* — i.e. everything
+    except the host, which `to_test_cases` strips. Header names are compared
+    case-insensitively because HTTP treats them that way."""
+    headers = sorted((k.lower(), v) for k, v in req.headers.items() if k.lower() != "host")
+    try:
+        body = json.dumps(req.body, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        body = repr(req.body)
+    return json.dumps([req.method.upper(), _relative(req.path), headers, body], default=repr)
+
+
+def _group_host_duplicates(
+    requests: list[ExtractedRequest],
+) -> list[tuple[ExtractedRequest, list[str]]]:
+    """Collapse requests that differ only by host, keeping the hosts covered.
+
+    `to_test_cases` strips the host (the runner supplies the approved base
+    URL), so a PoC that loops one probe over several deployments — the normal
+    shape for a finding re-confirmed on every live site — otherwise yields N
+    byte-identical test cases whose only difference was the part that got
+    stripped. The hosts are not thrown away: they are returned so the test's
+    objective can name them.
+
+    Two identical requests to the *same* host are deliberately kept as two:
+    that is a replay (a race, an idempotency or rate-limit check), not a
+    duplicate.
+    """
+    grouped: list[tuple[ExtractedRequest, list[str]]] = []
+    first_seen: dict[str, int] = {}
+    for req in requests:
+        key = _request_key(req)
+        position = first_seen.get(key)
+        if position is None or req.host in grouped[position][1]:
+            first_seen.setdefault(key, len(grouped))
+            grouped.append((req, [req.host] if req.host else []))
+        else:
+            grouped[position][1].append(req.host)
+    return grouped
+
 
 def to_test_cases(
     result: TranspileResult,
@@ -714,6 +886,8 @@ def to_test_cases(
     attacker: str = "agent_A",
     victim: str = "agent_B",
     verbatim: bool = False,
+    source_ref: str = "",
+    counters: dict[str, int] | None = None,
 ) -> list[TestCase]:
     """Wrap extracted requests as PoC-sourced test cases (PENDING approval).
 
@@ -739,12 +913,19 @@ def to_test_cases(
     A ticket's embedded PoC is already a complete, working exploit; the point
     is to reproduce exactly what it proved, not attack it a second time with a
     generic mutation guessed from its shape.
+
+    `source_ref` names the artefact these requests came out of and lands on every
+    test (`TestCase.source_ref`). `counters` is the per-category id sequence; pass
+    the same dict across several calls — one per PoC file in a multi-script
+    ticket — so the ids keep counting instead of every file restarting at
+    `POC-API1-001` and colliding. Two rows sharing a `test_id` is not cosmetic:
+    approval, edit and re-run all look a test up by id with `.one_or_none()`.
     """
     from app.poc.classify import classify
 
     tests: list[TestCase] = []
-    counters: dict[str, int] = {}
-    for req in result.requests:
+    counters = counters if counters is not None else {}
+    for req, hosts in _group_host_duplicates(result.requests):
         path = _relative(req.path)
         headers = {k: v for k, v in req.headers.items() if k.lower() != "host"}
         verdict = classify(req.method, path, headers, req.body)
@@ -758,10 +939,35 @@ def to_test_cases(
         # placeholder back, since no mutation runs to fill it in.
         effective_path = path if verbatim else (verdict.parameterised_path or path)
 
+        origin = f" from {source_ref}" if source_ref else ""
         objective = (
-            f"Replay of an existing PoC as a controlled, scoped test. Classified as "
-            f"{cat_num} ({verdict.confidence} confidence) because {verdict.reason}."
+            f"Replay of an existing PoC{origin} as a controlled, scoped test. Classified "
+            f"as {cat_num} ({verdict.confidence} confidence) because {verdict.reason}."
         )
+        if len(hosts) > 1:
+            objective += (
+                f" The PoC sent this same request to {len(hosts)} hosts "
+                f"({', '.join(hosts)}); the runner targets the one approved base URL, so it "
+                "is planned once rather than as identical copies."
+            )
+        # A `{name}` the PoC's own source could not resolve is not a template
+        # anything downstream fills in: `resolve()` leaves an unknown
+        # placeholder untouched, so the request would be sent with the literal
+        # braces in its path, collect a 404 and be adjudicated as "not
+        # reproduced" — a false negative that looks like a clean run. Name it
+        # on the test and in `unsupported` (which the caller audits) so it is
+        # fixed at review time instead of discovered as a mystery pass.
+        leftover = sorted(set(_PATH_PLACEHOLDER_RE.findall(path)))
+        if leftover:
+            names = ", ".join("{" + name + "}" for name in leftover)
+            result.unsupported.append(
+                f"{req.method} {path}: unresolved placeholder(s) {names} in the path — the "
+                "PoC's value for them could not be read statically, so this test cannot "
+                "reproduce the finding until a reviewer substitutes the real value")
+            objective += (
+                f" Review before approving: the path still contains {names}, which nothing "
+                "in this plan resolves — edit it to the concrete value the PoC used."
+            )
         if verbatim:
             objective += " Sent exactly as extracted — no mutation applied."
         elif verdict.confidence == "LOW":
@@ -802,6 +1008,7 @@ def to_test_cases(
                 # which identity recorded it, so we cannot assert who is
                 # entitled to it. The tester adds a baseline when approving.
                 source=TestSource.POC,
+                source_ref=source_ref,
                 approval_status=ApprovalStatus.PENDING,
                 # Classified by method, same rule test_designer/attack_planner
                 # use — never by whether this particular id looks safe. A PoC

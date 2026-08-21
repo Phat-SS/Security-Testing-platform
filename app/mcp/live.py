@@ -24,11 +24,15 @@ land in engagement.json or a report.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 
 from app.mcp.jira import NormalizedIssue
 from app.mcp.normalize import normalize_issue
+
+logger = logging.getLogger(__name__)
 
 
 class LiveJiraMCPClient:
@@ -48,6 +52,8 @@ class LiveJiraMCPClient:
         self._session = None
         self._ctx = None
         self._http_client = None  # only set on SDK 2.x, where we own the client
+        self._runner = None  # task that owns the transport for its whole life
+        self._stop = None  # set to ask that task to shut the transport down
 
     @staticmethod
     def is_configured() -> bool:
@@ -89,20 +95,118 @@ class LiveJiraMCPClient:
                 f"streamable-HTTP client factory this connector understands"
             )
 
+        # The transport is entered, held and exited inside one dedicated task,
+        # never by the caller. anyio binds a cancel scope to the task that
+        # entered it, and the SDK's streamable-HTTP client and ClientSession are
+        # both built on one; enter them in a task that then ends — a request
+        # handler — and anyio raises "Attempted to exit a cancel scope that
+        # isn't the current task's" as that task unwinds, failing the request
+        # even though the handshake itself succeeded. That is what made
+        # Reconnect / Refresh token answer 500 while the boot-time connection
+        # (whose task, the ASGI lifespan, happens to live as long as the app)
+        # worked fine. Owning the connection in its own task makes both paths
+        # the same, and makes close() the only way it ever comes down.
+        self._stop = asyncio.Event()
+        ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._runner = asyncio.create_task(
+            self._serve(ClientSession, ready), name=f"jira-mcp:{self._url}"
+        )
+        try:
+            await ready
+        except BaseException as exc:
+            await self.close()  # reap the runner before reporting the failure
+            if isinstance(exc, Exception):
+                raise await self._explain(exc) from exc
+            raise  # cancellation / KeyboardInterrupt is not ours to reinterpret
+
+    async def _serve(self, ClientSession, ready: asyncio.Future) -> None:
+        """Hold the transport open until close() asks for it back.
+
+        Resolves `ready` as soon as the handshake lands, so connect() reports a
+        rejected token as its own error rather than leaving a task to fail in
+        the background.
+        """
         try:
             # 1.x yielded (read, write, get_session_id); 2.x yields (read, write).
-            streams = await self._ctx.__aenter__()
-            self._session = ClientSession(streams[0], streams[1])
-            await self._session.__aenter__()
-            await self._session.initialize()
+            async with self._ctx as streams:
+                async with ClientSession(streams[0], streams[1]) as session:
+                    await session.initialize()
+                    self._session = session
+                    ready.set_result(None)
+                    await self._stop.wait()
         except BaseException as exc:
-            # A half-open transport must be unwound here, in the task that opened
-            # it. Left to the garbage collector it is resumed from a different
-            # task and anyio raises "Attempted to exit cancel scope in a
-            # different task", which surfaces at app shutdown and buries the real
-            # cause (usually a rejected token).
-            await self._unwind(exc)
-            raise
+            # Before the handshake: connect()'s error to raise. After it: the
+            # connection dropped under us and nobody is waiting on `ready` to be
+            # told, so log it — otherwise the only trace is the "Not connected"
+            # error the next call happens to raise.
+            if not ready.done():
+                ready.set_exception(exc)
+            else:
+                logger.debug("live Jira MCP transport ended: %r", exc)
+        finally:
+            self._session = None
+            if self._http_client is not None:
+                # We built it, so we close it — the transport only owns the
+                # client it creates itself.
+                try:
+                    await self._http_client.aclose()
+                except BaseException:
+                    pass
+                self._http_client = None
+            if not ready.done():  # `async with` returned without initialize()
+                ready.set_exception(RuntimeError("Jira MCP transport closed during connect"))
+
+    async def _explain(self, exc: Exception) -> Exception:
+        """Re-raise a failed handshake with the HTTP status attached.
+
+        The SDK turns every non-2xx except 404 into the JSON-RPC stand-in
+        "Server returned an error response" — the status code, the only part an
+        operator can act on, never reaches us. An expired token and an
+        unreachable server therefore read identically, and the banner sends
+        people to press "Refresh token" over and over for what may not be a
+        token problem at all. One extra request on the failure path buys the
+        real answer.
+        """
+        status = await self._probe_status()
+        if status is None:
+            return exc
+        hint = {
+            401: "JIRA_MCP_TOKEN is expired or rejected — Atlassian's MCP tokens "
+                 "last about an hour; press \"Refresh token\" on Config → MCP",
+            403: "the token authenticates but is not allowed here — check its "
+                 "scopes (read:jira-work / write:jira-work) and site access",
+            404: f"no MCP endpoint at {self._url} — check JIRA_MCP_URL",
+        }.get(status, "see the server's response for details")
+        return RuntimeError(f"Jira MCP handshake failed: HTTP {status} — {hint}")
+
+    async def _probe_status(self) -> int | None:
+        """HTTP status the MCP endpoint answers an `initialize` with, or None if
+        the probe itself could not get an answer (in which case the original
+        error is already the better description)."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                response = await client.post(
+                    self._url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "sectest-probe", "version": "0"},
+                        },
+                    },
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        **self._headers,
+                    },
+                )
+        except Exception:
+            return None
+        return response.status_code if response.status_code >= 400 else None
 
     async def test_connection(self) -> bool:
         if not self._session:
@@ -123,7 +227,13 @@ class LiveJiraMCPClient:
                 f"Unknown issue {issue_key}: Jira MCP returned no issue "
                 f"(check the key, the cloud id, and the token's project access)"
             )
-        return normalize_issue(raw)
+        issue = normalize_issue(raw)
+        if issue.attachments:
+            issue.attachments_complete = False
+            issue.completeness_warnings.append(
+                "The Jira MCP connector listed attachments but cannot download their content."
+            )
+        return issue
 
     async def list_project_issues(self, project_key: str) -> list[NormalizedIssue]:
         raw = await self._call_tool(
@@ -148,31 +258,25 @@ class LiveJiraMCPClient:
     def browse_url(self, issue_key: str) -> str | None:
         return f"{self._site_url}/browse/{issue_key}" if self._site_url else None
 
-    async def close(self) -> None:  # pragma: no cover - live only
-        await self._unwind(None)
+    async def close(self) -> None:
+        """Ask the runner task to unwind, and wait for it.
 
-    async def _unwind(self, exc: BaseException | None) -> None:
-        """Tear down session → transport → http client, innermost first.
-
-        Best-effort: a teardown error must never replace the error that caused
-        the teardown. Passing `exc` on lets the transport's task group cancel as
-        if the failure had propagated through the `async with` normally.
+        Safe to call from any task and more than once — the teardown itself
+        happens inside _serve, in the task that opened the transport, which is
+        the only place anyio permits it.
         """
-        info = (type(exc), exc, exc.__traceback__) if exc else (None, None, None)
-        for ctx in (self._session, self._ctx):
-            if ctx is not None:
-                try:
-                    await ctx.__aexit__(*info)
-                except BaseException:
-                    pass
-        if self._http_client is not None:
-            # We built it, so we close it — the transport only owns the client it
-            # creates itself.
+        runner, self._runner = self._runner, None
+        if self._stop is not None:
+            self._stop.set()
+        if runner is not None and not runner.done():
             try:
-                await self._http_client.aclose()
+                await asyncio.wait_for(asyncio.shield(runner), timeout=10)
+            except TimeoutError:
+                # A wedged transport must not hold up a shutdown or a reconnect.
+                runner.cancel()
             except BaseException:
-                pass
-        self._session = self._ctx = self._http_client = None
+                pass  # _serve already reported anything worth reporting
+        self._session = self._ctx = self._stop = None
 
     # -- internals ----------------------------------------------------------
 

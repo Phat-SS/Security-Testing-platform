@@ -31,7 +31,20 @@ def adf_to_text(node) -> str:
         return "\n"
     if node_type == "mention":
         return "@" + node.get("attrs", {}).get("text", "user")
-    if node_type in ("codeBlock", "code"):
+    if node_type == "codeBlock":
+        # Rendered as a real fenced block, with its language, rather than as bare
+        # text. Jira Cloud's native code block carries no backticks anywhere in
+        # it, so flattening it to plain text made every PoC filed through the
+        # Jira editor invisible to `app/poc/jira_extract.py`, which scans for
+        # fenced blocks. The fence is the only thing that marks where the code
+        # starts and stops once the tree is a string.
+        language = (node.get("attrs") or {}).get("language") or ""
+        code = adf_to_text(node.get("content", []))
+        fence = "```"
+        return f"\n{fence}{language}\n{code}\n{fence}\n"
+    if node_type == "code":
+        # An inline code *mark*, not a block: no fence, or every inline mention
+        # of a field name would read as a code block to the scanner.
         return adf_to_text(node.get("content", []))
 
     children = adf_to_text(node.get("content", []))

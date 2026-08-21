@@ -17,6 +17,8 @@ architecture is legible end to end.
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from typing import Protocol
@@ -28,9 +30,21 @@ from app.mcp.jira import NormalizedIssue
 from app.owasp.rules import RequirementSignals, evaluate
 from app.schemas.analysis import Endpoint, IssueAnalysis, OwaspMapping
 
+logger = logging.getLogger(__name__)
+
 
 class LLMClient(Protocol):
     def complete(self, system: str, user: str) -> str: ...
+
+
+def structured_completion(
+    llm: LLMClient, system: str, user: str, schema: type[BaseModel], prompt_version: str
+) -> str:
+    """Use CLI-enforced structure when supported, preserving injectable fakes."""
+    method = getattr(llm, "complete_with_schema", None)
+    if callable(method):
+        return method(system, user, schema.model_json_schema(), prompt_version)
+    return llm.complete(system, user)
 
 
 @dataclass(frozen=True)
@@ -109,15 +123,22 @@ class StagedAnalyzer:
             sensitive_operation=extraction.sensitive_operation,
             endpoints=extraction.endpoints,
             owasp_mappings=mappings,
+            ai_metadata=dict(getattr(self._llm, "last_call_metadata", {}) or {}),
         )
 
     def _extract(self, issue: NormalizedIssue) -> ExtractionResult:
         user = (
             f"Ticket {issue.issue_key}\nSummary: {issue.summary}\n"
             f"Description:\n{issue.description}\n"
-            f"Acceptance criteria: {issue.acceptance_criteria}"
+            f"Acceptance criteria: {issue.acceptance_criteria}\n"
+            f"Comments: {issue.comments}\n"
+            f"Environment: {issue.environment}\n"
+            f"Labels/components: {issue.labels} / {issue.components}\n"
+            f"Linked issues: {issue.links}"
         )
-        raw = self._llm.complete(_EXTRACTION_SYSTEM, user)
+        raw = structured_completion(
+            self._llm, _EXTRACTION_SYSTEM, user, ExtractionResult, "extraction.v1"
+        )
         payload = raw[raw.find("{"): raw.rfind("}") + 1]
         return ExtractionResult.model_validate_json(payload)
 
@@ -164,8 +185,17 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
     def __init__(self, model: str | None = None, cli_path: str | None = None,
                  timeout: float = 90.0) -> None:
         self._model = model or os.environ.get("ANTHROPIC_MODEL") or None
+        if (os.getenv("AI_REQUIRE_PINNED_MODEL", "false").lower() == "true"
+                and (not self._model or not any(ch.isdigit() for ch in self._model))):
+            raise RuntimeError(
+                "AI_REQUIRE_PINNED_MODEL=true requires ANTHROPIC_MODEL to be a full "
+                "versioned model id, not a moving alias"
+            )
         self._cli = cli_path or os.environ.get("CLAUDE_CLI_PATH", "claude")
         self._timeout = timeout
+        self._max_budget_usd = os.getenv("AI_MAX_BUDGET_USD", "").strip()
+        self._effort = os.getenv("AI_EFFORT", "").strip()
+        self.last_call_metadata: dict[str, object] = {}
 
     @staticmethod
     def is_available(cli_path: str | None = None) -> bool:
@@ -175,6 +205,15 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
         return shutil.which(cli) is not None
 
     def complete(self, system: str, user: str) -> str:
+        return self.complete_with_schema(system, user, None, "unversioned")
+
+    def complete_with_schema(
+        self,
+        system: str,
+        user: str,
+        json_schema: dict | None,
+        prompt_version: str,
+    ) -> str:
         import shutil
         import subprocess
         import tempfile
@@ -190,6 +229,12 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
         ]
         if self._model:
             cmd += ["--model", self._model]
+        if self._max_budget_usd:
+            cmd += ["--max-budget-usd", self._max_budget_usd]
+        if self._effort:
+            cmd += ["--effort", self._effort]
+        if json_schema is not None:
+            cmd += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
         try:
             proc = subprocess.run(
                 cmd, input=user, capture_output=True, text=True,
@@ -217,4 +262,23 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
 
         if proc.returncode != 0 or payload.get("is_error"):
             raise RuntimeError(f"claude CLI error: {payload.get('result') or proc.stderr[:500]}")
-        return payload.get("result", "")
+        self.last_call_metadata = {
+            "model_id": payload.get("model") or self._model or "cli-default-unpinned",
+            "model_pinned": bool(self._model),
+            "prompt_version": prompt_version,
+            "prompt_hash": hashlib.sha256(
+                (system + "\n" + user).encode("utf-8")
+            ).hexdigest(),
+            "duration_ms": payload.get("duration_ms"),
+            "duration_api_ms": payload.get("duration_api_ms"),
+            "total_cost_usd": payload.get("total_cost_usd"),
+            "num_turns": payload.get("num_turns"),
+        }
+        logger.info(
+            "claude completion model=%s pinned=%s prompt=%s hash=%s duration_ms=%s cost_usd=%s",
+            self.last_call_metadata["model_id"], self.last_call_metadata["model_pinned"],
+            prompt_version, self.last_call_metadata["prompt_hash"],
+            self.last_call_metadata["duration_ms"], self.last_call_metadata["total_cost_usd"],
+        )
+        result = payload.get("structured_output", payload.get("result", ""))
+        return json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)

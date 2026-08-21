@@ -8,6 +8,8 @@ execution engine.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from .enums import (
@@ -101,9 +103,26 @@ class VerificationStep(BaseModel):
     # If any of these strings appears in the verification response body, the
     # attack's effect persisted → confirmed exploit (not merely 'accepted').
     proves_exploit_if_contains: list[TemplateStr] = Field(default_factory=list)
+    proves_exploit_when: list["InvariantAssertion"] = Field(default_factory=list)
     description: str = ""
 
     model_config = {"populate_by_name": True}
+
+
+class InvariantAssertion(BaseModel):
+    """A machine-checkable post-attack state invariant."""
+
+    json_path: str
+    operator: Literal["equals", "not_equals", "gt", "gte", "lt", "lte", "contains"]
+    expected: str | int | float | bool
+    description: str = ""
+
+
+class OastExpectation(BaseModel):
+    """Out-of-band callback expected only if the target performed the fetch."""
+
+    purpose: Literal["ssrf", "redirect", "generic"] = "ssrf"
+    description: str = ""
 
 
 class BaselineSpec(BaseModel):
@@ -185,6 +204,7 @@ class TestCase(BaseModel):
     # Read-back, run AFTER the attack. Turns "the server accepted it" into
     # "the server persisted it" — the difference between a lead and a finding.
     verification: VerificationStep | None = None
+    oast: OastExpectation | None = None
     expected: ExpectedResult
     evidence_required: list[str] = Field(default_factory=list)
 
@@ -196,6 +216,13 @@ class TestCase(BaseModel):
     )
     execution_type: ExecutionType = ExecutionType.HTTP
     source: TestSource = TestSource.AI
+    # Which artefact this test came out of, when it came out of one:
+    # "PoC 02_change_ownership.py (comment #2)", "Burp export", a Postman folder.
+    # `source` says what KIND of thing proposed the test; this says WHICH one. A
+    # ticket with two PoC scripts produces two groups of tests, and "which script
+    # is this test replaying" is the first thing a reviewer asks of that plan —
+    # a question a merged blob leaves them guessing at.
+    source_ref: str = ""
 
     # Lifecycle. Execution is prohibited unless approval_status == APPROVED.
     approval_status: ApprovalStatus = ApprovalStatus.PENDING

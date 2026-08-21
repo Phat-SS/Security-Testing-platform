@@ -40,6 +40,7 @@ from app.schemas.testcase import (
     AuthContext,
     BaselineSpec,
     ExpectedResult,
+    OastExpectation,
     Mutation,
     RequestSpec,
     TestCase,
@@ -499,6 +500,10 @@ class TestDesigner:
                 mutation=Mutation(kind="ssrf_url",
                                   detail={"field": field,
                                           "value": "http://169.254.169.254/latest/meta-data/"}),
+                oast=OastExpectation(
+                    purpose="ssrf",
+                    description="A callback proves the target server resolved and fetched the URL.",
+                ),
                 expected=ExpectedResult(status_in=[400, 403, 422]),
             )
         ]
@@ -511,6 +516,7 @@ class TestDesigner:
                       "string-matching known-bad spellings.",
             auth=AuthContext(persona=self._attacker),
             mutation=Mutation(kind="ssrf_url_bypass", detail={"field": field}),
+            oast=OastExpectation(purpose="ssrf"),
             expected=ExpectedResult(status_in=[400, 403, 422]),
         ))
         return tests
@@ -618,6 +624,10 @@ class TestDesigner:
                 auth=AuthContext(persona=self._attacker),
                 mutation=Mutation(kind="unsafe_redirect_url",
                                   detail={"field": ep.url_fields[0]}),
+                oast=OastExpectation(
+                    purpose="redirect",
+                    description="A callback proves the upstream redirect was followed server-side.",
+                ),
                 expected=ExpectedResult(status_in=[400, 403, 422]),
             )
         ]
@@ -626,7 +636,7 @@ class TestDesigner:
 
     def _mk(self, category, counters, severity, ep, *, title, objective, auth,
             mutation, expected, destructive=False, baseline=None,
-            verification=None) -> TestCase:
+            verification=None, oast=None) -> TestCase:
         counters[category] = counters.get(category, 0) + 1
         num = counters[category]
         cat_num = category.value.split(":")[0]  # "API1"
@@ -644,6 +654,7 @@ class TestDesigner:
             request=RequestSpec(method=ep.method, path=ep.path),
             attack_mutation=mutation,
             verification=verification,
+            oast=oast,
             expected=expected,
             evidence_required=["request", "response"],
             is_destructive=destructive,

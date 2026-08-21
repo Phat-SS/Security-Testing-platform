@@ -311,3 +311,231 @@ send("/b")
     result = transpile_python(poc)
     paths = {r.path for r in result.requests}
     assert paths == {"/a", "/b"}
+
+
+# -- for-loop unrolling ------------------------------------------------------
+# A PoC names its lists at the top of the file and loops over the names; it
+# almost never inlines the list into the `for` statement. Reading `for host in
+# HOSTS:` as one unresolved request instead of one per host is what turned a
+# ticket's 2x3 nested loop (BH-349) into a single test whose path was still
+# `/{host}/...{tid}` — a request that 404s and is then adjudicated as "not
+# reproduced".
+
+BH349_SHAPED_POC = '''
+import requests
+
+UA = {"User-Agent": "tin-ss"}
+HOSTS = ["https://crm-api.example.sg", "https://crm-api.example.id"]
+TENANT_IDS = [11, 33, 74]
+
+for host in HOSTS:
+    for tid in TENANT_IDS:
+        r = requests.get(f"{host}/core/common/detail-tenant/{tid}",
+                         headers=UA, timeout=30, verify=False)
+        print(r.status_code)
+'''
+
+
+def test_nested_loops_over_named_constants_unroll_to_the_cross_product():
+    result = transpile_python(BH349_SHAPED_POC)
+    assert [r.url for r in result.requests] == [
+        "https://crm-api.example.sg/core/common/detail-tenant/11",
+        "https://crm-api.example.sg/core/common/detail-tenant/33",
+        "https://crm-api.example.sg/core/common/detail-tenant/74",
+        "https://crm-api.example.id/core/common/detail-tenant/11",
+        "https://crm-api.example.id/core/common/detail-tenant/33",
+        "https://crm-api.example.id/core/common/detail-tenant/74",
+    ]
+    # Every URL fully resolved, so nothing to report.
+    assert result.unsupported == []
+
+
+def test_loop_over_a_named_constant_tuple_is_unrolled():
+    poc = '''
+import requests
+
+IDS = (2001, 2002)
+for cid in IDS:
+    requests.get(f"https://api-staging.company.com/customers/{cid}")
+'''
+    result = transpile_python(poc)
+    assert [r.path for r in result.requests] == ["/customers/2001", "/customers/2002"]
+
+
+def test_range_loop_is_unrolled():
+    poc = '''
+import requests
+
+for page in range(1, 4):
+    requests.get(f"https://api-staging.company.com/orders?page={page}")
+'''
+    result = transpile_python(poc)
+    assert [r.path for r in result.requests] == [
+        "/orders?page=1", "/orders?page=2", "/orders?page=3"]
+
+
+def test_loop_over_a_constant_reassigned_to_a_dynamic_value_is_not_unrolled():
+    """The stale literal must not win: the PoC no longer holds it."""
+    poc = '''
+import requests
+
+IDS = [11, 33]
+IDS = requests.get("https://api-staging.company.com/ids").json()["ids"]
+for cid in IDS:
+    requests.get(f"https://api-staging.company.com/customers/{cid}")
+'''
+    result = transpile_python(poc)
+    paths = [r.path for r in result.requests]
+    assert paths == ["/ids", "/customers/{cid}"]
+    assert not any(p in ("/customers/11", "/customers/33") for p in paths)
+
+
+def test_loop_over_a_constant_assigned_only_below_it_is_not_unrolled():
+    """Source order, like the interpreter's: a name defined after the loop was
+    not bound when the loop ran, so unrolling against it would be fiction."""
+    poc = '''
+import requests
+
+for cid in IDS:
+    requests.get(f"https://api-staging.company.com/customers/{cid}")
+
+IDS = [11, 33]
+'''
+    result = transpile_python(poc)
+    assert [r.path for r in result.requests] == ["/customers/{cid}"]
+
+
+def test_a_loop_the_transpiler_could_not_unroll_is_reported():
+    poc = '''
+import requests
+
+hosts = requests.get("https://api-staging.company.com/hosts").json()["hosts"]
+for host in hosts:
+    requests.get(f"{host}/customers/2002")
+'''
+    result = transpile_python(poc)
+    assert len(result.requests) == 2  # the /hosts read, plus one representative probe
+    assert any("not unrolled" in note for note in result.unsupported)
+
+
+def test_a_loop_making_no_request_is_not_reported_as_unsupported():
+    """A PoC's own output formatter loops over a dict. Reporting that as a lost
+    request is noise, and `unsupported` is audited and read by a human."""
+    poc = '''
+import requests
+
+def summarise(d):
+    out = {}
+    for k, v in d.items():
+        out[k] = v
+    return out
+
+r = requests.get("https://api-staging.company.com/customers/2002")
+summarise(r.json())
+'''
+    result = transpile_python(poc)
+    assert len(result.requests) == 1
+    assert result.unsupported == []
+
+
+def test_a_loop_past_the_iteration_cap_is_not_unrolled():
+    poc = '''
+import requests
+
+for cid in range(200):
+    requests.get(f"https://api-staging.company.com/customers/{cid}")
+'''
+    result = transpile_python(poc)
+    assert [r.path for r in result.requests] == ["/customers/{cid}"]
+    assert any("not unrolled" in note for note in result.unsupported)
+
+
+def test_nested_loops_past_the_statement_cap_stop_expanding():
+    """Nested loops multiply. Each loop here is within the per-loop cap, so
+    only the statement cap keeps a 25x25 PoC from planning 625 tests."""
+    poc = '''
+import requests
+
+for i in range(25):
+    for j in range(25):
+        requests.get(f"https://api-staging.company.com/x/{i}/{j}")
+'''
+    result = transpile_python(poc)
+    # Inner unrolled, outer refused: 25 requests with `{i}` still unresolved.
+    assert len(result.requests) == 25
+    assert all("{i}" in r.url for r in result.requests)
+    assert any("not unrolled" in note for note in result.unsupported)
+
+
+# -- host-only duplicates ----------------------------------------------------
+
+
+def test_requests_differing_only_by_host_collapse_into_one_test_case():
+    """The host is stripped (the runner supplies the approved base URL), so the
+    same probe against two deployments is two byte-identical tests whose only
+    difference was the part that got stripped."""
+    result = transpile_python(BH349_SHAPED_POC)
+    tests = to_test_cases(result, verbatim=True, source_ref="PoC 01.py")
+    assert [t.request.path for t in tests] == [
+        "/core/common/detail-tenant/11",
+        "/core/common/detail-tenant/33",
+        "/core/common/detail-tenant/74",
+    ]
+    # The hosts are named rather than thrown away.
+    assert "2 hosts" in tests[0].objective
+    assert "crm-api.example.sg" in tests[0].objective
+    assert "crm-api.example.id" in tests[0].objective
+    # Ids stay dense, so nothing looks like a missing test.
+    assert [t.test_id for t in tests] == ["POC-API1-001", "POC-API1-002", "POC-API1-003"]
+
+
+def test_the_same_request_twice_against_one_host_is_kept_as_two_tests():
+    """A repeat against the same host is a replay — a race, an idempotency or
+    rate-limit check — not a host-stripping duplicate."""
+    poc = '''
+import requests
+
+requests.post("https://api-staging.company.com/orders/9/refund")
+requests.post("https://api-staging.company.com/orders/9/refund")
+'''
+    result = transpile_python(poc)
+    tests = to_test_cases(result, verbatim=True)
+    assert [t.request.path for t in tests] == ["/orders/9/refund", "/orders/9/refund"]
+
+
+# -- unresolved placeholders -------------------------------------------------
+
+
+def test_an_unresolved_path_placeholder_is_flagged_on_the_test_and_reported():
+    """`resolve()` leaves an unknown placeholder untouched, so such a test is
+    sent with literal braces in its path, 404s, and is adjudicated as "not
+    reproduced" — a false negative that reads like a clean run."""
+    poc = '''
+import requests
+
+hosts = requests.get("https://api-staging.company.com/hosts").json()["hosts"]
+for host in hosts:
+    requests.get(f"{host}/core/common/detail-tenant/11")
+'''
+    result = transpile_python(poc)
+    tests = to_test_cases(result, verbatim=True, source_ref="PoC x.py")
+    flagged = [t for t in tests if "{host}" in t.request.path]
+    assert len(flagged) == 1
+    assert "{host}" in flagged[0].objective
+    assert "Review before approving" in flagged[0].objective
+    assert any("unresolved placeholder" in note for note in result.unsupported)
+
+
+def test_a_parameterised_path_is_not_mistaken_for_an_unresolved_placeholder():
+    """Non-verbatim mode deliberately parameterises a path to `{victim_id}`,
+    which the BOLA mutation then fills in. That is not an unresolved value."""
+    poc = '''
+import requests
+
+requests.get("https://api-staging.company.com/customers/2002")
+'''
+    result = transpile_python(poc)
+    tests = to_test_cases(result)
+    assert "{" in tests[0].request.path  # parameterised by classify()
+    assert not any("unresolved placeholder" in note for note in result.unsupported)
+    assert "Review before approving" not in tests[0].objective

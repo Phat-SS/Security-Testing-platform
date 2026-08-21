@@ -64,6 +64,60 @@ def _evidence_chain_banner(chain_ok: bool | None, lang: str) -> str:
     )
 
 
+def _report_quality_banner(verification, lang: str) -> str:
+    if verification is None:
+        return ""
+    if verification.ok:
+        return (
+            '<p style="margin:0 0 18px"><span style="color:#2f855a;font-weight:600">'
+            f'&#10003; {_e("Report claims verified")}</span> — '
+            f'{verification.checked_findings} finding(s), '
+            f'{verification.checked_references} evidence reference(s).</p>'
+        )
+    errors = sum(1 for issue in verification.issues if issue.severity == "error")
+    return (
+        '<p style="margin:0 0 18px;padding:10px 14px;border:1px solid #b4232a;'
+        'border-radius:8px;background:rgba(180,35,42,.08)"><span style="color:#b4232a;'
+        f'font-weight:700">&#9888; {_e("Report quality verification failed")}</span> — '
+        f'{errors} blocking issue(s). Treat finding narratives as non-authoritative '
+        'until the evidence references are corrected.</p>'
+    )
+
+
+def _input_snapshot_banner(snapshot: dict | None) -> str:
+    if not snapshot:
+        return ""
+    digest = str(snapshot.get("snapshot_hash", ""))[:12]
+    if snapshot.get("complete", False):
+        return (
+            '<p class="muted" style="margin:0 0 18px">Jira input snapshot '
+            f'<code>{_e(digest)}</code> is marked complete.</p>'
+        )
+    warnings = snapshot.get("warnings") or ["Jira input was incomplete."]
+    items = "".join(f"<li>{_e(item)}</li>" for item in warnings)
+    return (
+        '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #b8860b;'
+        'border-radius:8px;background:rgba(184,134,11,.08)"><b>Jira input incomplete</b>'
+        f' — snapshot <code>{_e(digest)}</code>. Coverage cannot be treated as exhaustive.'
+        f'<ul>{items}</ul></div>'
+    )
+
+
+def _manifest_banner(manifest) -> str:
+    if manifest is None:
+        return ""
+    if manifest.signed:
+        return (
+            '<p class="muted" style="margin:0 0 18px">Signed report manifest '
+            f'<code>{_e(manifest.signature[:20])}…</code> ({_e(manifest.key_id)}).</p>'
+        )
+    return (
+        '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #b8860b;'
+        'border-radius:8px"><b>Unsigned report manifest</b> — configure '
+        '<code>REPORT_SIGNING_KEY</code> before distributing this report.</div>'
+    )
+
+
 def render_report(
     title: str,
     target: str,
@@ -76,6 +130,9 @@ def render_report(
     evidence_chain_ok: bool | None = None,
     plan_review=None,
     run_assessment=None,
+    report_verification=None,
+    report_manifest=None,
+    input_snapshot: dict | None = None,
     lang: str = DEFAULT_LANG,
 ) -> str:
     """The full document. This is where the *explanation* lives.
@@ -100,6 +157,9 @@ def render_report(
                      if run_assessment is not None else {})
     jira_bar = _jira_bar(assessment_id, issue_key, lang) if assessment_id and issue_key else ""
     chain_banner = _evidence_chain_banner(evidence_chain_ok, lang) if executions else ""
+    quality_banner = _report_quality_banner(report_verification, lang)
+    input_banner = _input_snapshot_banner(input_snapshot)
+    manifest_banner = _manifest_banner(report_manifest)
     lang_switch = _lang_switch(lang)
 
     summary_cells = "".join(
@@ -251,6 +311,9 @@ def render_report(
 </div>
 {jira_bar}
 {chain_banner}
+{quality_banner}
+{input_banner}
+{manifest_banner}
 <h2>{t("Executive Summary", lang)}</h2>
 <div class="stats">{summary_cells}</div>
 <div class="pills">{sev_cells}</div>
@@ -942,7 +1005,10 @@ def _adjudication_html(adjudication, lang: str) -> str:
     # decided nothing, it is noise at best and false assurance at worst.
     confidence = (f"{t(adjudication.confidence.value, lang)} {t('confidence', lang)} &middot; "
                   if decided else "")
-    advisory = t("advisory, does not change the sealed verdict or create a finding", lang)
+    advisory = t(
+        "advisory: does not change the sealed verdict or create a finding directly; "
+        "derived promotion is audited separately", lang,
+    )
     cited = "".join(f"<li>{_e(c)}</li>" for c in adjudication.evidence_cited)
     cited_html = (f"<div class='glabel'>{t('Evidence cited', lang)}</div>"
                   f"<ul style='margin:2px 0 6px;padding-left:18px'>{cited}</ul>"
@@ -957,10 +1023,70 @@ def _adjudication_html(adjudication, lang: str) -> str:
         f"<p style='margin:0 0 4px'><b style='color:{color}'>{_e(headline)}</b> "
         f"<span class='muted'>&middot; {_e(who)} &middot; "
         f"{confidence}{advisory}</span></p>"
+        f"{_how_html(adjudication, lang)}"
         f"<p style='margin:0 0 4px'>{_e(adjudication.triage_reason)}</p>"
         f"<p style='margin:0 0 4px'>{_e(adjudication.rationale)}</p>"
-        f"{cited_html}{action}{degraded}</div>"
+        f"{cited_html}{_signals_html(adjudication, lang)}"
+        f"{_challenge_html(adjudication, lang)}{action}{degraded}</div>"
     )
+
+
+def _how_html(adjudication, lang: str) -> str:
+    """How the reading was arrived at, in one line, always.
+
+    A measured reading and a model's reading are different assurances and a
+    reader must never have to infer which one they are looking at. `getattr` with
+    a default because a report can be rendered from a run assessment stored
+    before these fields existed.
+    """
+    resolution = getattr(adjudication, "resolution", "")
+    rule = getattr(adjudication, "rule", "")
+    read_from = getattr(adjudication, "read_from", "")
+    if resolution == "measured":
+        text = t("Settled by measuring the captured evidence against the positive "
+                 "control — no model was involved, and the same evidence gives the "
+                 "same answer every time.", lang)
+        if rule:
+            text += f" {t('Rule', lang)}: {_e(rule)}."
+    elif resolution == "ai_consensus":
+        text = t("Read by the agent, then challenged by a second adversarial pass that "
+                 "tried and failed to refute it.", lang)
+    elif resolution == "propagated":
+        text = t("Carried from an identical reading task — same mutation, endpoint, "
+                 "status, body shape and positive-control state.", lang)
+        if read_from:
+            text += f" ({_e(read_from)})"
+    elif resolution == "capped":
+        text = t("Never read: this review pass ran out of its model-call budget.", lang)
+    else:
+        return ""
+    return f"<p class='muted' style='margin:0 0 4px'>{text}</p>"
+
+
+def _signals_html(adjudication, lang: str) -> str:
+    """The measured differential, whatever the reading was.
+
+    Printed even when nothing could be settled: "the attacker's body is 34%
+    similar to the owner's and shares no distinctive value with it" is most of
+    the work a person opening this row would do by hand, and it is worth having
+    on the page whether or not it decided anything.
+    """
+    signals = getattr(adjudication, "signals", None) or []
+    if not signals:
+        return ""
+    items = "".join(f"<li>{_e(line)}</li>" for line in signals)
+    return (f"<div class='glabel'>{t('Measured differential', lang)}</div>"
+            f"<ul style='margin:2px 0 6px;padding-left:18px'>{items}</ul>")
+
+
+def _challenge_html(adjudication, lang: str) -> str:
+    if not getattr(adjudication, "challenged", False):
+        return ""
+    note = getattr(adjudication, "challenge_note", "")
+    if not note:
+        return ""
+    return (f"<p class='muted' style='margin:4px 0 0'><b>{t('Challenge pass:', lang)}</b> "
+            f"{_e(note)}</p>")
 
 
 def _run_assessment_section(run, lang: str) -> str:
@@ -999,7 +1125,9 @@ def _run_assessment_section(run, lang: str) -> str:
     reviewed_by = t("Reviewed by: {who}.", lang).format(who=_e(who))
     advisory_note = t(
         "A reviewed result is <b>advisory</b>: it never overwrites the verdict the runner "
-        "sealed into the evidence chain, and never creates a finding. Coverage counts a "
+        "sealed into the evidence chain. Only a named "
+        "measurement or challenged HIGH-confidence consensus can create a separate derived "
+        "decision. Coverage counts a "
         "requirement as covered only when a test for it reached a decisive result &mdash; a "
         "plan that touches everything and decides nothing scores zero here, deliberately.", lang
     )
@@ -1015,7 +1143,8 @@ def _run_assessment_section(run, lang: str) -> str:
 <div class="stat"><div class="num">{run.n_manual_review}</div>
 <div class="lbl">{t("Need a person", lang)}</div></div>
 <div class="stat"><div class="num">{run.n_auto_resolved}</div>
-<div class="lbl">{t("Settled by review", lang)}</div></div>
+<div class="lbl">{t("Settled by review", lang)}</div>
+<div class="lbl">{getattr(run, "n_measured", 0)} {t("by measurement", lang)}</div></div>
 </div>
 <p style="margin:14px 0 4px">{_e(run.summary)}</p>
 <p class="muted" style="margin:0 0 12px">{reviewed_by} {advisory_note}</p>
@@ -1210,6 +1339,12 @@ VI.update({
     "Still undecided — re-run this one": "Vẫn chưa quyết — chạy lại dòng này",
     "advisory, does not change the sealed verdict or create a finding":
         "chỉ mang tính tham khảo, không thay đổi kết luận đã niêm phong hay tạo finding",
+    "sealed verdict unchanged; derived promotion audited separately":
+        "kết luận niêm phong không đổi; việc nâng cấp dẫn xuất được audit riêng",
+    "advisory: does not change the sealed verdict or create a finding directly; "
+    "derived promotion is audited separately":
+        "chỉ tham khảo: không thay đổi kết luận niêm phong hoặc trực tiếp tạo finding; "
+        "việc nâng cấp dẫn xuất được audit riêng",
     "Evidence cited": "Bằng chứng được trích dẫn", "Next:": "Tiếp theo:",
     # -- run assessment section --
     "Overall": "Tổng thể", "Ticket requirements covered": "Yêu cầu ticket đã phủ",

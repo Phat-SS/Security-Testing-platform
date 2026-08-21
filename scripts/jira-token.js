@@ -66,11 +66,30 @@ const ageMin = Math.round((Date.now() - newest.mtime) / 60000);
 
 // Rewrite in place: replace the line whether it is currently commented or not,
 // so repeat runs stay idempotent instead of stacking duplicate keys.
+//
+// Line-based rather than a whole-file regex replace, and it collapses *every*
+// occurrence onto the first. .env is last-one-wins, so a duplicate left further
+// down keeps the stale token winning and this script reports success while the
+// app keeps using the expired one. Mirrors write_dotenv_value() in
+// app/core/preflight.py — the two must agree, since either can write this file.
 let env = fs.readFileSync(envPath, "utf8");
 function setKey(key, value) {
-  const re = new RegExp(`^#?\s*${key}=.*$`, "m");
+  // Double backslash: this is a template literal, so `\s` would collapse to a
+  // literal "s" and the pattern would match nothing. That is what silently
+  // turned every run of this script into an append.
+  const re = new RegExp(`^#?[ \\t]*${key}=`);
   const line = `${key}=${value}`;
-  env = re.test(env) ? env.replace(re, line) : env.replace(/\n*$/, `\n${line}\n`);
+  const eol = env.includes("\r\n") ? "\r\n" : "\n";
+  const trimmed = env.replace(/[\r\n]+$/, "");
+  const lines = trimmed === "" ? [] : trimmed.split(/\r?\n/);
+  const out = [];
+  let written = false;
+  for (const raw of lines) {
+    if (!re.test(raw)) out.push(raw);
+    else if (!written) { out.push(line); written = true; }
+  }
+  if (!written) out.push(line);
+  env = out.join(eol) + eol;
 }
 setKey("JIRA_MCP_URL", MCP_URL);
 setKey("JIRA_MCP_TOKEN", token);

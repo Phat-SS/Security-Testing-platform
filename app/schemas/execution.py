@@ -72,6 +72,23 @@ class RepeatStats(BaseModel):
     concurrent: bool = False  # sent in parallel (race probe) vs sequentially
 
 
+class CorrelationProof(BaseModel):
+    """HMAC-only proof that attacker and owner responses share identity data."""
+
+    algorithm: str = "HMAC-SHA256"
+    key_id: str
+    shared_fingerprints: list[str] = Field(default_factory=list)
+    owner_value_count: int
+    owner_coverage: float
+
+
+class OastProof(BaseModel):
+    token_hash: str
+    callback_host: str
+    observed: bool
+    purpose: str = "ssrf"
+
+
 class Execution(BaseModel):
     execution_id: str
     test_id: str
@@ -95,6 +112,8 @@ class Execution(BaseModel):
     # Evidence supporting the verdict beyond the single attack exchange.
     supporting: list[SupportingExchange] = Field(default_factory=list)
     repeat: RepeatStats | None = None
+    correlation: CorrelationProof | None = None
+    oast: OastProof | None = None
 
     # Tamper-evidence: sha256 over (request, response, verdict); chained to the
     # previous execution's hash so the evidence log cannot be silently edited.

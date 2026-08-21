@@ -19,6 +19,7 @@ _AC_HINTS = ("acceptance", "acceptancecriteria")
 def normalize_issue(raw: dict) -> NormalizedIssue:
     key = raw.get("key", "")
     fields = raw.get("fields", {}) or {}
+    field_names = raw.get("names") or raw.get("fieldNames") or {}
 
     project = (fields.get("project") or {}).get("key") or key.split("-", 1)[0]
     summary = fields.get("summary", "") or ""
@@ -41,9 +42,19 @@ def normalize_issue(raw: dict) -> NormalizedIssue:
     attachments = [a.get("filename", "") for a in fields.get("attachment", []) or []]
 
     # Acceptance criteria: look for a custom field whose value is a list/ADF.
-    acceptance = _extract_acceptance(fields)
+    acceptance = _extract_acceptance(fields, field_names)
 
     links = _extract_links(fields)
+
+    total_comments = comment_block.get("total")
+    comments_complete = total_comments is None or int(total_comments) <= len(
+        comment_block.get("comments", []) or []
+    )
+    warnings = []
+    if not comments_complete:
+        warnings.append(
+            f"Jira returned {len(comments)} of {total_comments} comment(s); pagination is incomplete."
+        )
 
     return NormalizedIssue(
         issue_key=key,
@@ -57,12 +68,19 @@ def normalize_issue(raw: dict) -> NormalizedIssue:
         components=[c for c in components if c],
         environment=environment,
         links=links,
+        updated_at=str(fields.get("updated", "") or ""),
+        comments_complete=comments_complete,
+        fields_complete=bool(fields),
+        completeness_warnings=warnings,
     )
 
 
-def _extract_acceptance(fields: dict) -> list[str]:
+def _extract_acceptance(fields: dict, field_names: dict | None = None) -> list[str]:
+    field_names = field_names or {}
     for name, value in fields.items():
-        if any(h in name.lower() for h in _AC_HINTS) and value:
+        display_name = str(field_names.get(name, name))
+        normalized_name = "".join(ch for ch in display_name.lower() if ch.isalnum())
+        if any(h in normalized_name for h in _AC_HINTS) and value:
             items = extract_list_items(value)
             if items:
                 return items

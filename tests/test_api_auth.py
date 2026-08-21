@@ -60,6 +60,7 @@ def test_login_with_valid_key_unlocks_the_ui_via_cookie(client):
     r = client.post("/login", data={"api_key": client._key}, follow_redirects=False)
     assert r.status_code == 303
     assert "session_key" in r.cookies
+    assert r.cookies["session_key"] != client._key
     # No explicit header now — the cookie set by /login must be sufficient.
     r = client.post("/import", data={"issue_key": "CRM-1234"}, follow_redirects=True)
     assert r.status_code == 200
@@ -84,3 +85,12 @@ def test_shutdown_requires_admin_not_just_tester(client):
 def test_shutdown_requires_confirmation_header_even_for_admin(client):
     r = client.post("/admin/shutdown", headers={"X-API-Key": client._admin_key})
     assert r.status_code == 400
+
+
+def test_runtime_secret_configuration_requires_admin(client):
+    response = client.post(
+        "/config/ai-evidence",
+        data={"REPORT_SIGNING_KEY": "x" * 32},
+        headers={"X-API-Key": client._key},
+    )
+    assert response.status_code == 403

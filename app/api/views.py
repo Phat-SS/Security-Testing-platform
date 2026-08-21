@@ -758,19 +758,46 @@ _READY_CLASS = {"ok": "low", "warn": "med", "fail": "crit"}
 _READY_ICON = {"ok": "&#10003;", "warn": "&#9888;", "fail": "&#10007;"}
 _READY_WORD = {"ok": "READY", "warn": "CHECK", "fail": "BLOCKING"}
 
+# Four tabs, in the order a new engagement needs them. There were eight — one
+# per settings *file section*, which made the page a map of the implementation
+# rather than of the job. Scope only ever means anything next to the target it
+# authorizes, and the four panes nobody opens during a normal engagement (runner
+# limits, AI/evidence secrets, the MCP connector, the read-only runtime facts)
+# now share one "Advanced" tab instead of each advertising itself as a step.
 _CONFIG_TABS = [
     ("readiness", "Readiness"),
-    ("environments", "Environments"),
-    ("scope", "Scope"),
-    ("personas", "Personas"),
-    ("runner", "Runner limits"),
-    ("mcp", "MCP"),
-    ("runtime", "Runtime (.env)"),
+    ("target", "Target"),
+    ("identities", "Identities"),
+    ("advanced", "Advanced"),
 ]
 
+# Old tab names stay valid: they are in bookmarks, in older reports, and in the
+# `?tab=` of every redirect the config writers issue. Each resolves to whichever
+# new tab absorbed it rather than silently falling back to Readiness, which
+# would drop a tester somewhere other than the pane they just saved in.
+_TAB_ALIASES = {
+    "environments": "target",
+    "scope": "target",
+    "personas": "identities",
+    "runner": "advanced",
+    "ai-evidence": "advanced",
+    "mcp": "advanced",
+    "runtime": "advanced",
+}
+
+
+def resolve_config_tab(tab: str) -> str:
+    """The tab to open for a (possibly historical) tab name."""
+    tab = _TAB_ALIASES.get(tab, tab)
+    return tab if tab in dict(_CONFIG_TABS) else "readiness"
+
+
 VI.update({
-    "Readiness": "Sẵn sàng", "Environments": "Môi trường", "Scope": "Phạm vi",
+    "Readiness": "Sẵn sàng", "Target": "Mục tiêu", "Identities": "Danh tính",
+    "Advanced": "Nâng cao",
+    "Environments": "Môi trường", "Scope": "Phạm vi",
     "Personas": "Persona", "Runner limits": "Giới hạn runner", "MCP": "MCP",
+    "AI & Evidence": "AI & Bằng chứng",
     "Runtime (.env)": "Runtime (.env)",
 })
 
@@ -779,7 +806,63 @@ def _kv_textarea_value(mapping: dict, sep: str) -> str:
     return "\n".join(f"{k}{sep}{v}" for k, v in (mapping or {}).items())
 
 
-def _readiness_pane(readiness, engagement_path: str) -> str:
+def _quick_setup_card() -> str:
+    """The three things an empty engagement needs, in one submit.
+
+    Reaching a first run used to mean three panes and a text editor: add an
+    environment, remember to authorize its host, add two personas whose auth
+    headers use `${VAR}` syntax nothing on the page explains, set the ${VAR}s in
+    .env, then point attacker/victim at them. Every one of those is a separate
+    way to end up with a config that looks finished and produces an entirely
+    BLOCKED run. This writes all of it at once, in the shape the rest of the
+    platform expects — tokens to .env, references to engagement.json.
+    """
+    intro = _t(
+        "This engagement has no target or no second identity yet. Fill this in once and "
+        "it writes the environment, authorizes its host, creates both personas and stores "
+        "both tokens in <code>.env</code> — the credentials never enter the engagement "
+        "file, which only gets a <code>${PERSONA_A_TOKEN}</code> reference."
+    )
+    footer = _t(
+        "Use dedicated test accounts. Everything written here stays editable under "
+        "<b>Target</b> and <b>Identities</b>, and running this again overwrites "
+        "<code>agent_A</code> / <code>agent_B</code> rather than adding more."
+    )
+    return f"""<div class="card pad" style="margin-bottom:22px">
+<h2 class="section" style="margin-top:0">{_t("Quick setup")}</h2>
+<p class="muted" style="margin:0 0 14px">{intro}</p>
+<form method="post" action="/config/quick-setup">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px">
+<label class="field"><span>{_t("Environment name")}</span>
+<input name="env_name" value="staging" required></label>
+<label class="field" style="grid-column:span 2"><span>{_t("Base URL")}</span>
+<input name="url" placeholder="https://staging-api.company.com" required></label>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+<label class="field"><span>{_t("Attacker token (agent_A)")}</span>
+<input type="password" name="attacker_token" autocomplete="new-password"
+ placeholder="eyJhbGciOi..." required></label>
+<label class="field"><span>{_t("Victim token (agent_B)")}</span>
+<input type="password" name="victim_token" autocomplete="new-password"
+ placeholder="eyJhbGciOi..." required></label>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+<label class="field"><span>{_t("An object id the victim owns — key")}</span>
+<input name="owns_key" value="customer_id"></label>
+<label class="field"><span>{_t("… and its value")}</span>
+<input name="owns_value" placeholder="2002"></label>
+</div>
+<p class="muted" style="margin:12px 0 0">{_t(
+    "BOLA cases are built by pointing the attacker at an id the victim owns. Leave it "
+    "blank and the generated tests fall back to guessed ids, which is weaker but valid."
+)}</p>
+<div class="row" style="margin-top:14px"><button class="btn">{_t("Create this engagement")}</button></div>
+</form>
+<p class="muted" style="margin:12px 0 0">{footer}</p>
+</div>"""
+
+
+def _readiness_pane(readiness, engagement_path: str, show_wizard: bool = False) -> str:
     rows = ""
     for c in readiness.checks:
         cls = _READY_CLASS[c.state]
@@ -825,7 +908,9 @@ def _readiness_pane(readiness, engagement_path: str) -> str:
                    f"<b>&#10007; {_t('{n} blocking issue(s).').format(n=readiness.n_blocking)}</b> "
                    f"{_t('A run started now comes back entirely BLOCKED or ERROR. Each row below names the setting and the pane that fixes it.')}</div>")
 
-    return f"""{verdict}
+    wizard = _quick_setup_card() if show_wizard else ""
+
+    return f"""{wizard}{verdict}
 <div class="card" style="margin-bottom:22px"><div class="tblwrap"><table>
 <tr><th style="width:110px">{_t("State")}</th><th>{_t("Check")}</th></tr>{rows}</table></div></div>
 
@@ -1151,6 +1236,104 @@ def _mcp_pane(
 </div>"""
 
 
+def _ai_evidence_pane(config: dict[str, object]) -> str:
+    values = config.get("values") or {}
+    flags = config.get("flags") or {}
+    secrets = config.get("secrets") or {}
+
+    def checked(key: str) -> str:
+        return "checked" if flags.get(key) else ""
+
+    def value(key: str) -> str:
+        return _e(values.get(key, ""))
+
+    def secret_field(key: str, label: str, minimum: int, hint: str) -> str:
+        configured = bool(secrets.get(key))
+        status = (
+            '<span class="pill low">CONFIGURED</span>'
+            if configured else '<span class="pill med">NOT SET</span>'
+        )
+        placeholder = "Configured — leave blank to keep" if configured else "Not configured"
+        field_id = f"secret-{key.lower()}"
+        return f"""<div class="card pad" style="margin-bottom:10px">
+<div class="row" style="justify-content:space-between;margin-bottom:8px">
+<div><b>{_e(label)}</b> {status}</div><code>{_e(key)}</code></div>
+<div class="row" style="align-items:flex-end">
+<label class="field" style="flex:1"><span>New value</span>
+<input id="{field_id}" type="password" name="{_e(key)}" autocomplete="new-password"
+ minlength="{minimum}" placeholder="{_e(placeholder)}"></label>
+<button class="btn ghost" type="button" onclick="generateRuntimeSecret('{field_id}',{max(32, minimum)})">Generate</button>
+</div>
+<label class="muted" style="display:flex;gap:6px;align-items:center;margin-top:8px">
+<input type="checkbox" name="clear_{_e(key)}" value="true" style="width:auto">
+Clear the stored value</label>
+<div class="muted" style="margin-top:6px">{_e(hint)}</div></div>"""
+
+    return f"""<p class="muted" style="margin:0 0 12px">
+These settings are written to <code>.env</code> and applied immediately. Secret values are
+never returned to the browser: blank keeps the current value; clearing requires the explicit
+checkbox. This pane requires the <b>admin</b> role when authentication is enabled.</p>
+<form method="post" action="/config/ai-evidence">
+
+<h2 class="section">Claude runtime</h2>
+<div class="card pad" style="margin-bottom:18px">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px">
+<label class="field"><span>Versioned model ID</span>
+<input name="ANTHROPIC_MODEL" value="{value('ANTHROPIC_MODEL')}"
+ placeholder="claude-sonnet-4-20260514"></label>
+<label class="field"><span>Maximum budget per call (USD)</span>
+<input type="number" min="0.01" step="0.01" name="AI_MAX_BUDGET_USD"
+ value="{value('AI_MAX_BUDGET_USD')}" placeholder="1.00"></label>
+<label class="field"><span>Reasoning effort</span>
+<input name="AI_EFFORT" value="{value('AI_EFFORT')}" placeholder="high"></label>
+</div>
+<div class="row" style="margin-top:12px;gap:18px">
+<label><input type="checkbox" name="USE_AI" value="true" style="width:auto" {checked('USE_AI')}> Enable Claude AI</label>
+<label><input type="checkbox" name="AI_REQUIRE_PINNED_MODEL" value="true" style="width:auto" {checked('AI_REQUIRE_PINNED_MODEL')}> Require a versioned model ID</label>
+</div></div>
+
+<h2 class="section">Evidence and report integrity</h2>
+{secret_field('EVIDENCE_FINGERPRINT_KEY', 'Evidence correlation HMAC key', 16,
+              'HMACs identity values used for cross-persona correlation. Use a deployment-specific random key.')}
+{secret_field('REPORT_SIGNING_KEY', 'Report manifest signing key', 32,
+              'Signs report manifests. Production requires at least 32 characters and secret-manager backup.')}
+<div class="card pad" style="margin-bottom:18px"><label class="field">
+<span>Signing key ID</span><input name="REPORT_SIGNING_KEY_ID"
+ value="{value('REPORT_SIGNING_KEY_ID')}" placeholder="prod-report-key-2026"></label></div>
+
+<h2 class="section">OAST collaborator</h2>
+<div class="card pad" style="margin-bottom:10px">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+<label class="field"><span>Public callback base URL</span>
+<input name="OAST_PUBLIC_URL" value="{value('OAST_PUBLIC_URL')}"
+ placeholder="https://callbacks.example.test/c"></label>
+<label class="field"><span>Authenticated polling base URL</span>
+<input name="OAST_POLL_URL" value="{value('OAST_POLL_URL')}"
+ placeholder="https://callbacks.example.test/api/events"></label>
+</div><label class="field" style="margin-top:12px"><span>Polling timeout (seconds)</span>
+<input type="number" min="0.1" step="0.1" name="OAST_TIMEOUT_S"
+ value="{value('OAST_TIMEOUT_S')}" placeholder="5"></label></div>
+{secret_field('OAST_API_TOKEN', 'OAST polling API token', 1,
+              'Sent only to the polling endpoint; never injected into the target callback URL.')}
+
+<h2 class="section">Browser session</h2>
+<div class="card pad"><label>
+<input type="checkbox" name="AUTH_COOKIE_SECURE" value="true" style="width:auto" {checked('AUTH_COOKIE_SECURE')}>
+Set the browser session cookie only over HTTPS</label>
+<div class="muted" style="margin-top:6px">Enable this for every HTTPS deployment. Local HTTP development cannot send a Secure cookie.</div></div>
+
+<div class="row" style="margin-top:16px"><button class="btn">Save AI &amp; evidence configuration</button></div>
+</form>
+<script>
+function generateRuntimeSecret(id, bytes) {{
+  var data = new Uint8Array(bytes);
+  crypto.getRandomValues(data);
+  var raw = Array.from(data, function (b) {{ return String.fromCharCode(b); }}).join('');
+  document.getElementById(id).value = btoa(raw).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+}}
+</script>"""
+
+
 def _runtime_pane(facts: list[tuple[str, str, str]]) -> str:
     rows = "".join(
         f"<tr><td><b>{_e(label)}</b></td><td class='mono'>{_e(value)}</td>"
@@ -1174,12 +1357,69 @@ def _runtime_pane(facts: list[tuple[str, str, str]]) -> str:
 <p class="muted" style="margin-top:12px">{footer}</p>"""
 
 
+def _section(title: str, blurb: str, body: str, open_: bool = False) -> str:
+    """One collapsible block inside the Advanced tab."""
+    return f"""<details class="card pad" style="margin-bottom:12px" {'open' if open_ else ''}>
+<summary style="cursor:pointer;font-weight:600">{_t(title)}
+<span class="muted" style="font-weight:400;margin-left:8px">{_t(blurb)}</span></summary>
+<div style="padding-top:14px">{body}</div>
+</details>"""
+
+
+def _target_pane(engagement) -> str:
+    """Environments and scope together.
+
+    They were two tabs and that was the wrong seam: a base URL whose host is not
+    on the allow-list is the single most common reason an entire run comes back
+    BLOCKED, and the fix used to be one tab away from the mistake.
+    """
+    return f"""{_environments_pane(engagement.environments, engagement.active_environment)}
+<h2 class="section">{_t("Scope authorization")}</h2>
+{_scope_pane(engagement.scope.policy)}"""
+
+
+def _advanced_pane(
+    limits,
+    runner_overrides: dict,
+    ai_evidence: dict[str, object],
+    jira_mode: str,
+    jira_live: bool,
+    jira_warning: str,
+    jira_env: list[tuple[str, str, str]],
+    jira_keys: list[str],
+    runtime: list[tuple[str, str, str]],
+    open_section: str = "runner",
+) -> str:
+    """The four panes a normal engagement never opens, collapsed by default.
+
+    `open_section` is the *requested* tab name, so the four writers that still
+    redirect to `?tab=runner` / `?tab=mcp` / `?tab=ai-evidence` land with the
+    block they just saved already expanded — a flash message above four
+    collapsed rows would otherwise read as "saved something, somewhere".
+    """
+    intro = _t(
+        "Everything here already has a working default — a normal engagement never "
+        "needs to open this tab. Full reference: <code>docs/configuration.md</code>."
+    )
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
+{_section("Runner limits", "timeouts and request caps",
+          _runner_pane(limits, runner_overrides), open_section in ("runner", "advanced"))}
+{_section("AI &amp; Evidence", "Claude runtime, signing keys, OAST — writes to .env",
+          _ai_evidence_pane(ai_evidence), open_section == "ai-evidence")}
+{_section("Jira connector (MCP)", "live server vs offline mock",
+          _mcp_pane(jira_mode, jira_live, jira_warning, jira_env, jira_keys),
+          open_section == "mcp")}
+{_section("Runtime (.env)", "read-only; changing these needs a restart",
+          _runtime_pane(runtime), open_section == "runtime")}"""
+
+
 def config_page(
     readiness,
     engagement,
     engagement_path: str,
     limits,
     runtime: list[tuple[str, str, str]],
+    ai_evidence: dict[str, object],
     jira_mode: str,
     jira_live: bool,
     jira_warning: str,
@@ -1189,23 +1429,24 @@ def config_page(
     flash: str = "",
     error: str = "",
 ) -> str:
-    if tab not in dict(_CONFIG_TABS):
-        tab = "readiness"
+    requested_tab = tab
+    tab = resolve_config_tab(tab)
     flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
     error_html = f"<div class='card pad err'>&#9888; {_e(_t(error))}</div>" if error else ""
 
+    personas = list(engagement.raw.get("personas") or [])
     panes = {
-        "readiness": _readiness_pane(readiness, engagement_path),
-        "environments": _environments_pane(engagement.environments, engagement.active_environment),
-        "scope": _scope_pane(engagement.scope.policy),
-        "personas": _personas_pane(
-            list(engagement.raw.get("personas") or []),
-            engagement.attacker,
-            engagement.victim,
+        "readiness": _readiness_pane(
+            readiness, engagement_path,
+            show_wizard=not engagement.environments or len(personas) < 2,
         ),
-        "runner": _runner_pane(limits, engagement.runner),
-        "mcp": _mcp_pane(jira_mode, jira_live, jira_warning, jira_env, jira_keys),
-        "runtime": _runtime_pane(runtime),
+        "target": _target_pane(engagement),
+        "identities": _personas_pane(personas, engagement.attacker, engagement.victim),
+        "advanced": _advanced_pane(
+            limits, engagement.runner, ai_evidence,
+            jira_mode, jira_live, jira_warning, jira_env, jira_keys, runtime,
+            open_section=requested_tab,
+        ),
     }
 
     state_cls = _READY_CLASS[readiness.state]

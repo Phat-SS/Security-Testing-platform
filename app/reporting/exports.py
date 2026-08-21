@@ -26,6 +26,8 @@ def export_json(
     coverage: list[dict] | None = None,
     plan_review=None,
     run_assessment=None,
+    derived_verdicts=None,
+    report_manifest=None,
     plan_stale: bool = False,
     uncovered_endpoints: list[str] | None = None,
 ) -> str:
@@ -58,6 +60,10 @@ def export_json(
         payload["plan_review"] = plan_review.model_dump(mode="json")
     if run_assessment is not None:
         payload["run_assessment"] = run_assessment.model_dump(mode="json")
+    if derived_verdicts is not None:
+        payload["derived_verdicts"] = [item.model_dump(mode="json") for item in derived_verdicts]
+    if report_manifest is not None:
+        payload["report_manifest"] = report_manifest.model_dump(mode="json")
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 

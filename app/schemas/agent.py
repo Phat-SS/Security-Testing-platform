@@ -12,13 +12,10 @@ verdict, mint a finding or widen scope.
 | **Result adjudicator** | `Adjudication` | reads an undecided execution; `execution.verdict` is never rewritten |
 
 The last one is the load-bearing distinction. `app/execution/verdict.py` is
-deliberately agent-free: its output is hashed into the evidence chain and is
-what mints findings, so a model in that path would convert an auditable control
-into a probabilistic one. An `Adjudication` therefore sits *beside* the sealed
-verdict rather than replacing it — `advisory` is a field, not a comment, and
-`build_findings` never reads this module. What the adjudicator buys is the thing
-a human was doing by hand anyway: reading a response body and saying whether
-the undecided result actually needs a person.
+agent-free and hashed into the evidence chain. An `Adjudication` sits beside
+that sealed verdict. A separate conservative policy may emit a hash-bound
+derived event after deterministic measurement or challenged AI consensus;
+the original verdict is never replaced.
 
 `RunAssessment` is where the per-execution opinions become one answer —
 "passed or failed, and how much of the ticket did this cover". The mapping from
@@ -164,6 +161,9 @@ class PlanReview(BaseModel):
     tests_added: list[str] = Field(default_factory=list)
     unresolved_gaps: list[PlanReviewGap] = Field(default_factory=list)
     reviewed_at: str = ""
+    model_id: str = ""
+    prompt_version: str = ""
+    prompt_hash: str = ""
 
     @property
     def blocking_gaps(self) -> list[PlanReviewGap]:
@@ -183,10 +183,10 @@ class PlanReview(BaseModel):
 class Adjudication(BaseModel):
     """A reading of one execution the deterministic verdict left undecided.
 
-    `assessed_result` is an opinion, never a verdict: `execution.verdict` stays
-    exactly as the runner sealed it, the evidence hash still covers that sealed
-    value, and `build_findings` still only ever mints a finding from a runner
-    FAIL. This exists to answer the question a tester was answering by hand —
+    `assessed_result` is an opinion, never a sealed verdict: `execution.verdict`
+    stays exactly as the runner sealed it. A separate promotion policy can turn
+    only sufficiently strong readings into append-only derived decisions. This
+    exists to answer the question a tester was answering by hand —
     "do I actually have to look at this one?" — and to say what the answer
     would be if not.
     """
@@ -210,13 +210,71 @@ class Adjudication(BaseModel):
 
     adjudicator: Reviewer = "deterministic"
     degraded_reason: str = ""
+    model_id: str = ""
+    prompt_version: str = ""
+    prompt_hash: str = ""
     # Structurally true. A field rather than a docstring so every renderer,
     # export and comment has to carry the caveat with the value.
     advisory: bool = True
 
+    # How this reading was arrived at. A reader must never have to guess
+    # whether "PASS" came out of a measurement, a model, two models agreeing,
+    # or a sibling result it was copied from — those are four different
+    # assurances and they are not interchangeable.
+    #   sealed      — the runner decided it; this is a deferral, not a reading
+    #   measured    — a named deterministic rule over the captured evidence
+    #                 (`app/analysis/evidence_signals.measure`), reproducible
+    #   ai          — the model read it and no second pass was available
+    #   ai_consensus— the model read it and a challenge pass failed to refute it
+    #   propagated  — copied from an identical result read once for the cluster
+    #   capped      — never read: the pass ran out of its model-call budget
+    #   manual      — nothing settled it; a person has to look
+    resolution: Literal[
+        "sealed", "measured", "ai", "ai_consensus", "propagated", "capped", "manual"
+    ] = "manual"
+    # The deterministic rule that settled it, when `resolution` is "measured".
+    # Named so a tester who disagrees knows exactly what to argue with.
+    rule: str = ""
+
+    # The measured differential the reading was made against: status-layer
+    # attribution, body shape, similarity to the positive control, how many
+    # distinctive values the attacker's response shares with the owner's. Facts,
+    # computed with no model involved — and the same facts the model was shown.
+    signals: list[str] = Field(default_factory=list)
+
+    # The second, adversarial pass. `challenged` says one ran; `challenge_note`
+    # carries its objection when it had one. An auto-resolved reading that was
+    # never challenged and one that survived a challenge are different claims.
+    challenged: bool = False
+    challenge_agreed: bool = False
+    challenge_note: str = ""
+
+    # When several results were measurably the same reading task, one was read
+    # and the rest carry that reading with the cluster it came from named. Empty
+    # for a result read on its own.
+    cluster_id: str = ""
+    cluster_size: int = 0
+    read_from: str = ""  # execution_id of the sibling actually read
+
+    # What kind of thing is in the way, when a person is still needed. Lets a
+    # queue be grouped by *what would fix it* rather than by test id: fixing one
+    # stale object id can clear a dozen rows, and that is invisible when they
+    # are listed one by one.
+    #   test_data   — the positive control failed / wrong object id or persona
+    #   config      — scope, policy or environment stopped the request
+    #   no_evidence — it ran, but captured nothing readable either way
+    #   ambiguous   — readable evidence that genuinely does not settle it
+    #   unread      — no reader was available (no AI configured, or over budget)
+    blocker: Literal["", "test_data", "config", "no_evidence", "ambiguous", "unread"] = ""
+
     @property
     def differs_from_sealed(self) -> bool:
         return self.assessed_result != self.sealed_result.value
+
+    @property
+    def settled(self) -> bool:
+        """The adjudicator answered it and nobody has to read it again."""
+        return not self.needs_manual_review and self.assessed_result in ("PASS", "FAIL")
 
 
 class RequirementCoverage(BaseModel):
@@ -280,6 +338,19 @@ class RunAssessment(BaseModel):
     # collapsing them would report a run as settled while a third of it is still
     # waiting to be re-sent.
     n_rerun: int = 0
+    # Of `n_auto_resolved`, how many were settled by a named deterministic rule
+    # over the evidence rather than by a model. Reported separately because it
+    # is the number that says how much of the review load the platform can carry
+    # with no API key at all — and because a measured reading is reproducible in
+    # a way a model's is not.
+    n_measured: int = 0
+    # Settled by copying an identical sibling's reading (see Adjudication.cluster_id).
+    n_propagated: int = 0
+    # Auto-resolved readings that survived an adversarial second pass.
+    n_consensus: int = 0
+    # Executions re-sent during this review pass because they had errored or
+    # returned a 5xx, so their result is the re-run's rather than the original's.
+    n_reran: int = 0
 
     summary: str = ""
     reviewer: Reviewer = "deterministic"

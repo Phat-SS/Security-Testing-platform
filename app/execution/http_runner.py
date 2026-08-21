@@ -21,6 +21,7 @@ All three pass the same scope gate and are sealed into the same evidence record.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import socket as _socket
 import threading
@@ -33,15 +34,19 @@ import httpx
 from app.core.config import Settings
 from app.core.redaction import redact_headers, redact_text, redact_url
 from app.core.scope import ScopeValidator, ScopeViolation
+from app.execution.correlation import correlate_bodies
 from app.execution.evidence import seal
 from app.execution.mutations import MutationError, PreparedRequest, apply_mutation
+from app.execution.oast import OastVerifier
 from app.execution.templating import extract_json_path, resolve, resolve_deep
 from app.execution.verdict import evaluate as evaluate_verdict
 from app.schemas.enums import Confidence, TestStatus
 from app.schemas.execution import (
     CapturedRequest,
     CapturedResponse,
+    CorrelationProof,
     Execution,
+    OastProof,
     RepeatStats,
     SupportingExchange,
     Verdict,
@@ -117,11 +122,13 @@ class HttpRunner:
         vault: PersonaVault,
         settings: Settings,
         client: httpx.Client | None = None,
+        oast: OastVerifier | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._scope = scope
         self._vault = vault
         self._settings = settings
+        self._oast = oast
         # Injectable client so tests can drive an in-memory ASGI app.
         self._client = client or httpx.Client(
             follow_redirects=False,  # a 3xx is captured and evaluated as-is — see _send
@@ -158,6 +165,17 @@ class HttpRunner:
             )
 
         log: list[str] = []
+        oast_token = ""
+        oast_callback = ""
+        if test.oast is not None:
+            if self._oast is None:
+                log.append("OAST: verifier is not configured; callback proof is unavailable")
+            else:
+                oast_token, oast_callback = self._oast.issue()
+                runtime = test.model_copy(deep=True)
+                runtime.attack_mutation.detail["value"] = oast_callback
+                test = runtime
+                log.append("OAST: issued a unique callback token for this execution")
         context: dict = {}
         supporting: list[SupportingExchange] = []
 
@@ -236,6 +254,19 @@ class HttpRunner:
         captured_req, captured_resp, raw_resp_text, repeat_stats = self._send_attack(
             prepared, url, headers, query, body, result.resolved_ip, log
         )
+        if oast_token:
+            # The callback token is a bearer-like correlation secret. Keep it
+            # in memory only long enough to poll the provider; persisted
+            # evidence carries a hash and redacted request value instead.
+            captured_req = _redact_oast_token(captured_req, oast_token)
+            if captured_resp is not None:
+                captured_resp = captured_resp.model_copy(update={
+                    "body": captured_resp.body.replace(
+                        oast_token, "<oast-token-redacted>"
+                    )
+                })
+            prepared.note = prepared.note.replace(oast_token, "<oast-token-redacted>")
+            log[:] = [entry.replace(oast_token, "<oast-token-redacted>") for entry in log]
 
         if captured_resp is None:
             verdict = Verdict(
@@ -279,6 +310,29 @@ class HttpRunner:
             raw_resp_text or "", target_markers, test.expected.body_must_not_contain, context,
             exclude_bodies=[baseline_raw_body] if baseline_ok is False and baseline_raw_body else None,
         )
+        correlation = None
+        # If the operator configured a fingerprint key, learn distinctive
+        # values from the owner's successful response and correlate them with
+        # the attack response without storing any raw value. Restricted to a
+        # cross-identity test: the same user's generic response is not BOLA.
+        if not leaked and target is not None and baseline_ok is True and baseline_raw_body:
+            measured = correlate_bodies(baseline_raw_body, raw_resp_text or "")
+            if measured is not None:
+                correlation = CorrelationProof(
+                    key_id=measured.key_id,
+                    shared_fingerprints=list(measured.shared_fingerprints),
+                    owner_value_count=measured.owner_value_count,
+                    owner_coverage=measured.coverage,
+                )
+                if measured.decisive:
+                    # evaluate_verdict only uses the count and never persists
+                    # these values. HMAC digests are safe correlation tokens,
+                    # not the owner's identifiers themselves.
+                    leaked = list(measured.shared_fingerprints)
+                    log.append(
+                        "DISCLOSURE: HMAC correlation matched "
+                        f"{len(leaked)}/{measured.owner_value_count} distinctive owner value(s)"
+                    )
         if leaked:
             # Never put the raw marker value in the log: `log` is stored,
             # exported (export.json), and hashed into evidence just like
@@ -298,6 +352,25 @@ class HttpRunner:
             )
             if exchange is not None:
                 supporting.append(exchange)
+
+        oast_proof = None
+        if oast_token and self._oast is not None:
+            try:
+                observed = self._oast.observed(oast_token)
+            except Exception as exc:  # noqa: BLE001 - collaborator outage is inconclusive
+                observed = False
+                log.append(f"OAST: poll failed ({type(exc).__name__})")
+            oast_proof = OastProof(
+                token_hash=hashlib.sha256(oast_token.encode("utf-8")).hexdigest(),
+                callback_host=urlparse(oast_callback).hostname or "",
+                observed=observed,
+                purpose=test.oast.purpose,
+            )
+            if observed:
+                verification_proof.append("out-of-band callback observed for this execution")
+                log.append("OAST: target callback observed — server-side interaction confirmed")
+            else:
+                log.append("OAST: no callback observed")
 
         verdict = evaluate_verdict(
             test, captured_resp, leaked,
@@ -319,6 +392,8 @@ class HttpRunner:
             attack_note=prepared.note,
             supporting=supporting,
             repeat=repeat_stats,
+            correlation=correlation,
+            oast=oast_proof,
             log=log,
         )
         return seal(ex, prev_hash)
@@ -461,6 +536,18 @@ class HttpRunner:
             for marker in step.proves_exploit_if_contains
             if (resolved := resolve(marker, context)) and resolved in (raw_text or "")
         ]
+        parsed = _try_json(raw_text)
+        for assertion in step.proves_exploit_when:
+            actual = extract_json_path(parsed, assertion.json_path) if parsed is not None else None
+            expected = assertion.expected
+            if isinstance(expected, str):
+                expected = resolve(expected, context)
+                try:
+                    expected = json.loads(expected)
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            if _invariant_matches(actual, assertion.operator, expected):
+                proof.append(assertion.description or f"invariant {assertion.json_path} matched")
         log.append(
             f"{tag}: {step.as_persona} {step.request.method} {path} -> "
             f"HTTP {captured_resp.status_code}; "
@@ -762,6 +849,35 @@ def _resolve_query(query: dict, context: dict) -> dict:
         else:
             resolved[key] = resolve(str(value), context)
     return resolved
+
+
+def _invariant_matches(actual, operator: str, expected) -> bool:
+    """Closed operator set; comparison failure is non-proof, never an exception."""
+    try:
+        if operator == "equals":
+            return actual == expected
+        if operator == "not_equals":
+            return actual != expected
+        if operator == "gt":
+            return actual > expected
+        if operator == "gte":
+            return actual >= expected
+        if operator == "lt":
+            return actual < expected
+        if operator == "lte":
+            return actual <= expected
+        if operator == "contains":
+            return expected in actual
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def _redact_oast_token(request: CapturedRequest, token: str) -> CapturedRequest:
+    return request.model_copy(update={
+        "url": request.url.replace(token, "<oast-token-redacted>"),
+        "body": request.body.replace(token, "<oast-token-redacted>") if request.body else None,
+    })
 
 
 def _body_to_text(body: object | None, encoding: str = "json") -> str | None:

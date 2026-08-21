@@ -21,6 +21,8 @@ import hmac
 import json
 import os
 import secrets
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +50,9 @@ class AuthManager:
         self._enabled = os.getenv("AUTH_ENABLED", "false").lower() == "true"
         path = config_path or os.getenv("AUTH_USERS_CONFIG", "config/users.json")
         self._by_hash: dict[str, User] = {}
+        self._sessions: dict[str, tuple[User, float]] = {}
+        self._session_lock = threading.RLock()
+        self._session_ttl_s = max(300, int(os.getenv("AUTH_SESSION_TTL_S", "43200")))
         if self._enabled and Path(path).exists():
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             for u in data.get("users", []):
@@ -69,6 +74,39 @@ class AuthManager:
             if hmac.compare_digest(stored, candidate):
                 return user
         return None
+
+    def issue_session(self, user: User) -> str:
+        """Mint an opaque browser token; the API key never enters a cookie."""
+        token = secrets.token_urlsafe(32)
+        with self._session_lock:
+            self._sessions[hash_key(token)] = (user, time.time() + self._session_ttl_s)
+        return token
+
+    def authenticate_session(self, token: str | None) -> User | None:
+        if not self._enabled:
+            return _SINGLE_USER
+        if not token:
+            return None
+        digest = hash_key(token)
+        now = time.time()
+        with self._session_lock:
+            session = self._sessions.get(digest)
+            if session is None:
+                return None
+            user, expires_at = session
+            if expires_at <= now:
+                self._sessions.pop(digest, None)
+                return None
+            return user
+
+    def revoke_session(self, token: str | None) -> None:
+        if token:
+            with self._session_lock:
+                self._sessions.pop(hash_key(token), None)
+
+    @property
+    def session_ttl_s(self) -> int:
+        return self._session_ttl_s
 
 
 def _cli() -> None:  # pragma: no cover - dev utility

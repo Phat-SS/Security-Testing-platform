@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 from sqlalchemy import create_engine
 
@@ -45,6 +45,9 @@ class Assessment(Base):
         back_populates="assessment", cascade="all, delete-orphan"
     )
     agent_records: Mapped[list["AgentRecordRow"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan"
+    )
+    jobs: Mapped[list["JobRow"]] = relationship(
         back_populates="assessment", cascade="all, delete-orphan"
     )
 
@@ -148,6 +151,31 @@ class AuditLog(Base):
     assessment_id: Mapped[str] = mapped_column(String(64), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class JobRow(Base):
+    """Persistent lifecycle for expensive operations and request deduplication."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "kind", "idempotency_key",
+                         name="uq_jobs_assessment_kind_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    state: Mapped[str] = mapped_column(String(16), index=True, default="QUEUED")
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped["DateTime"] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    assessment: Mapped[Assessment] = relationship(back_populates="jobs")
 
 
 def default_database_url() -> str:

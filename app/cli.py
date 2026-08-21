@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 
 from app.analysis import TestDesigner, build_analyzer
@@ -24,6 +25,7 @@ from app.analysis.attack_planner import build_planner
 from app.core.config import Settings
 from app.core.engagement import load_engagement
 from app.core.logging_config import configure_error_tracking, configure_logging
+from app.core.preflight import load_dotenv
 from app.database import Repository, init_db, make_engine, make_session_factory
 from app.execution.adaptive import AdaptiveBudget
 from app.mcp import build_jira_client
@@ -136,6 +138,9 @@ def main() -> None:
                         "gaps (default 1; each round is another batch of PENDING tests)")
     p.add_argument("--report", default="reports/cli_report.html")
     args = p.parse_args()
+    # Same .env load the web app does at startup, for the same reason: this
+    # entry point is not launched through the Node wrapper that parses it.
+    load_dotenv(os.getenv("RUNTIME_ENV_PATH", ".env"))
     configure_logging()
     configure_error_tracking()
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)

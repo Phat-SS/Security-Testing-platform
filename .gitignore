@@ -3,6 +3,7 @@ node_modules/
 __pycache__/
 *.pyc
 *.db
+*.db.bak*
 reports/*.html
 evidence/*
 # real engagement config carries target + test-account tokens — never commit it

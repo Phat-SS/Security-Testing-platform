@@ -460,3 +460,192 @@ def test_a_ticket_with_no_measurable_requirement_is_unmeasured_not_zero():
     # "100%", so the claim itself is what is asserted absent.)
     assert "of the ticket" not in run.summary
     assert "requirements are covered" not in run.summary
+
+# -- measurement: what gets settled before a model is ever asked ---------------
+
+
+def test_a_reading_measurement_can_settle_is_never_sent_to_the_model():
+    """The cheapest possible answer, and the only one that reproduces exactly.
+
+    A 404 where the test expected a 403, nothing disclosed: the same security
+    decision with a different status line. Spending an API call on it — and
+    presenting the answer as one reader's opinion — would be strictly worse than
+    a named rule anyone can re-derive.
+    """
+    llm = _ScriptedLLM(_FAIL_REPLY)
+    test = _test()
+    execution = _execution(test, response=_response(404, body='{"detail": "Not found"}'))
+    result = ResultAdjudicator(llm).adjudicate(_analysis(), test, execution)
+    assert llm.prompts == []
+    assert result.assessed_result == "PASS"
+    assert result.needs_manual_review is False
+    assert result.resolution == "measured"
+    assert result.rule == "equivalent_refusal"
+    assert result.adjudicator == "deterministic"
+    assert result.advisory is True
+
+
+def test_a_measured_reading_still_carries_the_sealed_verdict_it_disagrees_with():
+    test = _test()
+    execution = _execution(test, response=_response(404, body=""))
+    result = ResultAdjudicator(None).adjudicate(_analysis(), test, execution)
+    assert result.sealed_result == TestStatus.INCONCLUSIVE
+    assert result.assessed_result == "PASS"
+    assert result.advisory is True
+
+
+def test_measurement_works_with_no_ai_configured_at_all():
+    """The half of this that needs no API key. An operator with USE_AI off still
+    gets the queue shortened, which is the point of doing it deterministically."""
+    test = _test()
+    identical = _execution(test, supporting=[_baseline()])
+    result = ResultAdjudicator(None).adjudicate(_analysis(), test, identical)
+    assert result.assessed_result == "FAIL"
+    assert result.needs_manual_review is False
+    assert result.resolution == "measured"
+    assert result.rule == "identical_body"
+
+
+def test_the_measured_differential_is_recorded_even_when_it_settles_nothing():
+    """"34% similar, shares none of the owner's values" is most of the work a
+    person opening the row would do. It belongs on the record either way."""
+    test = _test()
+    result = ResultAdjudicator(None).adjudicate(_analysis(), test, _execution(_test()))
+    assert result.signals
+    assert any("HTTP 200" in line for line in result.signals)
+
+
+def test_an_undecided_result_says_what_kind_of_thing_is_in_the_way():
+    """A queue grouped by "what would clear this" is actionable; a flat list of
+    fourteen test ids is a wall."""
+    test = _test()
+    cases = {
+        "test_data": _execution(test, supporting=[_baseline(status=404)]),
+        "config": _execution(test, result=TestStatus.BLOCKED),
+        "no_evidence": _execution(test, response=_response(200, body="")),
+    }
+    for expected, execution in cases.items():
+        result = ResultAdjudicator(None).adjudicate(_analysis(), test, execution)
+        assert result.blocker == expected, expected
+
+
+def test_a_reading_task_with_no_reader_available_says_it_was_not_read():
+    result = ResultAdjudicator(None).adjudicate(_analysis(), _test(), _execution(_test()))
+    assert result.blocker == "unread"
+    assert result.needs_manual_review is True
+
+
+# -- the challenge pass -------------------------------------------------------
+
+
+class _TwoReplyLLM:
+    """First call answers as the adjudicator, second as the challenger."""
+
+    def __init__(self, first: str, second: str) -> None:
+        self.replies = [first, second]
+        self.prompts: list[str] = []
+
+    def complete(self, system: str, user: str) -> str:
+        self.prompts.append(user)
+        return self.replies[min(len(self.prompts) - 1, len(self.replies) - 1)]
+
+
+def test_a_reading_that_survives_a_challenge_is_marked_as_having_survived_one():
+    llm = _TwoReplyLLM(
+        _FAIL_REPLY,
+        '{"verdict_stands": true, "objection": ""}',
+    )
+    result = ResultAdjudicator(llm, challenge=True).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    assert len(llm.prompts) == 2
+    assert result.assessed_result == "FAIL"
+    assert result.needs_manual_review is False
+    assert result.resolution == "ai_consensus"
+    assert result.challenged is True
+
+
+def test_a_refuted_reading_goes_back_to_a_person_with_the_objection():
+    """The failure mode worth paying a second call to avoid: a confident wrong
+    answer presented to a tester as settled."""
+    llm = _TwoReplyLLM(
+        _FAIL_REPLY,
+        '{"verdict_stands": false, "correct_result": "INCONCLUSIVE", '
+        '"objection": "The body is the attacking persona own record, not the victim."}',
+    )
+    result = ResultAdjudicator(llm, challenge=True).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    assert result.needs_manual_review is True
+    assert result.blocker == "ambiguous"
+    assert "own record" in result.challenge_note
+    # The proposed reading stays on the record — a tester wants to see what was
+    # proposed and why it was rejected.
+    assert result.assessed_result == "FAIL"
+    assert result.resolution == "ai"
+
+
+def test_a_challenge_that_cannot_be_obtained_leaves_the_first_answer_standing():
+    """Degrade to where we would have been without a challenge, not to worse.
+    What it must never do is claim two passes agreed when the second said
+    nothing."""
+    llm = _TwoReplyLLM(_FAIL_REPLY, "the model is down")
+    result = ResultAdjudicator(llm, challenge=True).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    assert result.needs_manual_review is False
+    assert result.resolution == "ai"
+    assert result.challenged is True
+    assert "first pass alone" in result.challenge_note
+
+
+def test_a_challenge_that_answers_a_different_question_is_not_counted_as_agreement():
+    llm = _TwoReplyLLM(_FAIL_REPLY, '{"objection": "looks fine"}')
+    result = ResultAdjudicator(llm, challenge=True).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    assert result.resolution == "ai"
+    assert "did not answer" in result.challenge_note
+
+
+def test_a_reading_that_settles_nothing_is_not_worth_challenging():
+    llm = _TwoReplyLLM(
+        '{"assessed_result": "INCONCLUSIVE", "needs_manual_review": true}',
+        '{"verdict_stands": true}',
+    )
+    ResultAdjudicator(llm, challenge=True).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    assert len(llm.prompts) == 1
+
+
+def test_the_challenge_prompt_carries_the_reading_it_is_asked_to_refute():
+    llm = _TwoReplyLLM(_FAIL_REPLY, '{"verdict_stands": true}')
+    ResultAdjudicator(llm, challenge=True).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    challenge_prompt = llm.prompts[1]
+    assert "The reading you are challenging" in challenge_prompt
+    assert "FAIL" in challenge_prompt
+    # And it still fences the untrusted body, because it is the same evidence.
+    assert "UNTRUSTED_ATTACK_BODY" in challenge_prompt
+
+
+def test_the_measured_differential_reaches_the_reading_prompt():
+    llm = _ScriptedLLM(_FAIL_REPLY)
+    ResultAdjudicator(llm, challenge=False).adjudicate(
+        _analysis(), _test(), _execution(_test()))
+    assert "MEASURED DIFFERENTIAL" in llm.prompts[0]
+
+
+# -- the run-level counts -----------------------------------------------------
+
+
+def test_the_run_says_how_much_of_the_settling_needed_no_model():
+    """"Twelve settled" and "twelve settled, ten of them by measurement" are
+    different claims about how much of this a reader has to take on trust."""
+    test = _test()
+    executions = [_execution(test, execution_id="E-1")]
+    adjudications = [
+        Adjudication(execution_id="E-1", test_id=test.test_id,
+                     sealed_result=TestStatus.INCONCLUSIVE, needs_manual_review=False,
+                     assessed_result="PASS", resolution="measured", rule="equivalent_refusal"),
+    ]
+    run = assess_run(_analysis(), [test], executions, adjudications)
+    assert run.n_auto_resolved == 1
+    assert run.n_measured == 1
+    assert "measuring the captured evidence" in run.summary

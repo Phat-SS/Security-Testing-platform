@@ -88,3 +88,66 @@ def test_write_dotenv_value_is_idempotent(tmp_path):
 
     text = env.read_text(encoding="utf-8")
     assert text.count("JIRA_MCP_URL=") == 1
+
+
+def test_write_dotenv_value_collapses_duplicate_keys(tmp_path):
+    """The bug this guards: .env is last-one-wins, so replacing only the first
+    of two copies wrote the fresh token *above* the stale one that actually got
+    loaded — the Refresh token button appeared to do nothing."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "JIRA_MCP_TOKEN=first\nOTHER=1\nJIRA_MCP_TOKEN=stale-duplicate\n",
+        encoding="utf-8",
+    )
+
+    write_dotenv_value("JIRA_MCP_TOKEN", "fresh", path=str(env))
+
+    text = env.read_text(encoding="utf-8")
+    assert text.count("JIRA_MCP_TOKEN=") == 1
+    assert "JIRA_MCP_TOKEN=fresh" in text
+    assert "stale-duplicate" not in text
+    assert "OTHER=1" in text
+    # Kept where the first copy was, not appended to the end.
+    assert text.splitlines()[0] == "JIRA_MCP_TOKEN=fresh"
+
+
+def test_write_dotenv_value_leaves_prose_comments_alone(tmp_path):
+    """`#  KEY  what it does` documents the key; only a `KEY=` line is a value."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "#   JIRA_MCP_TOKEN  OAuth access token -> Authorization: Bearer <token>\n"
+        "JIRA_MCP_TOKEN=old\n",
+        encoding="utf-8",
+    )
+
+    write_dotenv_value("JIRA_MCP_TOKEN", "new", path=str(env))
+
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("#   JIRA_MCP_TOKEN  OAuth access token")
+    assert lines[1] == "JIRA_MCP_TOKEN=new"
+
+
+def test_write_dotenv_value_preserves_crlf(tmp_path):
+    """The real .env on Windows is CRLF; rewriting it must not churn every line."""
+    env = tmp_path / ".env"
+    env.write_bytes(b"OTHER=1\r\nJIRA_MCP_TOKEN=old\r\n")
+
+    write_dotenv_value("JIRA_MCP_TOKEN", "new", path=str(env))
+
+    assert env.read_bytes() == b"OTHER=1\r\nJIRA_MCP_TOKEN=new\r\n"
+
+
+def test_reload_dotenv_last_occurrence_wins(tmp_path, monkeypatch):
+    """Documents the precedence write_dotenv_value has to respect, and that
+    scripts/security-ui.js's own parser already follows."""
+    from app.core.preflight import reload_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("JIRA_MCP_TOKEN=first\nJIRA_MCP_TOKEN=last\n", encoding="utf-8")
+    monkeypatch.delenv("JIRA_MCP_TOKEN", raising=False)
+
+    reload_dotenv(str(env))
+
+    import os
+
+    assert os.environ["JIRA_MCP_TOKEN"] == "last"

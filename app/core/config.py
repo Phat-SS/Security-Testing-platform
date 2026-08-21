@@ -19,8 +19,15 @@ class RunnerLimits:
 
 @dataclass(frozen=True)
 class Settings:
+    """Runner guardrails only.
+
+    Whether a private/loopback address may be reached is deliberately *not*
+    here. It is part of the engagement's scope block, which is the reviewable
+    authorization artifact — an env var that could widen that boundary from
+    outside the file a human signed off on is a backdoor, not a setting.
+    """
+
     limits: RunnerLimits
-    default_allow_private_ranges: bool
 
     @staticmethod
     def from_env() -> "Settings":
@@ -30,9 +37,6 @@ class Settings:
                 max_response_bytes=int(os.getenv("RUNNER_MAX_RESPONSE_BYTES", "2000000")),
                 max_requests_per_test=int(os.getenv("RUNNER_MAX_REQUESTS_PER_TEST", "25")),
             ),
-            # Default-deny private ranges. Only a lab explicitly opts in.
-            default_allow_private_ranges=os.getenv("ALLOW_PRIVATE_RANGES", "false").lower()
-            == "true",
         )
 
 

@@ -8,6 +8,8 @@ fake before the MCP wiring exists.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -27,6 +29,42 @@ class NormalizedIssue:
     components: list[str] = field(default_factory=list)
     environment: str = ""
     links: list[str] = field(default_factory=list)
+    updated_at: str = ""
+    comments_complete: bool = True
+    attachments_complete: bool = True
+    fields_complete: bool = True
+    attachment_hashes: dict[str, str] = field(default_factory=dict)
+    completeness_warnings: list[str] = field(default_factory=list)
+
+    def snapshot(self) -> dict:
+        """Immutable-input manifest persisted with the analysis."""
+        payload = {
+            "issue_key": self.issue_key,
+            "project_key": self.project_key,
+            "summary": self.summary,
+            "description": self.description,
+            "acceptance_criteria": self.acceptance_criteria,
+            "comments": self.comments,
+            "attachments": self.attachments,
+            "attachment_hashes": self.attachment_hashes,
+            "labels": self.labels,
+            "components": self.components,
+            "environment": self.environment,
+            "links": self.links,
+            "updated_at": self.updated_at,
+            "complete": self.is_complete,
+            "comments_complete": self.comments_complete,
+            "attachments_complete": self.attachments_complete,
+            "fields_complete": self.fields_complete,
+            "warnings": self.completeness_warnings,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        payload["snapshot_hash"] = hashlib.sha256(encoded).hexdigest()
+        return payload
+
+    @property
+    def is_complete(self) -> bool:
+        return self.comments_complete and self.attachments_complete and self.fields_complete
 
 
 class JiraMCPClient(Protocol):

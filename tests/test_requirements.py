@@ -262,3 +262,12 @@ def test_prose_without_requirement_grammar_is_not_invented_into_requirements():
 def test_the_text_extractor_is_bounded():
     text = "\n".join(f"Rule {i} must hold." for i in range(60))
     assert len(extract_requirements_from_text(text)) <= 25
+
+
+def test_security_requirement_added_in_a_comment_enters_the_denominator():
+    issue = _issue(comments=["QA: the endpoint must reject an expired bearer token."])
+
+    items = extract_requirements(issue)
+
+    assert any("expired bearer token" in item.text for item in items)
+    assert any(item.source == "comment:1" for item in items)
