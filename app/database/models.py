@@ -220,5 +220,14 @@ def init_db(engine) -> None:
     from app.database.migrate import bootstrap_alembic
 
     was_fresh = not inspect(engine).get_table_names()
-    Base.metadata.create_all(engine)
+    # Migrations run against the database's true pre-existing schema first,
+    # so a migration that creates a brand-new table (e.g. 0003_jobs) is the
+    # one thing that creates it. Running create_all() beforehand would create
+    # that same table ahead of the migration (its model already lives in
+    # Base.metadata by the time the migration exists), leaving alembic_version
+    # stuck behind head and the migration failing with "table already exists"
+    # on every subsequent startup. create_all() runs after purely as a
+    # catch-all for tables that don't have a migration at all yet; it no-ops
+    # on anything migrations already created.
     bootstrap_alembic(engine, was_fresh=was_fresh)
+    Base.metadata.create_all(engine)
