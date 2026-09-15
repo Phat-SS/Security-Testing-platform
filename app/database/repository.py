@@ -22,6 +22,7 @@ from app.database.models import (
     ExecutionRow,
     FindingRow,
     JobRow,
+    RunSnapshotRow,
     TestCaseRow,
 )
 from app.schemas.agent import PlanReview, RunAssessment
@@ -49,15 +50,50 @@ def _job_from_row(row: JobRow) -> Job:
 
 
 class Repository:
+    #: Bounded, and cleared wholesale rather than evicted one at a time: the
+    #: entries are a few bytes each and the cost of a miss is one indexed
+    #: primary-key lookup.
+    _ENGAGEMENT_CACHE_MAX = 512
+
     def __init__(self, session_factory) -> None:
         self._sf = session_factory
+        self._engagement_of: dict[str, str] = {}
 
     # -- assessments --------------------------------------------------------
 
-    def create_assessment(self, assessment_id: str, issue_key: str, project_key: str) -> None:
+    def create_assessment(self, assessment_id: str, issue_key: str, project_key: str,
+                          engagement: str = "") -> None:
         with self._sf() as s:
-            s.add(Assessment(id=assessment_id, issue_key=issue_key, project_key=project_key))
+            s.add(Assessment(id=assessment_id, issue_key=issue_key,
+                             project_key=project_key, engagement=engagement))
             s.commit()
+
+    def assessment_engagement(self, assessment_id: str) -> str:
+        """Which engagement this assessment belongs to, or "" for one created
+        before there could be more than one.
+
+        Cached, because the engagement middleware asks on every request under
+        `/assessment/...` — including the run panel's poll, which fires every
+        1.5 seconds while a run is in flight. The answer is written once at
+        import and never changes afterwards, so there is nothing to invalidate;
+        a bounded dict keeps a long-lived process from accumulating one entry
+        per assessment forever.
+        """
+        cached = self._engagement_of.get(assessment_id)
+        if cached is not None:
+            return cached
+        with self._sf() as s:
+            row = s.get(Assessment, assessment_id)
+            if row is None:
+                # Not cached: an id that does not exist yet may exist in a
+                # moment (a newly created assessment, a racing request), and a
+                # cached "" would outlive that.
+                return ""
+            answer = row.engagement or ""
+        if len(self._engagement_of) >= self._ENGAGEMENT_CACHE_MAX:
+            self._engagement_of.clear()
+        self._engagement_of[assessment_id] = answer
+        return answer
 
     def save_analysis(self, assessment_id: str, analysis: IssueAnalysis) -> None:
         with self._sf() as s:
@@ -708,6 +744,90 @@ class Repository:
             s.refresh(row)
             return _job_from_row(row)
 
+    def set_job_progress(self, job_id: str, progress: dict) -> None:
+        """Update a RUNNING job's `result` without touching its state.
+
+        Separate from `transition_job` on purpose: progress is written many
+        times during one run, and routing it through the state machine would
+        mean either a no-op transition (RUNNING -> RUNNING is not allowed) or
+        loosening the machine that keeps a SUCCEEDED job from being reopened.
+        """
+        with self._sf() as s:
+            row = s.query(JobRow).filter_by(job_id=job_id).first()
+            if row is None or row.state != "RUNNING":
+                return
+            row.result_json = progress
+            s.commit()
+
+    def latest_job(self, assessment_id: str, kind: str) -> Job | None:
+        """The most recent job of this kind, which is what the page polls: a
+        run started in another tab is still this assessment's run."""
+        with self._sf() as s:
+            row = (
+                s.query(JobRow).filter_by(assessment_id=assessment_id, kind=kind)
+                .order_by(JobRow.created_at.desc(), JobRow.id.desc()).first()
+            )
+            return _job_from_row(row) if row else None
+
+    # -- the authorization a run was sent under -----------------------------
+
+    def save_run_snapshot(self, assessment_id: str, fingerprint: str, data: dict) -> None:
+        """Record the context, once per distinct configuration.
+
+        Idempotent on the fingerprint: an unchanged engagement re-run twenty
+        times is one authorization, not twenty. Two callers racing the same
+        insert is the ordinary case here (a re-run starting while the first run
+        finishes), so the duplicate is caught rather than prevented.
+        """
+        with self._sf() as s:
+            existing = s.query(RunSnapshotRow).filter_by(
+                assessment_id=assessment_id, fingerprint=fingerprint
+            ).first()
+            if existing is not None:
+                return
+            s.add(RunSnapshotRow(assessment_id=assessment_id, fingerprint=fingerprint,
+                                 data_json=data))
+            try:
+                s.commit()
+            except IntegrityError:
+                s.rollback()
+
+    def get_run_snapshot(self, assessment_id: str, fingerprint: str) -> dict | None:
+        if not fingerprint:
+            return None
+        with self._sf() as s:
+            row = s.query(RunSnapshotRow).filter_by(
+                assessment_id=assessment_id, fingerprint=fingerprint
+            ).first()
+            return dict(row.data_json or {}) if row else None
+
+    def latest_run_snapshot(self, assessment_id: str) -> dict | None:
+        with self._sf() as s:
+            row = (
+                s.query(RunSnapshotRow).filter_by(assessment_id=assessment_id)
+                .order_by(RunSnapshotRow.created_at.desc(), RunSnapshotRow.id.desc()).first()
+            )
+            return dict(row.data_json or {}) if row else None
+
+    def fail_orphaned_jobs(self, error: str) -> int:
+        """Settle every job left RUNNING by a process that is no longer here.
+
+        A run lives in a background task, so a restart — a deploy, a crash, the
+        shutdown button — leaves its row RUNNING with nothing to advance it.
+        The page polls that row, so the job would otherwise be reported as in
+        flight forever. Called once at startup, where "any RUNNING job belongs
+        to a dead process" is true by construction: this process has not
+        started one yet.
+        """
+        with self._sf() as s:
+            rows = s.query(JobRow).filter_by(state="RUNNING").all()
+            for row in rows:
+                row.state = "FAILED"
+                row.error = error
+            if rows:
+                s.commit()
+            return len(rows)
+
     def get_job(self, job_id: str) -> Job | None:
         with self._sf() as s:
             row = s.query(JobRow).filter_by(job_id=job_id).first()
@@ -719,6 +839,42 @@ class Repository:
         with self._sf() as s:
             s.add(AuditLog(actor=actor, action=action, assessment_id=assessment_id, detail=detail))
             s.commit()
+
+    def findings_across(self, engagement: str = "", limit: int = 500) -> list[tuple]:
+        """Every confirmed finding on this engagement, newest assessment first.
+
+        `(assessment_id, issue_key, finding)`. One query rather than a loop over
+        assessments: a findings screen that issues N+1 queries stops being
+        openable on the engagement it matters most for.
+        """
+        with self._sf() as s:
+            q = (
+                s.query(FindingRow, Assessment)
+                .join(Assessment, Assessment.id == FindingRow.assessment_id)
+                .order_by(Assessment.created_at.desc(), FindingRow.id.asc())
+            )
+            if engagement:
+                q = q.filter(Assessment.engagement == engagement)
+            return [
+                (row.assessment_id, a.issue_key, Finding.model_validate(row.data_json))
+                for row, a in q.limit(limit).all()
+            ]
+
+    def recent_activity(self, engagement: str = "", limit: int = 200) -> list[tuple]:
+        """The audit log, across assessments. `(entry, issue_key)`.
+
+        The log has always recorded who did what; nothing ever showed it. An
+        audit trail nobody can read is one nobody checks.
+        """
+        with self._sf() as s:
+            q = (
+                s.query(AuditLog, Assessment)
+                .outerjoin(Assessment, Assessment.id == AuditLog.assessment_id)
+                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            )
+            if engagement:
+                q = q.filter(Assessment.engagement == engagement)
+            return [(entry, a.issue_key if a else "") for entry, a in q.limit(limit).all()]
 
     def get_audit(self, assessment_id: str) -> list[AuditLog]:
         with self._sf() as s:

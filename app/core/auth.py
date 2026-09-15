@@ -21,10 +21,13 @@ import hmac
 import json
 import os
 import secrets
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _ROLE_RANK = {"viewer": 1, "tester": 2, "admin": 3}
 
@@ -51,6 +54,8 @@ class AuthManager:
         path = config_path or os.getenv("AUTH_USERS_CONFIG", "config/users.json")
         self._by_hash: dict[str, User] = {}
         self._sessions: dict[str, tuple[User, float]] = {}
+        #: Recent failures per source address, for the lockout below.
+        self._failures: dict[str, list[float]] = {}
         self._session_lock = threading.RLock()
         self._session_ttl_s = max(300, int(os.getenv("AUTH_SESSION_TTL_S", "43200")))
         if self._enabled and Path(path).exists():
@@ -61,6 +66,43 @@ class AuthManager:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    #: How many failures from one source before it is asked to wait, and for how
+    #: long. Not a defence against a distributed attacker — a 24-byte key is not
+    #: guessable and this is not pretending otherwise. It is here so that a
+    #: sustained attempt is slow, bounded, and above all *visible*: a login that
+    #: failed silently and cost nothing to repeat left no trace that anyone had
+    #: ever tried.
+    MAX_FAILURES = 10
+    LOCKOUT_S = 60
+
+    def note_failure(self, source: str) -> None:
+        """Record a rejected sign-in and log it."""
+        now = time.time()
+        with self._session_lock:
+            failures = [t for t in self._failures.get(source, []) if now - t < self.LOCKOUT_S]
+            failures.append(now)
+            self._failures[source] = failures
+            count = len(failures)
+        # WARNING, not INFO: this is the line an operator greps for, and the
+        # only signal that anyone is trying keys at all.
+        _log.warning("failed sign-in attempt (%d in the last %ds) from %s",
+                     count, self.LOCKOUT_S, source or "an unknown source")
+
+    def note_success(self, source: str) -> None:
+        with self._session_lock:
+            self._failures.pop(source, None)
+
+    def locked_out(self, source: str) -> float:
+        """Seconds this source should wait, or 0. Counts only recent failures,
+        so a lockout always expires on its own."""
+        now = time.time()
+        with self._session_lock:
+            failures = [t for t in self._failures.get(source, []) if now - t < self.LOCKOUT_S]
+            self._failures[source] = failures
+        if len(failures) < self.MAX_FAILURES:
+            return 0.0
+        return max(0.0, self.LOCKOUT_S - (now - failures[0]))
 
     def authenticate(self, api_key: str | None) -> User | None:
         """Return the User for a key, or None. In disabled mode, always the
@@ -77,10 +119,23 @@ class AuthManager:
 
     def issue_session(self, user: User) -> str:
         """Mint an opaque browser token; the API key never enters a cookie."""
+        self._evict_expired()
         token = secrets.token_urlsafe(32)
         with self._session_lock:
             self._sessions[hash_key(token)] = (user, time.time() + self._session_ttl_s)
         return token
+
+    def _evict_expired(self) -> None:
+        """Drop sessions nobody will present again.
+
+        Expiry was only ever noticed when a token was looked up, so a process
+        that ran for months accumulated one entry per login and never released
+        one. Called on issue, which is the only moment the map grows.
+        """
+        now = time.time()
+        with self._session_lock:
+            for digest in [d for d, (_u, exp) in self._sessions.items() if exp <= now]:
+                self._sessions.pop(digest, None)
 
     def authenticate_session(self, token: str | None) -> User | None:
         if not self._enabled:

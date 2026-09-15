@@ -1,12 +1,19 @@
 """The assessment screen's structure.
 
-The redesign's claims, asserted rather than eyeballed: inputs come before the
-things derived from them, every piece of jargon carries its own explanation, and
-a step that is finished folds away instead of adding to the scroll.
+The redesign's claims, asserted rather than eyeballed: the screen is four
+phases and shows one at a time, each phase lands where the assessment actually
+is, and every piece of jargon carries its own explanation.
+
+What replaced what: six collapsible steps on one page became Scope / Plan /
+Run / Results, with `?phase=` in the URL. Coverage folded into Scope (it is a
+property of the endpoint list), and the design controls folded into Plan (they
+are how the plan is produced).
 """
 
 import pytest
 from starlette.testclient import TestClient
+
+from conftest import wait_for_run
 
 
 @pytest.fixture()
@@ -42,20 +49,50 @@ def _positions(html: str, ids: list[str]) -> list[int]:
 # -- ordering ---------------------------------------------------------------
 
 
-def test_inputs_come_before_what_is_derived_from_them(client):
-    """The old order opened with Endpoints and OWASP Coverage — both empty until
-    you design — and put the button that designs below them."""
-    page = client.get(f"/assessment/{_import(client)}").text
+def test_only_one_phase_is_rendered_at_a_time(client):
+    """The whole point of the rail: a 300-test plan is not on the page someone
+    opened to read the results, and the run button is not below a screen of
+    folded headings."""
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
 
-    order = ["s-endpoints", "s-design", "s-coverage", "s-plan", "s-execute", "s-results"]
-    positions = _positions(page, order)
-    assert positions == sorted(positions), f"sections are out of order: {order}"
+    scope = client.get(f"/assessment/{aid}?phase=scope").text
+    assert 'id="s-endpoints"' in scope
+    assert 'id="s-plan"' not in scope
+    assert 'id="s-results"' not in scope
+
+    plan = client.get(f"/assessment/{aid}?phase=plan").text
+    assert 'id="s-plan"' in plan
+    assert 'id="s-endpoints"' not in plan
 
 
-def test_the_design_control_is_above_the_coverage_it_produces(client):
-    page = client.get(f"/assessment/{_import(client)}").text
+def test_within_scope_the_surface_comes_before_the_coverage_derived_from_it(client):
+    page = client.get(f"/assessment/{_import(client)}?phase=scope").text
 
-    assert page.index("Generate test plan") < page.index('id="s-coverage"')
+    positions = _positions(page, ["s-endpoints", "s-coverage"])
+    assert positions == sorted(positions)
+
+
+def test_within_plan_the_design_control_comes_before_the_plan_it_produces(client):
+    page = client.get(f"/assessment/{_import(client)}?phase=plan").text
+
+    assert page.index("Generate test plan") < page.index('id="s-plan"')
+
+
+def test_an_old_section_anchor_still_lands_on_the_phase_that_absorbed_it(client):
+    """Reports, the coverage table and older bookmarks link to `#s-execute` and
+    friends. Each resolves to its phase rather than silently falling back."""
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+
+    assert 'id="s-execute"' in client.get(f"/assessment/{aid}?phase=s-execute").text
+    assert 'id="s-coverage"' in client.get(f"/assessment/{aid}?phase=s-coverage").text
+
+
+def test_an_unknown_phase_falls_back_to_where_the_assessment_is(client):
+    page = client.get(f"/assessment/{_import(client)}?phase=nonsense").text
+
+    assert 'id="s-endpoints"' in page, "a fresh ticket belongs on Scope"
 
 
 # -- collapsing -------------------------------------------------------------
@@ -70,35 +107,36 @@ def _is_open(html: str, sid: str) -> bool:
     return " open" in tag
 
 
-def test_a_freshly_analyzed_ticket_opens_the_two_steps_you_can_act_on(client):
+def test_a_freshly_analyzed_ticket_lands_on_scope(client):
+    """The endpoint list is the single input the whole plan is derived from, so
+    correcting it after generating means regenerating."""
     page = client.get(f"/assessment/{_import(client)}").text
 
+    assert 'id="s-endpoints"' in page
     assert _is_open(page, "s-endpoints")
-    assert _is_open(page, "s-design")
-    assert not _is_open(page, "s-execute"), "nothing to execute yet"
-    assert not _is_open(page, "s-results"), "nothing has run yet"
 
 
-def test_once_a_plan_exists_the_page_opens_on_the_plan(client):
+def test_once_a_plan_exists_the_page_lands_on_the_plan(client):
     aid = _import(client)
     client.post(f"/assessment/{aid}/design", follow_redirects=True)
 
     page = client.get(f"/assessment/{aid}").text
 
+    assert 'id="s-plan"' in page
     assert _is_open(page, "s-plan")
     assert not _is_open(page, "s-design"), "designing is done; it should fold away"
 
 
 def test_a_collapsed_section_still_states_what_it_holds(client):
-    """A folded step has to keep answering its question, or collapsing it just
-    hides information."""
+    """A folded section has to keep answering its question, or collapsing it
+    just hides information."""
     aid = _import(client)
     client.post(f"/assessment/{aid}/design", follow_redirects=True)
 
     page = client.get(f"/assessment/{aid}").text
 
-    assert "endpoint(s)" in page
     assert "of" in page and "approved" in page
+    assert "endpoint(s)" in client.get(f"/assessment/{aid}?phase=scope").text
 
 
 # -- explanations -----------------------------------------------------------
@@ -108,8 +146,8 @@ def test_every_coverage_column_carries_its_own_explanation(client):
     aid = _import(client)
     client.post(f"/assessment/{aid}/design", follow_redirects=True)
 
-    page = client.get(f"/assessment/{aid}").text
-    coverage = page[page.index('id="s-coverage"'):page.index('id="s-plan"')]
+    page = client.get(f"/assessment/{aid}?phase=scope").text
+    coverage = page[page.index('id="s-coverage"'):]
 
     for header in ("Category", "State", "From PoC", "Tests"):
         assert header in coverage
@@ -123,7 +161,7 @@ def test_the_from_poc_column_says_it_is_not_a_safety_score(client):
     aid = _import(client)
     client.post(f"/assessment/{aid}/design", follow_redirects=True)
 
-    page = client.get(f"/assessment/{aid}").text
+    page = client.get(f"/assessment/{aid}?phase=scope").text
 
     assert "NOT a" in page and "how secure" in page
 
@@ -162,17 +200,30 @@ def test_the_stat_strip_summarises_the_run_and_links_into_the_sections(client):
 
     for label in ("Endpoints", "Tests", "Approved", "Executed", "Findings", "Coverage"):
         assert label in page
-    assert 'href="#s-plan"' in page
-    assert 'href="#s-coverage"' in page
+    # Each figure links into the phase that owns it, not to an anchor further
+    # down one long page.
+    assert f'href="/assessment/{aid}?phase=plan"' in page
+    assert f'href="/assessment/{aid}?phase=scope"' in page
 
 
-def test_the_step_nav_marks_where_the_assessment_actually_is(client):
+def test_the_phase_rail_marks_where_the_assessment_actually_is(client):
     aid = _import(client)
 
-    page = client.get(f"/assessment/{aid}").text
+    rail = client.get(f"/assessment/{aid}").text.split('class="stepnav"')[1][:900]
 
-    assert 'data-step="analyze"' in page
-    assert "current" in page.split('class="stepnav"')[1][:900]
+    for key in ("scope", "plan", "run", "results"):
+        assert f'data-phase="{key}"' in rail
+    assert 'class="on"' in rail, "the current phase is marked"
+
+
+def test_the_rail_shows_the_phase_the_url_asked_for(client):
+    aid = _import(client)
+    client.post(f"/assessment/{aid}/design", follow_redirects=True)
+
+    rail = client.get(f"/assessment/{aid}?phase=run").text.split('class="stepnav"')[1][:900]
+
+    at_run = rail.index('data-phase="run"')
+    assert 'class="on"' in rail[rail.rindex("<a", 0, at_run):at_run]
 
 
 # -- theme ------------------------------------------------------------------
@@ -232,6 +283,7 @@ def test_verdicts_are_shown_so_blocked_does_not_read_as_clean(client):
     client.post("/config/environments",
                 data={"name": "dev", "url": "http://127.0.0.1:19195"})
     client.post(f"/assessment/{aid}/execute", follow_redirects=True)
+    wait_for_run(client, aid)
 
     page = client.get(f"/assessment/{aid}").text
 
@@ -240,11 +292,12 @@ def test_verdicts_are_shown_so_blocked_does_not_read_as_clean(client):
     assert "BLOCKED" in page or "ERROR" in page or "PASS" in page
 
 
-def test_the_page_head_does_not_reuse_the_app_topbar_class(client):
-    """`.topbar` is the application chrome; using it for the page heading made the
-    h1 inherit the chrome's flex layout and margins."""
+def test_the_page_head_does_not_reuse_the_app_chrome_class(client):
+    """The page heading must not borrow the application chrome's classes — doing
+    that made the h1 inherit the chrome's flex layout and margins."""
     page = client.get(f"/assessment/{_import(client)}").text
 
-    body = page[page.index('class="wrap"'):]
+    body = page[page.index('class="content"'):]
     assert 'class="pagehead"' in body
-    assert body.count('class="topbar"') == 1, "only the app chrome should be a .topbar"
+    assert 'class="appbar"' not in body, "the app bar belongs to the shell, not the page"
+    assert 'class="sidebar"' not in body

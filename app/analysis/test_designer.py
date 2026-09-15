@@ -44,6 +44,7 @@ from app.schemas.testcase import (
     Mutation,
     RequestSpec,
     TestCase,
+    InvariantAssertion,
     VerificationStep,
 )
 
@@ -467,6 +468,44 @@ class TestDesigner:
                 ),
             )
         ]
+        # A one-shot flow is the case where "it was accepted" and "it actually
+        # happened" come apart, and where only the second one is a finding: a
+        # redeem endpoint answering 200 ten times has either committed ten
+        # times or deduplicated nine of them, and the status line cannot tell
+        # you which. The read-back can, and it is the same rule this platform
+        # applies everywhere else — a 200 is never a finding on its own.
+        if self._is_one_shot_flow(ep) and ep.method.upper() in DESTRUCTIVE_METHODS:
+            tests.append(self._mk(
+                OwaspApiCategory.API6, c, Severity.HIGH, ep,
+                title=f"Repeated commits of the one-shot flow {ep.signature} persist",
+                objective="Verify a sensitive one-shot operation commits once however many "
+                          "times it is invoked — read back afterwards rather than trusting "
+                          "the status code of each attempt.",
+                auth=AuthContext(persona=self._attacker),
+                mutation=Mutation(kind="repeat_flow", detail={"count": 5}),
+                # The read-back runs as the identity that owns the object, so a
+                # failure to see the duplicate cannot be the attacker's own
+                # visibility being restricted.
+                verification=VerificationStep(
+                    as_persona=self._victim if ep.object_id_params else self._attacker,
+                    request=RequestSpec(method="GET", path=ep.path),
+                    proves_exploit_when=[
+                        InvariantAssertion(
+                            json_path="$.count",
+                            operator="gt",
+                            expected=1,
+                            description="More than one commit survived, so the flow is not "
+                                        "one-shot in fact — only in its response codes.",
+                        ),
+                    ],
+                    description="Re-read the object after the burst: what persisted is the "
+                                "finding, not what was accepted.",
+                ),
+                expected=ExpectedResult(
+                    status_in=[200, 201, 400, 409, 429],
+                    max_successful_repeats=1,
+                ),
+            ))
         # A concurrent burst only makes sense where repetition should be
         # impossible rather than merely rate-limited; firing it at an endpoint
         # that legitimately accepts repeats manufactures a false positive.
@@ -521,6 +560,23 @@ class TestDesigner:
         ))
         return tests
 
+    # -- what kind of endpoint is this --------------------------------------
+    #
+    # Matched on the path, which is the one thing every source of endpoints
+    # agrees on — prose, a specification, or a hand-typed row.
+
+    @staticmethod
+    def _is_graphql(ep: Endpoint) -> bool:
+        return "graphql" in ep.path.lower() or ep.path.rstrip("/").endswith("/gql")
+
+    @staticmethod
+    def _is_oauth_redirect(ep: Endpoint) -> bool:
+        path = ep.path.lower()
+        if any(word in path for word in ("/authorize", "/oauth", "/connect/auth", "/sso")):
+            return True
+        # A route taking a redirect target is the same surface under any name.
+        return any("redirect" in f.lower() for f in ep.url_fields)
+
     # -- API8: security misconfiguration ------------------------------------
 
     def _api8(self, ep: Endpoint, c) -> list[TestCase]:
@@ -554,6 +610,22 @@ class TestDesigner:
                 ),
             ),
         ]
+        tests.append(self._mk(
+            OwaspApiCategory.API8, c, Severity.MEDIUM, ep,
+            title="Host header is trusted for absolute URLs",
+            objective="Verify a forged Host header is not reflected into links, "
+                      "redirects or password-reset URLs the server generates.",
+            auth=AuthContext(persona=self._attacker),
+            mutation=Mutation(kind="host_header_injection",
+                              detail={"host": "evil.example"}),
+            expected=ExpectedResult(
+                status_in=any_status,
+                # Reflecting the forged host into the body is the finding; a
+                # 200 on its own is not, which is why the status list is open.
+                body_must_not_contain=["evil.example"],
+                forbidden_response_headers={"location": "evil.example"},
+            ),
+        ))
         if not self.aggressive:
             return tests
         tests.append(self._mk(
@@ -587,8 +659,33 @@ class TestDesigner:
                 ),
             )
         ]
+        if self._is_graphql(ep):
+            # Not gated on `aggressive`: an exposed schema is the whole
+            # inventory of a GraphQL API, and asking for it is one request.
+            tests.append(self._mk(
+                OwaspApiCategory.API9, c, Severity.MEDIUM, ep,
+                title="GraphQL introspection enabled",
+                objective="Verify the schema is not served to unauthenticated callers, "
+                          "which would hand over the API's entire inventory.",
+                auth=AuthContext(persona="anonymous"),
+                mutation=Mutation(kind="graphql_introspection_probe"),
+                expected=ExpectedResult(
+                    status_in=[400, 401, 403, 404],
+                    body_must_not_contain=["__schema", "__typename", "queryType"],
+                ),
+            ))
         if not self.aggressive:
             return tests
+        if self._is_graphql(ep):
+            tests.append(self._mk(
+                OwaspApiCategory.API9, c, Severity.MEDIUM, ep,
+                title="GraphQL query batching unbounded",
+                objective="Verify a batched query array is not executed wholesale, "
+                          "which turns one request into arbitrarily many.",
+                auth=AuthContext(persona=self._attacker),
+                mutation=Mutation(kind="graphql_batching_abuse", detail={"count": 25}),
+                expected=ExpectedResult(status_in=[400, 401, 403, 413, 429]),
+            ))
         if "/v" in ep.path:
             tests.append(self._mk(
                 OwaspApiCategory.API9, c, Severity.MEDIUM, ep,
@@ -630,7 +727,32 @@ class TestDesigner:
                 ),
                 expected=ExpectedResult(status_in=[400, 403, 422]),
             )
-        ]
+        ] + self._oauth_redirect_tests(ep, c)
+
+    def _oauth_redirect_tests(self, ep: Endpoint, c) -> list[TestCase]:
+        """An authorization endpoint that accepts an attacker's `redirect_uri`
+        hands over the code it is about to issue.
+
+        A reviewed, registered mutation the deterministic designer could never
+        reach before, because nothing told it which routes were OAuth. The path
+        does, and so does a declared redirect field.
+        """
+        if not self._is_oauth_redirect(ep):
+            return []
+        return [self._mk(
+            OwaspApiCategory.API10, c, Severity.HIGH, ep,
+            title="Authorization redirect target is not allow-listed",
+            objective="Verify redirect_uri is matched against registered values rather "
+                      "than accepted from the request, which would deliver the "
+                      "authorization code to an attacker.",
+            auth=AuthContext(persona=self._attacker),
+            mutation=Mutation(kind="oauth_redirect_uri_bypass",
+                              detail={"redirect_uri": "https://evil.example/callback"}),
+            expected=ExpectedResult(
+                status_in=[400, 401, 403],
+                forbidden_response_headers={"location": "evil.example"},
+            ),
+        )]
 
     # -- helpers ------------------------------------------------------------
 

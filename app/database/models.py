@@ -29,6 +29,10 @@ class Assessment(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     issue_key: Mapped[str] = mapped_column(String(64), index=True)
     project_key: Mapped[str] = mapped_column(String(64), default="")
+    # Which engagement authorized this work. Empty on every row written before
+    # there could be more than one, and read as "whichever is current" — which
+    # is what those assessments already meant.
+    engagement: Mapped[str] = mapped_column(String(64), default="", index=True)
     target_base_url: Mapped[str] = mapped_column(String(512), default="")
     status: Mapped[str] = mapped_column(String(32), default="CREATED")
     analysis_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -138,6 +142,28 @@ class AgentRecordRow(Base):
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     assessment: Mapped[Assessment] = relationship(back_populates="agent_records")
+
+
+class RunSnapshotRow(Base):
+    """The authorization context a run was sent under.
+
+    One row per distinct configuration per assessment: re-running under an
+    unchanged engagement should not accumulate identical copies, and the same
+    fingerprint must always mean the same context. Executions carry the
+    fingerprint, which is what ties a sealed record back to what authorized it.
+    """
+
+    __tablename__ = "run_snapshots"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "fingerprint",
+                         name="uq_run_snapshots_assessment_fingerprint"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    data_json: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AuditLog(Base):

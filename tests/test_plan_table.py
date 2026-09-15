@@ -234,6 +234,9 @@ def test_a_large_bulk_decision_summarises_instead_of_logging_every_id(client, bi
 
 
 def test_the_coverage_table_links_into_a_filtered_plan(client, big_plan):
-    page = client.get(f"/assessment/{big_plan}").text
+    page = client.get(f"/assessment/{big_plan}?phase=scope").text
 
-    assert "?cat=API1%3A2023#s-plan" in page or "?cat=API1:2023#s-plan" in page
+    # The coverage table lives on Scope and links across to a filtered Plan,
+    # so the destination carries the phase as well as the filter.
+    assert ("?cat=API1%3A2023&phase=plan" in page
+            or "?cat=API1:2023&phase=plan" in page)

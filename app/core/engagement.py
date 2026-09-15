@@ -160,6 +160,7 @@ RUNNER_KEYS = (
     "timeout_s",
     "max_response_bytes",
     "max_requests_per_test",
+    "max_concurrent_tests",
 )
 
 
@@ -214,6 +215,37 @@ def _sync_legacy_target(data: dict, environments: dict[str, str]) -> None:
         data["target_base_url"] = next(iter(environments.values()))
     else:
         data.pop("target_base_url", None)
+
+
+# Environment names are display labels, not identifiers: they are JSON object
+# keys and one path segment in /config/environments/<name>/activate, and nothing
+# derives a filename from them. So real-world names like "DEV_BMW AU" are fine;
+# what must stay out is anything that would change the shape of that URL (a
+# slash, a percent-escape, a control character) or a name that is only
+# whitespace. Anything stricter just makes a tester rename their own targets.
+_ENV_NAME_FORBIDDEN = frozenset(r'''/\?#%&;:"'<>|*''')
+_ENV_NAME_MAX = 64
+
+
+def normalize_environment_name(name: str) -> str | None:
+    """Return the name as it should be stored, or None if it is unusable.
+
+    Trims, collapses internal whitespace runs to single spaces (so "dev  AU" and
+    "dev AU" cannot become two rows that look identical in the table), and
+    rejects empty, over-long, control-character or path-shaped names.
+    """
+    cleaned = " ".join((name or "").split())
+    if not cleaned or len(cleaned) > _ENV_NAME_MAX:
+        return None
+    if cleaned in (".", ".."):
+        # Percent-encoding leaves a dot alone, so these stay live path segments:
+        # the browser resolves /config/environments/../delete to
+        # /config/environments/delete before it is ever sent, and an environment
+        # named ".." could never be deleted or made default from the UI again.
+        return None
+    if any(c in _ENV_NAME_FORBIDDEN or ord(c) < 0x20 or ord(c) == 0x7F for c in cleaned):
+        return None
+    return cleaned
 
 
 def save_environment(path: str, name: str, url: str, make_active: bool = False) -> None:

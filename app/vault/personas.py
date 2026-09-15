@@ -67,3 +67,10 @@ class PersonaVault:
 
     def names(self) -> list[str]:
         return list(self._personas)
+
+    def all(self) -> list[Persona]:
+        """Every persona, for callers that need to describe the vault rather
+        than resolve one identity out of it (the readiness panel, the run
+        snapshot). Returns the objects; secrets are filtered by the caller that
+        is about to store or display them."""
+        return list(self._personas.values())

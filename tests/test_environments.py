@@ -61,10 +61,30 @@ def test_save_and_list_environment(client):
     assert "default" in r.text  # first saved environment becomes the default
 
 
-def test_invalid_name_rejected(client):
-    r = client.post("/config/environments", data={"name": "bad name!", "url": "http://x"})
+@pytest.mark.parametrize("bad", ["bad/name", "  ", "pct%20name", "a" * 65])
+def test_invalid_name_rejected(client, bad):
+    r = client.post("/config/environments", data={"name": bad, "url": "http://x"})
     assert r.status_code == 400
     assert "not a valid environment name" in r.text
+
+
+def test_name_with_spaces_is_saved_and_deletable(client):
+    """Real engagements name environments after the client ("DEV_BMW AU").
+    The name is a label and a URL-encoded path segment, never a filename, so a
+    space is allowed — and the row it produces must still round-trip."""
+    r = client.post("/config/environments",
+                    data={"name": "  DEV_BMW   AU ", "url": "https://dev.bmw.example.com"},
+                    follow_redirects=True)
+    assert r.status_code == 200
+    assert "<b>DEV_BMW AU</b>" in r.text  # trimmed, inner whitespace collapsed
+
+    from app.api.main import state as app_state
+
+    assert "DEV_BMW AU" in app_state.engagement.environments
+
+    r = client.post("/config/environments/DEV_BMW%20AU/delete", follow_redirects=True)
+    assert r.status_code == 200
+    assert "No environments configured yet" in r.text
 
 
 def test_invalid_url_rejected(client):
@@ -108,7 +128,8 @@ def test_run_button_is_disabled_until_something_is_approved(client):
     client.post("/config/environments", data={"name": "dev", "url": "http://127.0.0.1:8000"})
     aid = client.post("/import", data={"issue_key": "CRM-1234"}, follow_redirects=True).url.path.rsplit("/", 1)[-1]
 
-    r = client.get(f"/assessment/{aid}")
+    # The run controls live on the Run phase; a fresh ticket lands on Scope.
+    r = client.get(f"/assessment/{aid}?phase=run")
 
     assert "no approved tests" in r.text
     assert "disabled" in r.text.split("Run approved tests")[0].rsplit("<button", 1)[-1]
@@ -233,3 +254,14 @@ def test_make_default_switches_the_active_environment(client):
     r = client.post("/config/environments/staging/activate", follow_redirects=True)
     assert r.status_code == 200
     assert "staging is now the default" in r.text
+
+
+@pytest.mark.parametrize("dots", [".", ".."])
+def test_a_dot_only_name_is_rejected(client, dots):
+    """Percent-encoding leaves a dot alone, so `..` stays a live path segment:
+    the browser collapses /config/environments/../delete to
+    /config/environments/delete before sending it, and such an environment
+    could never be deleted or made default again."""
+    r = client.post("/config/environments", data={"name": dots, "url": "http://x.example.com"})
+    assert r.status_code == 400
+    assert "not a valid environment name" in r.text

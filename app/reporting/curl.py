@@ -37,7 +37,7 @@ def render_curl(request: CapturedRequest, persona: Persona | None) -> str:
 
     # Pin to the exact IP the runner's scope validator resolved and connected
     # to, not whatever DNS answers at copy time — the same TOCTOU/rebinding
-    # concern _pin_dns in http_runner.py exists for, applied to reproduction.
+    # concern execution/pinning.py exists for, applied to reproduction.
     if request.resolved_ip:
         parts = urlsplit(request.url)
         if parts.hostname:

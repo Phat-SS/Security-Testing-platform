@@ -22,6 +22,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from conftest import wait_for_run
+
 from app.core.config import Settings
 from app.core.scope import ScopePolicy, ScopeValidator
 from app.database import Repository, init_db, make_engine, make_session_factory
@@ -492,6 +494,7 @@ def test_button_in_the_report_settles_an_undecided_row_end_to_end(live_api):
     repo.save_test_cases("A-live", [build_tests()[0]])
 
     live_api.post("/assessment/A-live/execute", follow_redirects=True)
+    wait_for_run(live_api, "A-live")
     undecided = repo.get_executions("A-live")[0]
     assert undecided.verdict.result == TestStatus.INCONCLUSIVE  # the 502
 

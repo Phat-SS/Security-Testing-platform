@@ -1,5 +1,5 @@
 from app.database import Repository, init_db, make_engine, make_session_factory
-from app.database.migrate import bootstrap_alembic
+from app.database.migrate import bootstrap_alembic, current_revision, head_revision, head_revisions
 from sqlalchemy import inspect, text
 
 
@@ -41,15 +41,22 @@ def test_terminal_job_cannot_be_reopened():
         raise AssertionError("terminal job was reopened")
 
 
-def test_fresh_database_contains_jobs_and_is_stamped_at_the_new_head(tmp_path):
+def test_the_migration_history_has_not_branched():
+    """Two migrations written against the same parent leave `upgrade head` with
+    nothing to choose between, and it refuses rather than guessing. Cheaper to
+    learn here than during a deployment."""
+    assert head_revisions() == [head_revision()]
+
+
+def test_a_fresh_database_is_stamped_at_head(tmp_path):
+    """Asserted against alembic's own head rather than a literal revision id.
+    The literal was the thing that went stale on every migration — and a test
+    that has to be edited to stay green stops being read as a claim."""
     engine = make_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
     init_db(engine)
 
     assert "jobs" in inspect(engine).get_table_names()
-    with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == (
-            "0003_jobs"
-        )
+    assert current_revision(engine) == head_revision()
 
 
 def test_existing_baseline_database_is_upgraded_on_the_engine_that_was_passed(tmp_path):
@@ -68,7 +75,4 @@ def test_existing_baseline_database_is_upgraded_on_the_engine_that_was_passed(tm
     columns = {column["name"] for column in inspect(engine).get_columns("test_cases")}
     assert "jobs" in tables
     assert {"severity", "is_destructive", "source", "path", "search_text"} <= columns
-    with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == (
-            "0003_jobs"
-        )
+    assert current_revision(engine) == head_revision()

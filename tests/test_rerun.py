@@ -12,6 +12,8 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
+from conftest import wait_for_run
+
 from app.schemas.enums import ApprovalStatus, TestSource
 
 
@@ -266,6 +268,7 @@ def test_a_rerun_executes_and_lands_on_the_regression_diff(client_with_scope):
     client.post(f"/assessment/{aid}/plan", follow_redirects=True,
                 data={"action": "approve", "test_ids": non_destructive})
     client.post(f"/assessment/{aid}/execute", follow_redirects=True)
+    wait_for_run(client, aid)
     assert _repo().get_executions(aid), "the baseline run has to have happened"
 
     r = client.post(f"/assessment/{aid}/rerun", data={"mode": "same"}, follow_redirects=True)

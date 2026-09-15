@@ -48,10 +48,13 @@ def test_import_allowed_for_tester(client):
     assert "CRM-1234" in r.text
 
 
-def test_reads_stay_open(client):
-    # dashboard + health are not gated, so monitoring/UX still works
+def test_health_stays_open_but_the_ui_does_not(client):
+    """Reads used to be ungated so that "monitoring/UX still works". Only the
+    first half of that needed it: the container healthcheck probes /api/health
+    with no credentials, while the dashboard shows the engagement and every
+    assessment to whoever asks. See tests/test_read_auth.py."""
     assert client.get("/api/health").status_code == 200
-    assert client.get("/").status_code == 200
+    assert client.get("/", follow_redirects=False).status_code in (303, 401)
 
 
 def test_login_with_valid_key_unlocks_the_ui_via_cookie(client):

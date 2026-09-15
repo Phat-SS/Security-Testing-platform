@@ -153,3 +153,53 @@ Four tabs, in the order you need them:
 
 The AI & evidence section writes to `.env` and requires the **admin** role when
 authentication is enabled.
+
+## Engagements
+
+| Variable | What it does |
+|---|---|
+| `ENGAGEMENT_CONFIG` | A single engagement file. What an existing install already sets; it keeps working unchanged. |
+| `ENGAGEMENTS_DIR` | A directory of engagement files, one per client, each named after its file stem. |
+
+Neither set means **no engagements**: an empty scope, no personas, and nothing
+that can run. That is deliberate — discovery never happens on its own, because
+a config file happening to exist on disk is not the deliberate act default-deny
+asks for. Saving through the configuration UI *is* that act, so an engagement
+written there becomes usable immediately without a restart.
+
+Both can be set together. A directory entry wins over the single file if they
+share a name.
+
+## Runner limits
+
+Set per engagement under **Configuration → Advanced**, or as environment
+defaults.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `RUNNER_TIMEOUT_S` | 15 | Per-request timeout. |
+| `RUNNER_MAX_RESPONSE_BYTES` | 2000000 | Cap on stored/echoed body size. |
+| `RUNNER_MAX_REQUESTS_PER_TEST` | 25 | Caps one test's fan-out, race windows included. |
+| `RUNNER_MAX_CONCURRENT_TESTS` | 1 | How many approved tests run at once. |
+
+`RUNNER_MAX_CONCURRENT_TESTS` defaults to 1 on purpose. Concurrency against
+someone's API is request *rate*, and rate is a blast-radius decision for whoever
+signed the authorization — not one this tool makes on their behalf. Raising it
+speeds a long plan up close to linearly; the evidence chain is identical either
+way, because tests are sealed in plan order after the run rather than as they
+complete.
+
+## Signing in
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AUTH_ENABLED` | false | Off means single-user: every request is the built-in local admin. |
+| `AUTH_USERS_CONFIG` | config/users.json | Where the users and their key hashes live. |
+| `AUTH_SESSION_TTL_S` | 43200 | How long a browser session lasts. |
+| `AUTH_COOKIE_SECURE` | false | Force the `Secure` flag on the session cookie. |
+
+With authentication on, **reads are privileged too**: the dashboard, the config
+panes, an assessment's captured evidence and every export require a session or
+an API key. A rejected sign-in is logged at WARNING (never with the key that was
+tried), and ten failures from one address within a minute are refused without
+checking the key at all.

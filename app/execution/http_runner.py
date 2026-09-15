@@ -20,11 +20,8 @@ All three pass the same scope gate and are sealed into the same evidence record.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
-import socket as _socket
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse
@@ -36,6 +33,7 @@ from app.core.redaction import redact_headers, redact_text, redact_url
 from app.core.scope import ScopeValidator, ScopeViolation
 from app.execution.correlation import correlate_bodies
 from app.execution.evidence import seal
+from app.execution.pinning import build_client, pin
 from app.execution.mutations import MutationError, PreparedRequest, apply_mutation
 from app.execution.oast import OastVerifier
 from app.execution.templating import extract_json_path, resolve, resolve_deep
@@ -59,52 +57,6 @@ class ApprovalRequired(Exception):
     """Execution attempted on a test that a human has not approved."""
 
 
-# Guards the process-global getaddrinfo patch below. See _pin_dns.
-_PIN_LOCK = threading.RLock()
-
-
-@contextlib.contextmanager
-def _pin_dns(host: str | None, ip: str | None):
-    """Force DNS resolution of `host` to the exact `ip` ScopeValidator just
-    checked, for the duration of the wrapped connection.
-
-    Without this, scope validation and the actual TCP connect are two
-    independent DNS lookups: an attacker who controls DNS for an approved
-    host (short TTL, split-horizon) can answer with a public IP during
-    validation and a private/metadata IP a moment later (DNS rebinding /
-    TOCTOU). Pinning collapses that window to zero by reusing the exact
-    address already validated, instead of letting httpx/the OS re-resolve.
-
-    This patches `socket.getaddrinfo` process-wide, so it is serialised behind
-    `_PIN_LOCK`. Two runners pinning *different* hosts concurrently would
-    otherwise install competing patches and could send a request to an address
-    that was validated for a different host — a scope bypass produced by our
-    own safety mechanism. The lock makes that impossible rather than merely
-    unlikely: the previous version relied on the runner being sequential, which
-    was true by convention and stopped being true the moment concurrent
-    (race-condition) probes were added.
-
-    Requests issued in parallel *inside* one pinned block are safe and
-    intended: they all target the same host and the same validated IP.
-    """
-    if not host or not ip:
-        yield
-        return
-    with _PIN_LOCK:
-        real_getaddrinfo = _socket.getaddrinfo
-
-        def _pinned(node, *args, **kwargs):
-            if node == host:
-                node = ip
-            return real_getaddrinfo(node, *args, **kwargs)
-
-        _socket.getaddrinfo = _pinned
-        try:
-            yield
-        finally:
-            _socket.getaddrinfo = real_getaddrinfo
-
-
 # A candidate shorter than this proves nothing either way: short numeric ids,
 # area codes, or short words are routinely present as a coincidental substring
 # of unrelated boilerplate (an RFC problem+json body, a trace id, a version
@@ -123,18 +75,34 @@ class HttpRunner:
         settings: Settings,
         client: httpx.Client | None = None,
         oast: OastVerifier | None = None,
+        engagement_hash: str = "",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._scope = scope
         self._vault = vault
         self._settings = settings
         self._oast = oast
+        # The fingerprint of the authorization this run was started under. It
+        # goes into every sealed record, so the chain proves what the request
+        # was authorized by and not merely that it happened. Empty for callers
+        # that did not capture one (older tests, a direct runner); the field is
+        # still hashed, so an empty value is a recorded fact rather than an
+        # absent one.
+        self._engagement_hash = engagement_hash
         # Injectable client so tests can drive an in-memory ASGI app.
-        self._client = client or httpx.Client(
-            follow_redirects=False,  # a 3xx is captured and evaluated as-is — see _send
+        self._client = client or build_client(
             timeout=settings.limits.timeout_s,
-            headers={"User-Agent": settings.limits.user_agent},
+            user_agent=settings.limits.user_agent,
         )
+
+    def _seal(self, ex, prev_hash: str | None):
+        """Stamp the authorization fingerprint, then seal.
+
+        One place, because a record sealed without it would verify perfectly
+        while proving less than the ones around it — and nothing would say so.
+        """
+        ex.engagement_hash = self._engagement_hash
+        return seal(ex, prev_hash)
 
     # -- public API ---------------------------------------------------------
 
@@ -289,7 +257,7 @@ class HttpRunner:
                 repeat=repeat_stats,
                 log=log,
             )
-            return seal(ex, prev_hash)
+            return self._seal(ex, prev_hash)
 
         # 7. correlation: did the attacker's response disclose a protected
         #    marker belonging to the victim? This is the anti-false-positive
@@ -396,7 +364,7 @@ class HttpRunner:
             oast=oast_proof,
             log=log,
         )
-        return seal(ex, prev_hash)
+        return self._seal(ex, prev_hash)
 
     # -- supporting exchanges ------------------------------------------------
 
@@ -627,25 +595,20 @@ class HttpRunner:
         results: list[tuple[CapturedRequest, CapturedResponse | None, str | None]] = []
 
         def _one(_i: int):
-            # _already_pinned=True is load-bearing, not an optimisation: the
-            # burst runs inside the _pin_dns block below, which holds
-            # _PIN_LOCK. A worker thread re-entering _pin_dns would block on
-            # that lock forever (RLock is reentrant per-thread, and these are
-            # different threads) — deadlocking the whole probe.
             return self._send(
                 prepared.method, url, headers, query, body, pinned_ip,
-                prepared.body_encoding, _already_pinned=True,
+                prepared.body_encoding,
             )
 
-        # One pin block wraps the whole burst: every request targets the same
-        # already-validated host/IP, so parallelism inside it is safe.
-        host = urlparse(url).hostname
-        with _pin_dns(host, pinned_ip):
-            if prepared.concurrent:
-                with ThreadPoolExecutor(max_workers=min(count, 16)) as pool:
-                    results = list(pool.map(_one, range(count)))
-            else:
-                results = [_one(i) for i in range(count)]
+        # Every request in the burst carries the same pin, so the concurrent
+        # case needs no shared block and no lock — which is what a race-window
+        # probe needed all along: the old version serialised the whole process
+        # around the very requests it was trying to overlap.
+        if prepared.concurrent:
+            with ThreadPoolExecutor(max_workers=min(count, 16)) as pool:
+                results = list(pool.map(_one, range(count)))
+        else:
+            results = [_one(i) for i in range(count)]
 
         status_counts: dict[str, int] = {}
         succeeded = 0
@@ -681,7 +644,6 @@ class HttpRunner:
         body: object | None,
         pinned_ip: str | None,
         body_encoding: str = "json",
-        _already_pinned: bool = False,
     ) -> tuple[CapturedRequest, CapturedResponse | None, str | None]:
         """Send one request. The returned CapturedRequest/CapturedResponse are
         redacted for storage; the third element is the raw (pre-redaction,
@@ -724,13 +686,12 @@ class HttpRunner:
             timestamp=timestamp,
         )
 
-        host = urlparse(url).hostname
+        # The pin travels with this one request (see execution/pinning.py), so
+        # the connection goes to the address the validator approved without any
+        # process-global state and without serialising the whole runner.
+        request.extensions = {**request.extensions, **pin(pinned_ip)}
         try:
-            if _already_pinned:
-                response = self._client.send(request)
-            else:
-                with _pin_dns(host, pinned_ip):
-                    response = self._client.send(request)
+            response = self._client.send(request)
         except httpx.HTTPError:
             return captured_req, None, None
 
@@ -815,7 +776,7 @@ class HttpRunner:
             verdict=verdict,
             log=log,
         )
-        return seal(ex, prev_hash)
+        return self._seal(ex, prev_hash)
 
     def _errored(self, test, execution_id, prev_hash, reason, log) -> Execution:
         verdict = Verdict(
@@ -832,7 +793,7 @@ class HttpRunner:
             ),
             response=None, verdict=verdict, log=log,
         )
-        return seal(ex, prev_hash)
+        return self._seal(ex, prev_hash)
 
 
 def _resolve_query(query: dict, context: dict) -> dict:

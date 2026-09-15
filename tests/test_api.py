@@ -33,14 +33,17 @@ def test_health(client):
 def test_dashboard_loads(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert "Security Testing Platform" in r.text
+    assert "API Security" in r.text  # the sidebar brand
     # the importable keys are advertised from the client, not hardcoded in HTML
     assert "MOCK-345" in r.text
 
 
 def test_dashboard_has_config_nav_tab(client):
     r = client.get("/")
-    assert 'href="/config"' in r.text
+    # The sidebar deep-links into each config pane rather than offering one
+    # undifferentiated "Configuration" tab.
+    assert 'href="/config?tab=readiness"' in r.text
+    assert 'href="/config?tab=target"' in r.text
     assert client.get("/config").status_code == 200
     # The pre-unification URL still resolves — it opens the same page on the
     # Environments pane rather than 404ing an old bookmark or report link.
@@ -151,7 +154,9 @@ def test_full_ui_flow_without_execution(client):
     r = client.post(f"/assessment/{aid}/design",
                     data={"poc_python": "import requests\nrequests.get('https://x/customers/2002')"},
                     follow_redirects=True)
-    assert "OWASP Coverage" in r.text
+    # Designing redirects to the Plan phase; coverage is part of Scope.
+    assert "Test plan &amp; approval" in r.text  # designing lands on Plan
+    assert "OWASP Coverage" in client.get(f"/assessment/{aid}?phase=scope").text
     assert "API1:2023" in r.text
 
     # JSON view shows generated tests

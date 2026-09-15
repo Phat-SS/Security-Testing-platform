@@ -14,6 +14,13 @@ class RunnerLimits:
     timeout_s: float = 15.0
     max_response_bytes: int = 2_000_000  # cap stored/echoed body size
     max_requests_per_test: int = 25
+    # How many approved tests may be in flight at once. 1 keeps a run exactly
+    # sequential, which is the default because concurrency against someone's
+    # API is request *rate*, and rate is a blast-radius decision for whoever
+    # signed the authorization. Raising it is what makes a 300-test plan finish
+    # in a minute instead of five; the evidence chain is unaffected either way
+    # (see Orchestrator.execute).
+    max_concurrent_tests: int = 1
     user_agent: str = "SecTestPlatform/0.1 (+authorized-testing)"
 
 
@@ -36,6 +43,7 @@ class Settings:
                 timeout_s=float(os.getenv("RUNNER_TIMEOUT_S", "15")),
                 max_response_bytes=int(os.getenv("RUNNER_MAX_RESPONSE_BYTES", "2000000")),
                 max_requests_per_test=int(os.getenv("RUNNER_MAX_REQUESTS_PER_TEST", "25")),
+                max_concurrent_tests=int(os.getenv("RUNNER_MAX_CONCURRENT_TESTS", "1")),
             ),
         )
 
@@ -57,6 +65,7 @@ def settings_with_overrides(overrides: dict) -> Settings:
         "timeout_s": float,
         "max_response_bytes": int,
         "max_requests_per_test": int,
+        "max_concurrent_tests": int,
     }
     applied = {}
     for key, cast in fields.items():

@@ -10,6 +10,9 @@ both drive.
 
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import hashlib
 import uuid
 
@@ -31,9 +34,11 @@ from app.analysis.requirements import (
     merge_requirements,
 )
 from app.core.config import Settings
+from app.adapters import openapi
+from app.core import snapshot
 from app.core.scope import ScopeValidator
 from app.database.repository import Repository
-from app.execution.evidence import verify_chain
+from app.execution.evidence import seal, verify_chain
 from app.execution.http_runner import HttpRunner
 from app.execution.oast import build_oast_verifier
 from app.owasp.coverage import (
@@ -153,6 +158,20 @@ def _propagated(leader, execution, signals, cluster_id: str, cluster_size: int):
     )
 
 
+def _report(on_progress, done: int, total: int, execution) -> None:
+    """Hand one step to a progress callback, never letting it break the run.
+
+    A run is the one operation here that sends packets at a target; a reporting
+    bug must not be able to abandon it half-finished.
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress(done, total, execution)
+    except Exception:  # pragma: no cover - defensive
+        logging.getLogger(__name__).debug("progress callback failed", exc_info=True)
+
+
 class Orchestrator:
     def __init__(self, repo: Repository, jira_client, analyzer=None,
                  designer: TestDesigner | None = None, planner=None,
@@ -194,12 +213,30 @@ class Orchestrator:
         built until the engagement config has been loaded."""
         self._planner = planner
 
+    def set_designer(self, designer: TestDesigner) -> None:
+        """Rebind the deterministic designer after the engagement's attacker /
+        victim changed.
+
+        The designer holds those two persona names from construction time, and
+        they are what every generated test's `auth_context` is built from. A
+        reload that refreshed the planner but not this one left the platform
+        designing plans against the *previous* pair — which is the one failure
+        here that does not announce itself: if the old personas still exist in
+        the vault the run completes normally and every PASS/FAIL describes a
+        cross-tenant relationship the operator did not configure.
+        """
+        self._designer = designer
+
     # 1-2. import + analyze -------------------------------------------------
 
-    async def import_and_analyze(self, issue_key: str) -> str:
+    async def import_and_analyze(self, issue_key: str, engagement: str = "") -> str:
         issue = await self._jira.get_issue(issue_key)
         assessment_id = f"A-{uuid.uuid4().hex[:10]}"
-        self._repo.create_assessment(assessment_id, issue.issue_key, issue.project_key)
+        # Stamped at import and never inferred afterwards: an assessment belongs
+        # to the engagement it was opened under, whatever is selected in some
+        # other tab three days later.
+        self._repo.create_assessment(assessment_id, issue.issue_key, issue.project_key,
+                                     engagement=engagement)
         self._repo.audit("import_issue", assessment_id, detail=issue.issue_key)
 
         analysis = self._analyzer.analyze(issue)
@@ -434,6 +471,37 @@ class Orchestrator:
         self._refresh_mappings(analysis)
         self._repo.save_analysis(assessment_id, analysis)
         self._repo.audit(action, assessment_id, actor=actor, detail=detail)
+
+    def import_openapi(self, assessment_id: str, text: str, actor: str = "tester") -> dict:
+        """Replace guesswork with what the specification actually declares.
+
+        Additive, like every other edit to this list: a hand-entered row exists
+        because something else could not find it, so an import never removes
+        one. What the spec overrides is only what was previously inferred —
+        whether a route needs a credential, and which of its parameters are
+        object ids.
+
+        Returns what changed, for the person reviewing the import. An endpoint
+        that silently failed to arrive is the failure worth preventing here,
+        because the whole plan is derived from this list.
+        """
+        analysis = self.get_analysis(assessment_id)
+        if analysis is None:
+            raise ValueError("assessment has no analysis to edit")
+
+        imported, summary = openapi.parse(text)
+        merged, changes = openapi.merge(analysis.endpoints, imported)
+        analysis.endpoints = merged
+        self._refresh_mappings(analysis)
+        self._repo.save_analysis(assessment_id, analysis)
+        self._repo.audit(
+            "import_openapi", assessment_id, actor=actor,
+            detail=(f"{summary['title']} {summary['version']} "
+                    f"({summary['spec_version']}): {len(changes['added'])} added, "
+                    f"{len(changes['enriched'])} corrected, "
+                    f"{summary['n_endpoints']} declared"),
+        )
+        return {**summary, **changes}
 
     def delete_endpoint(self, assessment_id: str, signature: str,
                         actor: str = "tester") -> bool:
@@ -811,8 +879,18 @@ class Orchestrator:
         client=None,
         include_destructive: bool = False,
         adaptive=None,
+        on_progress=None,
+        engagement_snapshot: dict | None = None,
     ) -> list:
         """`adaptive`: an AdaptiveBudget to enable the bounded exploitation loop.
+
+        `on_progress(done, total, execution)` is called after each test, with
+        `execution` None once before the first is sent so a caller can show the
+        total immediately. It exists so the UI can stop holding a browser open
+        for the length of a run; it is advisory reporting only and never
+        affects what is sent, what is stored, or any verdict. An exception
+        raised by the callback would abort a run that is otherwise fine, so it
+        is swallowed and logged.
 
         None (the default) keeps the original one-shot behaviour exactly. The
         loop only ever runs when an operator asks for it AND a planner is
@@ -821,8 +899,24 @@ class Orchestrator:
         """
         settings = settings or Settings.from_env()
         self._repo.set_target(assessment_id, base_url)
+
+        # Freeze the authorization this run is about to happen under, before a
+        # single request is sent. Its fingerprint goes into every sealed record,
+        # so a report proves not just that a host was tested but that it was
+        # authorized at the time — editing the scope afterwards no longer
+        # rewrites what an earlier run meant.
+        engagement_hash = ""
+        if engagement_snapshot:
+            engagement_hash = snapshot.fingerprint(engagement_snapshot)
+            self._repo.save_run_snapshot(assessment_id, engagement_hash, engagement_snapshot)
+            self._repo.audit(
+                "engagement_snapshot", assessment_id,
+                detail=f"{engagement_hash[:12]} — {snapshot.describe(engagement_snapshot)}",
+            )
+
         runner = HttpRunner(
-            base_url, scope, vault, settings, client=client, oast=build_oast_verifier()
+            base_url, scope, vault, settings, client=client, oast=build_oast_verifier(),
+            engagement_hash=engagement_hash,
         )
 
         tests = [t for t in self._repo.get_test_cases(assessment_id) if t.is_runnable()]
@@ -860,15 +954,22 @@ class Orchestrator:
                 self._repo.audit("adaptive_skipped", assessment_id,
                                  detail="adaptive execution requested but no AI planner is "
                                         "configured; ran the approved tests one-shot instead")
-            executions = []
-            for t in tests:
-                # run_safe (not run): one test raising an unexpected exception
-                # (e.g. a persona missing from the vault) must not discard every
-                # execution already computed earlier in this same batch.
-                ex = runner.run_safe(t, execution_id=f"{assessment_id}{run_tag}-{t.test_id}",
-                                     prev_hash=prev_hash)
-                prev_hash = ex.evidence_hash
-                executions.append(ex)
+            _report(on_progress, 0, len(tests), None)
+            # run_safe (not run): one test raising an unexpected exception
+            # (e.g. a persona missing from the vault) must not discard every
+            # execution already computed earlier in this same batch.
+            executions = self._run_all(
+                runner, tests, prefix=f"{assessment_id}{run_tag}",
+                workers=max(1, int(getattr(settings.limits, "max_concurrent_tests", 1))),
+                on_progress=on_progress,
+            )
+            # Sealed afterwards, in plan order. Running and sealing used to be
+            # one step, and since sealing needs the previous record's hash that
+            # is what forced one test at a time. The chain says exactly what it
+            # said before — these records, in this order, were not edited —
+            # because plan order is what they were sealed in then too.
+            for ex in executions:
+                prev_hash = seal(ex, prev_hash).evidence_hash
 
         self._repo.save_executions(assessment_id, executions)
         chain_ok = verify_chain(prior + executions)
@@ -892,6 +993,38 @@ class Orchestrator:
                          detail=f"{len(findings)} findings over {len(all_executions)} execution(s), "
                                 f"{len(leads({}, executions))} inconclusive this run")
         return executions
+
+    def _run_all(self, runner, tests: list, *, prefix: str, workers: int, on_progress):
+        """Send every approved test, up to `workers` at a time, unsealed.
+
+        Results come back in plan order whatever order they complete in, so a
+        run is reproducible and the evidence chain built over them does not
+        depend on which request happened to be fastest.
+
+        Progress is still reported as each one lands — that is what the Run
+        phase shows — so the order of the live feed is completion order while
+        the record stays plan order. Those are different questions and it is
+        right that they have different answers.
+        """
+        def _one(test):
+            return runner.run_safe(test, execution_id=f"{prefix}-{test.test_id}",
+                                   prev_hash=None)
+
+        if workers <= 1 or len(tests) <= 1:
+            done = []
+            for test in tests:
+                done.append(_one(test))
+                _report(on_progress, len(done), len(tests), done[-1])
+            return done
+
+        results: dict[int, object] = {}
+        with ThreadPoolExecutor(max_workers=min(workers, len(tests))) as pool:
+            futures = {pool.submit(_one, t): i for i, t in enumerate(tests)}
+            for future in as_completed(futures):
+                index = futures[future]
+                results[index] = future.result()
+                _report(on_progress, len(results), len(tests), results[index])
+        return [results[i] for i in range(len(tests))]
 
     def _execute_adaptive(self, assessment_id: str, runner, tests: list, budget, prev_hash,
                           execution_prefix: str | None = None):
@@ -1119,7 +1252,11 @@ class Orchestrator:
             raise ValueError(f"assessment {assessment_id} does not exist")
 
         new_id = f"A-{uuid.uuid4().hex[:10]}"
-        self._repo.create_assessment(new_id, source.issue_key, source.project_key)
+        # A re-run belongs to the same engagement as its baseline. A regression
+        # diff between two assessments authorized by different clients would not
+        # mean anything.
+        self._repo.create_assessment(new_id, source.issue_key, source.project_key,
+                                     engagement=getattr(source, "engagement", "") or "")
         self._repo.clone_analysis(assessment_id, new_id)
         # The plan review comes across with the plan it reviewed - it is part of
         # why the carried-over approvals were given. The run assessment does not:
@@ -1593,10 +1730,25 @@ class Orchestrator:
 
     # 7. report -------------------------------------------------------------
 
+    class UnknownAssessment(KeyError):
+        """No assessment with that id.
+
+        Its own type so a route can answer 404 without having to guess whether
+        a KeyError came from a missing assessment or from a persona the vault
+        does not hold — those are a wrong URL and a misconfiguration, and they
+        deserve different answers.
+        """
+
+    def require_assessment(self, assessment_id: str):
+        assessment = self._repo.get_assessment(assessment_id)
+        if assessment is None:
+            raise self.UnknownAssessment(assessment_id)
+        return assessment
+
     def build_report_html(self, assessment_id: str, lang: str = "en") -> str:
         from app.reporting.quality import build_finding_drafts, verify_report
 
-        assessment = self._repo.get_assessment(assessment_id)
+        assessment = self.require_assessment(assessment_id)
         tests = {t.test_id: t for t in self._repo.get_test_cases(assessment_id)}
         executions = self._repo.get_executions(assessment_id)
         findings = self._repo.get_findings(assessment_id)
@@ -1665,7 +1817,7 @@ class Orchestrator:
         from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.exports import export_json as _json
 
-        a = self._repo.get_assessment(assessment_id)
+        a = self.require_assessment(assessment_id)
         analysis = self.get_analysis(assessment_id)
         tests = self._repo.get_test_cases(assessment_id)
         return _json(a.issue_key, a.target_base_url or "(not executed)",
@@ -1683,7 +1835,7 @@ class Orchestrator:
         from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.exports import export_xlsx as _xlsx
 
-        a = self._repo.get_assessment(assessment_id)
+        a = self.require_assessment(assessment_id)
         analysis = self.get_analysis(assessment_id)
         tests = self._repo.get_test_cases(assessment_id)
         return _xlsx(a.issue_key, a.target_base_url or "(not executed)",
@@ -1697,7 +1849,7 @@ class Orchestrator:
         from app.owasp.coverage import uncovered_poc_endpoints as _uncovered
         from app.reporting.pdf import export_pdf as _pdf
 
-        a = self._repo.get_assessment(assessment_id)
+        a = self.require_assessment(assessment_id)
         analysis = self.get_analysis(assessment_id)
         tests = self._repo.get_test_cases(assessment_id)
         return _pdf(a.issue_key, a.target_base_url or "(not executed)",
@@ -1710,7 +1862,7 @@ class Orchestrator:
     def export_postman(self, assessment_id: str) -> str:
         from app.adapters.postman_export import export_postman_collection
 
-        a = self._repo.get_assessment(assessment_id)
+        a = self.require_assessment(assessment_id)
         approved = [t for t in self._repo.get_test_cases(assessment_id) if t.is_runnable()]
         return export_postman_collection(f"{a.issue_key} security tests", approved or
                                          self._repo.get_test_cases(assessment_id))

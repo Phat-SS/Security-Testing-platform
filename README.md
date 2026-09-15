@@ -132,23 +132,31 @@ readiness verdict is also available as JSON at `/api/readiness` for CI.
 
 ## The assessment screen
 
-Six numbered, collapsible steps, ordered so that what a thing is *derived from*
-comes before the thing itself:
+Four phases, shown one at a time, ordered so that what a thing is *derived from*
+comes before the thing itself. `?phase=` carries which one, so a filtered plan
+can be bookmarked and a save comes back where you were.
 
-| # | Step | What it is |
-|---|---|---|
-| 1 | **Requirements & endpoints** | What the ticket asks for, and the attack surface those asks live on. The endpoint list is **editable**: add, edit, delete. |
-| 2 | **Design test plan** | Import a PoC (Python / Postman / Burp / JMeter), pick a depth, generate. |
-| 3 | **OWASP Coverage** | What the ticket needs tested versus what the plan tests. |
-| 4 | **Test plan & approval** | The reviewing agent's verdict and its unresolved gaps, then search / filter / sort / page, then approve, reject or reset. |
-| 5 | **Execute** | Environment, adaptive toggle, run — and the destructive-run gate. |
-| 6 | **Results** | Verdict counts, the run's assessment (passed/failed + % of the ticket covered), confirmed findings, re-run, report and exports. |
+| Phase | What it is |
+|---|---|
+| **Scope** | What the ticket asks for, the attack surface those asks live on, and the OWASP coverage computed from it. The endpoint list is **editable** — and importable: paste or upload an OpenAPI 3 / Swagger 2 document and the list comes from the specification instead of from prose. |
+| **Plan** | Import a PoC (Python / Postman / Burp / JMeter), pick a depth, generate — then the reviewing agent's verdict and its unresolved gaps, then search / filter / sort / page, then approve, reject or reset. |
+| **Run** | Environment, adaptive toggle, the destructive-run gate, and the run itself — which happens in the background and reports as it goes: counts per verdict, and each failure the moment it is decided. |
+| **Results** | Verdict counts, the run's assessment (passed/failed + % of the ticket covered), confirmed findings, re-run, report and exports. |
 
-Each step opens according to where the assessment actually is (a freshly
-analyzed ticket opens 1 and 2; a designed one opens 4), and a folded step still
-states what it produced. Every column header carries an **ⓘ** with the meaning
-of that column, so `PARTIAL`, `From PoC` and `swap_object_id` do not require
-reading the source.
+The page opens on wherever the assessment actually is: no plan yet opens Scope,
+a plan awaiting approval opens Plan, an approved one opens Run. Two things sit
+above the rail rather than inside a phase, because the person who needs them is
+not the person standing on that phase: a **readiness verdict** that says this
+run will come back entirely `BLOCKED`, and a **stale-plan warning** that says
+the plan was built for a different endpoint list.
+
+Every column header carries an **ⓘ** with the meaning of that column, so
+`PARTIAL`, `From PoC` and `swap_object_id` do not require reading the source.
+
+**Findings** and **Activity** in the sidebar answer the two questions that span
+an engagement rather than one ticket: what is outstanding everywhere, and who
+did what. The second is the audit log, which was always written and never
+shown.
 
 ### Endpoints are editable, and that matters
 
@@ -271,13 +279,21 @@ whole JWT suite, race windows. Choose it in the Design step, or
 approval, so the cost is review time.
 
 `graphql_introspection_probe`, `graphql_batching_abuse`, `host_header_injection`
-and `oauth_redirect_uri_bypass` are reviewed, registered mutations like every
-other kind here — the attack planner (`USE_AI=true`) can propose them today,
-validated by the same gate as any other proposal. The deterministic
-`TestDesigner` does not template them into a plan on its own yet (it has no
-signal for "this ticket is about GraphQL/OAuth" the way it does for BOLA/auth);
-add one by hand via the API/DB or let the planner add it as a gap-filling
-proposal in the meantime.
+and `oauth_redirect_uri_bypass` used to be reachable only through the attack
+planner (`USE_AI=true`), because the deterministic designer had no signal for
+"this route is GraphQL / an OAuth authorize endpoint". It has one now — the path,
+and the fields an imported specification declares — so an offline run tests them
+too. A ticket about a GraphQL API no longer produces a plan with no GraphQL test
+in it while the coverage table reads as covered.
+
+**Concurrency.** `max_concurrent_tests` (Configuration → Advanced) is how many
+approved tests are in flight at once. It defaults to **1**, which runs a plan
+strictly sequentially. Raising it is what makes a 300-test plan finish in a
+minute rather than five, at proportionally higher request rate against the
+target — a blast-radius decision for whoever signed the authorization, which is
+why it is not raised for you. The evidence chain is unaffected either way: tests
+run in parallel and are sealed afterwards in plan order, so the record is
+identical and reproducible.
 
 ## The engagement config = authorization as an artifact
 
@@ -287,8 +303,35 @@ scope allow/block lists, and persona credentials (see
 nothing runs. Authorization is explicit and reviewable, never inferred from a
 ticket.
 
-The **Configuration** tab edits that same file, in four tabs ordered the way a
-new engagement needs them:
+**More than one client, one process.** Point `ENGAGEMENTS_DIR` at a directory
+and every `*.json` in it is an engagement, named after the file:
+
+```
+config/engagements/bmw-au.json     ->  "bmw-au"
+config/engagements/acme.json       ->  "acme"
+```
+
+A single `ENGAGEMENT_CONFIG` install keeps working untouched and appears under
+its own name — nothing has to be moved to upgrade. Discovery happens **only**
+when one of those two variables names it: a directory of config files sitting on
+disk beside the code is not a human saying where the authorization lives, and
+default-deny is the first rule here.
+
+Which engagement a request is about is decided per request, never globally. An
+assessment records the engagement it was opened under and always resolves to
+that one, so two tickets for two clients open in two tabs cannot aim one
+client's run at the other's target. The sidebar's picker is for everything else,
+and is deliberately absent on an assessment screen.
+
+**What a run was authorized by is recorded with the run.** Before the first
+request goes out, the scope, the identities, their ownership map and the runner
+limits are frozen into a snapshot (never the credentials — it is meant to be
+attached to a ticket), and its sha256 goes inside every sealed execution. A
+report proves not only that a host was tested but that it was authorized at the
+time; editing the scope afterwards no longer rewrites what an earlier run meant.
+
+The **Setup** section of the sidebar edits that same file, in four panes ordered
+the way a new engagement needs them:
 
 | Tab | Writes | Blocks a run when unset |
 |---|---|---|
@@ -340,7 +383,10 @@ app/
   api/         # FastAPI app: web UI + JSON API
                #   ui.py               shared primitives: tooltip, section, table, theme
                #   views.py            dashboard, config, login, report-adjacent pages
-               #   views_assessment.py the assessment screen (six collapsible steps)
+               #   views/            one module per screen; views/assessment/
+               #                     is the four phases, views/config/ the panes
+               #   routes/           one module per part of the workflow
+               #   runtime.py        the shared state, per-request engagement
   orchestrator.py  # the end-to-end workflow, wired to persistence
   cli.py       # command-line driver
 demo/          # vulnerable target + sample tests + end-to-end runner

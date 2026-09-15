@@ -82,7 +82,7 @@ def test_the_page_shows_the_review_beside_the_plan_it_reviewed(client):
 
 def test_the_requirements_read_from_the_ticket_are_shown(client):
     aid = _import(client, plan="true")
-    page = client.get(f"/assessment/{aid}").text
+    page = client.get(f"/assessment/{aid}?phase=scope").text
     assert "Requirements read from the ticket" in page
     assert "R-01" in page
     # ui.section escapes the title it is given, so the ampersand arrives as
@@ -129,7 +129,7 @@ def test_adjudicating_an_analyzed_only_assessment_is_refused_without_a_500(clien
 def test_the_review_panel_names_the_agent_and_the_advisory_status():
     """Rendered directly: the panel must carry the caveat with the value, in
     whatever state the run is."""
-    from app.api import views_assessment as va
+    from app.api.views.assessment import results as va
     from app.schemas.agent import Adjudication, RunAssessment
     from app.schemas.enums import Confidence, TestStatus
 
@@ -166,9 +166,10 @@ def test_the_review_panel_names_the_agent_and_the_advisory_status():
 
 
 def test_the_triage_counts_are_shown_before_any_review_is_asked_for():
-    from app.api import views_assessment as va
+    from app.api.views.assessment import results as va
+    from app.api.views.assessment.state import _State
 
-    state = va._State(2, {"total": 4, "approved": 4}, 4)
+    state = _State(2, {"total": 4, "approved": 4}, 4)
     html = va._assessment_panel("A-1", None, state, {"manual": 2, "rerun": 1})
     assert "need a person" in html
     assert "need only a re-run" in html

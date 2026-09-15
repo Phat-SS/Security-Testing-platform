@@ -22,6 +22,7 @@ from pathlib import Path
 
 from app.analysis import TestDesigner, build_analyzer
 from app.analysis.attack_planner import build_planner
+from app.core import snapshot
 from app.core.config import Settings
 from app.core.engagement import load_engagement
 from app.core.logging_config import configure_error_tracking, configure_logging
@@ -86,8 +87,19 @@ async def _run(args) -> None:
                         max_iterations=args.adaptive_iterations,
                         max_total_followups=args.adaptive_followups,
                     )
-            execs = orch.execute(aid, engagement.target_base_url, engagement.scope,
-                                 engagement.vault, Settings.from_env(), adaptive=budget)
+            cli_settings = Settings.from_env()
+            execs = orch.execute(
+                aid, engagement.target_base_url, engagement.scope, engagement.vault,
+                cli_settings, adaptive=budget,
+                # The CLI is a first-class way to run this, so its evidence
+                # carries the same binding the UI's does. Records sealed without
+                # one would verify perfectly while proving less than the records
+                # beside them, and nothing would say so.
+                engagement_snapshot=snapshot.capture(
+                    engagement, base_url=engagement.target_base_url,
+                    environment=engagement.active_environment, settings=cli_settings,
+                ),
+            )
             fails = [e for e in execs if e.verdict.result.value == "FAIL"]
             print(f"executed  -> {len(execs)} tests, {len(fails)} FAIL")
             for f in repo.get_findings(aid):

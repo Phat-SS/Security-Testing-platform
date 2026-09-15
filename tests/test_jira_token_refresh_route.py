@@ -20,9 +20,9 @@ def client(tmp_path, monkeypatch):
 
 
 def test_missing_npx_redirects_with_a_clear_error_not_a_500(client, monkeypatch):
-    import app.api.main as main
+    from app.api.routes import integrations
 
-    monkeypatch.setattr(main.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(integrations.shutil, "which", lambda _name: None)
 
     r = client.post("/config/mcp/jira/refresh-token", follow_redirects=True)
 

@@ -115,6 +115,20 @@ class Execution(BaseModel):
     correlation: CorrelationProof | None = None
     oast: OastProof | None = None
 
+    # The fingerprint of the authorization context this ran under — the scope,
+    # the identities and the target, as they were at the moment the run started
+    # (see app/core/snapshot.py). Inside the evidence hash, so a report proves
+    # not only that a request was sent but what it was authorized by; the
+    # snapshot itself is stored with the run.
+    engagement_hash: str = ""
+
+    # Which shape of payload `evidence.compute_hash` sealed this with. 1 is
+    # every record written before `engagement_hash` existed. Versioning the
+    # payload is what lets a new field be covered without making every older
+    # record read as tampered — and the version is itself inside the hash, so a
+    # record cannot be downgraded to an older, weaker shape without breaking.
+    payload_version: int = 1
+
     # Tamper-evidence: sha256 over (request, response, verdict); chained to the
     # previous execution's hash so the evidence log cannot be silently edited.
     evidence_hash: str = ""

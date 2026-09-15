@@ -30,6 +30,12 @@ import json
 from app.schemas.execution import Execution
 
 
+#: The payload shape newly sealed evidence uses. Bumped whenever a field joins
+#: the hash; older records keep verifying under the version they were sealed
+#: with, which is stored on the record and covered by the hash itself.
+CURRENT_PAYLOAD_VERSION = 2
+
+
 def compute_hash(execution: Execution) -> str:
     # Covers every field a tamperer might want to change after the fact:
     # `log`/`scope_validated` narrate what happened and are exactly what an
@@ -63,6 +69,16 @@ def compute_hash(execution: Execution) -> str:
         "log": execution.log,
         "prev_hash": execution.prev_hash,
     }
+    if execution.payload_version >= CURRENT_PAYLOAD_VERSION:
+        # Version 1 is the payload above, exactly as it was before the
+        # authorization fingerprint existed. Records sealed then still verify
+        # under it, so adding this field does not make a year of evidence read
+        # as tampered — which would be a false accusation, and worse than the
+        # gap it closes. The version is part of the payload, so a v2 record
+        # cannot be relabelled v1 to shed the binding without breaking its own
+        # hash.
+        payload["payload_version"] = execution.payload_version
+        payload["engagement_hash"] = execution.engagement_hash
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -70,6 +86,10 @@ def compute_hash(execution: Execution) -> str:
 def seal(execution: Execution, prev_hash: str | None) -> Execution:
     """Attach prev_hash and the computed evidence_hash to an execution."""
     execution.prev_hash = prev_hash
+    # Sealed now, so sealed in the current shape. Reading a record back never
+    # changes this: `payload_version` round-trips with the record and is what
+    # `verify_chain` recomputes against.
+    execution.payload_version = CURRENT_PAYLOAD_VERSION
     execution.evidence_hash = compute_hash(execution)
     return execution
 
