@@ -28,44 +28,89 @@ CSS = """
 .app{display:flex;min-height:100vh;}
 .sidebar{display:flex;flex-direction:column;width:var(--sidebar-w);flex:none;
   background:var(--sidebar);border-right:1px solid var(--border);
-  position:sticky;top:0;height:100vh;overflow-y:auto;}
-.sb-brand{display:flex;align-items:center;gap:9px;padding:16px 16px 12px;text-decoration:none;
+  position:sticky;top:0;height:100vh;overflow-y:auto;overflow-x:hidden;
+  transition:width .16s ease;}
+.sb-top{display:flex;align-items:center;gap:6px;padding:14px 12px 10px;}
+.sb-brand{display:flex;align-items:center;gap:9px;flex:1;min-width:0;text-decoration:none;
   color:var(--fg);}
 .sb-brand svg{color:var(--accent);flex:none;}
-.sb-brand b{font-size:14.5px;letter-spacing:-.01em;}
+.sb-brand b{font-size:14.5px;letter-spacing:-.01em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sb-collapse{flex:none;padding:5px;border-radius:var(--radius);border:1px solid transparent;
+  background:none;color:var(--faint);cursor:pointer;line-height:0;}
+.sb-collapse:hover{background:var(--bg);color:var(--fg);}
+
+/* The engagement card. `.txt` is a flex column and `.name`/`.url` are BLOCKS:
+   `text-overflow:ellipsis` is ignored on an inline box, which is how a long
+   target URL used to paint straight through the sidebar's right edge. */
 .sb-eng{display:flex;align-items:center;gap:9px;margin:0 12px 14px;padding:9px 11px;
   border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);
-  text-decoration:none;color:var(--fg);}
+  text-decoration:none;color:var(--fg);min-width:0;overflow:hidden;}
 .sb-eng:hover{border-color:var(--accent-border);}
 .sb-pick{padding:6px 8px;}
-.sb-pick select{border:0;background:none;padding:2px 4px;font-size:12.5px;font-weight:600;color:var(--fg);min-width:0;}
+.sb-pick select{flex:1;min-width:0;width:auto;max-width:100%;border:0;background:none;
+  padding:2px 4px;font-size:12.5px;font-weight:600;color:var(--fg);
+  text-overflow:ellipsis;}
 .sb-eng .dot{width:7px;height:7px;border-radius:50%;flex:none;}
 .sb-eng .dot.ok{background:var(--low);box-shadow:0 0 0 3px var(--low-soft);}
 .sb-eng .dot.warn{background:var(--med);box-shadow:0 0 0 3px var(--med-soft);}
 .sb-eng .dot.bad{background:var(--crit);box-shadow:0 0 0 3px var(--crit-soft);}
-.sb-eng .txt{flex:1;min-width:0;}
+.sb-eng .txt{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
 .sb-eng .name{font-size:12.5px;font-weight:600;}
 .sb-eng .url{font-size:11px;color:var(--faint);font-family:var(--mono);}
-.sb-eng .name,.sb-eng .url{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.sb-eng svg{color:var(--faint);flex:none;}
+.sb-eng .name,.sb-eng .url{display:block;max-width:100%;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sb-eng>svg{color:var(--faint);flex:none;}
+
 .sb-nav{display:flex;flex-direction:column;gap:2px;padding:0 12px;}
 .sb-h{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);
   font-weight:700;padding:6px 10px 5px;}
 .sb-h+.sb-h,.sb-nav .sb-h:not(:first-child){padding-top:16px;}
-.sb-item{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius);
-  font-size:13px;color:var(--muted);text-decoration:none;}
+.sb-item{position:relative;display:flex;align-items:center;gap:9px;padding:7px 10px;
+  border-radius:var(--radius);font-size:13px;color:var(--muted);text-decoration:none;}
 .sb-item:hover{background:var(--bg);color:var(--fg);}
 .sb-item.on{background:var(--accent-soft);color:var(--accent);font-weight:600;}
 .sb-item svg{flex:none;}
 .sb-item .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.sb-item .tag{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;}
+.sb-item .tag{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--med);}
 .sb-foot{margin-top:auto;display:flex;align-items:center;gap:8px;padding:12px 14px 14px;
-  border-top:1px solid var(--border);}
+  border-top:1px solid var(--border);flex-wrap:wrap;}
 .sb-who{display:flex;align-items:center;gap:7px;flex:1;min-width:0;}
 .sb-av{width:24px;height:24px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
   font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;}
 .sb-name{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .sb-foot .btn.ghost{padding:5px 6px;}
+
+/* Collapsed rail. Scoped to the desktop layout: under 900px the sidebar is a
+   horizontal strip and there is no width left to reclaim, so the rail — and
+   the control that asks for it — simply do not exist there. */
+@media (min-width:901px){
+  :root[data-sb="mini"] .sidebar{width:var(--sidebar-w-min);}
+  :root[data-sb="mini"] .sb-top{padding:14px 8px 10px;justify-content:center;}
+  :root[data-sb="mini"] .sb-brand{display:none;}
+  :root[data-sb="mini"] .sb-eng{margin:0 8px 12px;padding:9px 0;justify-content:center;}
+  :root[data-sb="mini"] .sb-eng .txt,
+  :root[data-sb="mini"] .sb-eng>svg,
+  :root[data-sb="mini"] .sb-item .lbl,
+  :root[data-sb="mini"] .sb-who{display:none;}
+  /* The picker keeps working in the rail: the <select> is not hidden, it is
+     stretched invisibly over the dot, so clicking the rail still opens it.
+     A control that silently stops being clickable is worse than a wide nav. */
+  :root[data-sb="mini"] .sb-pick{position:relative;}
+  :root[data-sb="mini"] .sb-pick select{position:absolute;inset:0;width:100%;
+    padding:0;opacity:0;cursor:pointer;}
+  :root[data-sb="mini"] .sb-foot .btn{font-size:11.5px;padding:5px 4px;}
+  /* The group heading becomes the rule it was already acting as. */
+  :root[data-sb="mini"] .sb-h{height:0;padding:0;margin:10px 6px;overflow:hidden;
+    border-top:1px solid var(--border);}
+  :root[data-sb="mini"] .sb-nav{padding:0 8px;}
+  :root[data-sb="mini"] .sb-item{justify-content:center;padding:9px 0;}
+  /* The readiness "!" has no room for glyph, so it becomes the dot it means. */
+  :root[data-sb="mini"] .sb-item .tag{position:absolute;top:5px;right:11px;width:6px;height:6px;
+    border-radius:50%;background:var(--med);font-size:0;}
+  :root[data-sb="mini"] .sb-foot{flex-direction:column;gap:4px;padding:10px 6px 12px;}
+  :root[data-sb="mini"] .sb-collapse svg{transform:scaleX(-1);}
+}
 
 .main{flex:1;min-width:0;display:flex;flex-direction:column;}
 .appbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 24px;
@@ -80,6 +125,8 @@ CSS = """
   .app{flex-direction:column;}
   .sidebar{width:100%;height:auto;position:static;flex-direction:row;flex-wrap:wrap;
     align-items:center;gap:4px;padding-bottom:8px;}
+  .sb-top{padding:10px 12px 6px;}
+  .sb-collapse{display:none;}
   .sb-eng{margin:0 12px;max-width:240px;}
   .sb-nav{flex-direction:row;flex-wrap:wrap;width:100%;}
   .sb-h{display:none;}
@@ -92,12 +139,50 @@ CSS = """
 # tokens first (every colour), then components, then the shell.
 FULL_CSS = tokens.CSS + base.CSS + CSS
 
+# Both preferences are applied to <html> BEFORE the first paint. The theme
+# already had to be, and the sidebar width has the same problem: restoring it
+# from JS after load makes every page open wide and then snap to the rail.
 _THEME_BOOT = (
-    "<script>try{var t=localStorage.getItem('stp-theme');"
-    "if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>"
+    "<script>try{var d=document.documentElement;"
+    "var t=localStorage.getItem('stp-theme');if(t)d.setAttribute('data-theme',t);"
+    "var s=localStorage.getItem('stp-sidebar');"
+    "if(s==='mini'||s==='full')d.setAttribute('data-sb',s);}catch(e){}</script>"
 )
 
-_SHARED_JS = f"<script>{base.TOOLTIP_JS}{base.THEME_JS}{base.SECTION_JS}{base.LANG_JS}</script>"
+# The collapse control. The label is what a nav item's tooltip has to become
+# once its text is gone, so the two live together: `apply()` copies each item's
+# `data-label` into `data-tip` on the way in and drops it again on the way out,
+# rather than shipping a redundant tooltip on a label you can already read.
+SIDEBAR_JS = """
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById('sb-toggle');
+  function apply(mini, save) {
+    root.setAttribute('data-sb', mini ? 'mini' : 'full');
+    if (btn) {
+      var label = btn.getAttribute(mini ? 'data-label-expand' : 'data-label-collapse');
+      btn.setAttribute('aria-expanded', mini ? 'false' : 'true');
+      btn.setAttribute('aria-label', label);
+      btn.setAttribute('data-tip', label);
+    }
+    document.querySelectorAll('.sidebar [data-label]').forEach(function (el) {
+      if (mini) el.setAttribute('data-tip', el.getAttribute('data-label'));
+      else el.removeAttribute('data-tip');
+    });
+    if (window.__bindTips) window.__bindTips(document);
+    if (save) { try { localStorage.setItem('stp-sidebar', mini ? 'mini' : 'full'); } catch (e) {} }
+  }
+  apply(root.getAttribute('data-sb') === 'mini', false);
+  if (btn) {
+    btn.addEventListener('click', function () {
+      apply(root.getAttribute('data-sb') !== 'mini', true);
+    });
+  }
+})();
+"""
+
+_SHARED_JS = (f"<script>{base.TOOLTIP_JS}{base.THEME_JS}{SIDEBAR_JS}"
+              f"{base.SECTION_JS}{base.LANG_JS}</script>")
 
 
 class Nav:
@@ -131,11 +216,16 @@ SETUP_NAV = [
 
 
 def _nav_item(item: Nav, active: str, tag: str = "") -> str:
+    """`data-label` is the label the collapsed rail has to put back as a
+    tooltip — see SIDEBAR_JS. It is not `data-tip` here, because a tooltip
+    repeating a label you can already read is noise."""
     cls = "sb-item on" if item.matches(active) else "sb-item"
+    label = _t(item.label)
     tag_html = f'<span class="tag">{tag}</span>' if tag else ""
     return (
-        f'<a href="{attr(item.href)}" class="{cls}">{icons.icon(item.icon)}'
-        f'<span class="lbl">{_t(item.label)}</span>{tag_html}</a>'
+        f'<a href="{attr(item.href)}" class="{cls}" data-label="{attr(label)}">'
+        f'{icons.icon(item.icon)}'
+        f'<span class="lbl">{e(label)}</span>{tag_html}</a>'
     )
 
 
@@ -177,9 +267,11 @@ def _engagement_card(engagement_name: str, engagement_url: str, readiness_state:
             f' aria-label="{attr(_t("Engagement"))}">{options}</select></form>'
         )
 
+    # The card ellipsises a long URL; the tooltip is where the whole one lives,
+    # so truncation never hides which host a run is about to be sent to.
+    tip = f"{name}\n{url}\n{_t('The environment every run is sent to')}"
     return (
-        f'<a href="/config?tab=target" class="sb-eng" '
-        f'data-tip="{attr(_t("The environment every run is sent to"))}">'
+        f'<a href="/config?tab=target" class="sb-eng" data-tip="{attr(tip)}">'
         f'<span class="dot {tone}"></span>'
         f'<span class="txt"><span class="name">{e(name)}</span>'
         f'<span class="url">{e(url)}</span></span>'
@@ -204,9 +296,11 @@ def sidebar(active: str, *, engagement_name: str = "", engagement_url: str = "",
             '<form method="post" action="/logout" style="margin:0">'
             f'<button type="submit" class="btn ghost">{_t("Log out")}</button></form>'
         )
-    # No name means nobody is signed in (auth on, no session) — the chrome
-    # middleware suppresses it deliberately. Showing "local-admin" there would
-    # claim a signed-in user on the login page.
+    # No name means there is no real signed-in identity to show, and the chrome
+    # middleware suppresses it in both cases that produce one: auth on with no
+    # session (the login page), and auth off, where every request carries the
+    # same synthetic `local-admin`. Rendering either names a user who is not
+    # there — the second one names a placeholder nobody chose.
     who = ""
     if user_name:
         initials = "".join(part[0] for part in user_name.split()[:2]).upper() or "?"
@@ -214,10 +308,19 @@ def sidebar(active: str, *, engagement_name: str = "", engagement_url: str = "",
                f'<span class="sb-name">{e(user_name)}</span></span>')
     else:
         who = '<span class="sb-who"></span>'  # keeps the footer's spacing
+    collapse_label = _t("Collapse sidebar")
+    expand_label = _t("Expand sidebar")
     return f"""<aside class="sidebar">
-<a href="/" class="sb-brand">{icons.icon("shield", 20)}<b>{_t("API Security")}</b></a>
+<div class="sb-top">
+<a href="/" class="sb-brand">
+{icons.icon("shield", 20)}<b>{_t("API Security")}</b></a>
+<button type="button" class="sb-collapse" id="sb-toggle" aria-controls="sb-nav"
+ aria-expanded="true" aria-label="{attr(collapse_label)}" data-tip="{attr(collapse_label)}"
+ data-label-collapse="{attr(collapse_label)}" data-label-expand="{attr(expand_label)}"
+>{icons.icon("panel", 17)}</button>
+</div>
 {_engagement_card(engagement_name, engagement_url, readiness_state, engagements, current_engagement)}
-<nav class="sb-nav">
+<nav class="sb-nav" id="sb-nav">
 <div class="sb-h">{_t("Work")}</div>{work}
 <div class="sb-h">{_t("Setup")}</div>{setup}
 </nav>

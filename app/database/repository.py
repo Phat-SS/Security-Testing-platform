@@ -12,7 +12,7 @@ import uuid
 from typing import ClassVar
 
 from pydantic import ValidationError
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.database.models import (
@@ -47,6 +47,21 @@ def _job_from_row(row: JobRow) -> Job:
         result=dict(row.result_json or {}), error=row.error or "",
         created_at=row.created_at, updated_at=row.updated_at,
     )
+
+
+def _belongs_to(engagement: str):
+    """Rows of the named engagement, plus the ones that were never stamped.
+
+    Assessments created before the engagement was recorded at import — and any
+    created by an import path that forgot to pass it — carry an empty string.
+    Matching on equality alone made them exist in the database and nowhere in
+    the UI: /findings and /activity came up empty on an engagement full of
+    work. An unstamped row belongs to whoever is looking, which is the rule the
+    single-assessment screens already follow by not filtering at all.
+    """
+    return or_(Assessment.engagement == engagement,
+               Assessment.engagement == "",
+               Assessment.engagement.is_(None))
 
 
 class Repository:
@@ -854,7 +869,7 @@ class Repository:
                 .order_by(Assessment.created_at.desc(), FindingRow.id.asc())
             )
             if engagement:
-                q = q.filter(Assessment.engagement == engagement)
+                q = q.filter(_belongs_to(engagement))
             return [
                 (row.assessment_id, a.issue_key, Finding.model_validate(row.data_json))
                 for row, a in q.limit(limit).all()
@@ -873,7 +888,12 @@ class Repository:
                 .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
             )
             if engagement:
-                q = q.filter(Assessment.engagement == engagement)
+                # An entry with no assessment (a config change, a quick setup) is
+                # engagement-wide by nature. Filtering on the joined assessment
+                # alone turned the outer join back into an inner one and dropped
+                # every one of them from the log.
+                q = q.filter(or_(_belongs_to(engagement), AuditLog.assessment_id == "",
+                                 AuditLog.assessment_id.is_(None)))
             return [(entry, a.issue_key if a else "") for entry, a in q.limit(limit).all()]
 
     def get_audit(self, assessment_id: str) -> list[AuditLog]:

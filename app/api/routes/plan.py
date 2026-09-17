@@ -191,6 +191,14 @@ async def plan_action(request: Request, aid: str, user: User = Depends(require("
 
     n = getattr(state.orch, method_name)(aid, test_ids, actor=user.name)
     flash = f"{word} {n} test(s) {scope}"
+    if action == "approve" and n:
+        # Approving is the last thing the Plan phase is for, so it hands over to
+        # Run rather than returning to a list the tester has finished with. The
+        # filter is not carried across: it describes a plan view, and Run has no
+        # use for it.
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(flash)}&phase=run", status_code=303
+        )
     query = _preserve_plan_query(form)
     return RedirectResponse(
         f"/assessment/{aid}?flash={quote(flash)}{query}&phase=plan", status_code=303
@@ -213,11 +221,12 @@ async def approve(request: Request, aid: str, user: User = Depends(require("test
     test_ids = [str(v) for v in form.getlist("test_ids")]
     if test_ids:
         n = state.orch.approve(aid, test_ids, actor=user.name)
-        flash = f"Approved {n} test(s)"
-    else:
-        flash = "No tests selected"
+        return RedirectResponse(
+            f"/assessment/{aid}?flash={quote(f'Approved {n} test(s)')}&phase=run",
+            status_code=303,
+        )
     return RedirectResponse(
-        f"/assessment/{aid}?flash={quote(flash)}&phase=plan", status_code=303
+        f"/assessment/{aid}?flash=No+tests+selected&phase=plan", status_code=303
     )
 
 

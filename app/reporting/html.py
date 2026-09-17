@@ -134,6 +134,7 @@ def render_report(
     report_manifest=None,
     input_snapshot: dict | None = None,
     lang: str = DEFAULT_LANG,
+    linkback: bool = False,
 ) -> str:
     """The full document. This is where the *explanation* lives.
 
@@ -156,6 +157,7 @@ def render_report(
     adjudications = ({a.execution_id: a for a in run_assessment.adjudications}
                      if run_assessment is not None else {})
     jira_bar = _jira_bar(assessment_id, issue_key, lang) if assessment_id and issue_key else ""
+    back_bar = _back_bar(assessment_id, lang) if linkback and assessment_id else ""
     chain_banner = _evidence_chain_banner(evidence_chain_ok, lang) if executions else ""
     quality_banner = _report_quality_banner(report_verification, lang)
     input_banner = _input_snapshot_banner(input_snapshot)
@@ -247,6 +249,9 @@ def render_report(
   .mono {{ font-family:ui-monospace,Menlo,Consolas,monospace; }}
   .bar {{ background:var(--border); border-radius:6px; height:10px; width:140px; overflow:hidden; }}
   .fill {{ height:100%; border-radius:6px; }}
+  .backlink {{ display:inline-block; color:var(--muted); text-decoration:none; font-size:13px;
+               font-weight:600; margin:0 0 14px; }}
+  .backlink:hover {{ color:#0d6e6e; }}
   .jirabar {{ display:flex; align-items:center; gap:12px; margin:16px 0 26px; }}
   .jirabar button {{ background:#0d6e6e; color:#fff; border:0; border-radius:8px; padding:9px 16px;
                       font:inherit; font-size:14px; font-weight:600; cursor:pointer; }}
@@ -304,6 +309,7 @@ def render_report(
   @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
   @media (prefers-reduced-motion:reduce) {{ .spin {{ animation:none; }} }}
 </style></head><body><div class="wrap">
+{back_bar}
 <div class="titlebar">
 <div><h1>{_e(title)}</h1>
 <p class="sub">{t("Target", lang)}: <code>{_e(target)}</code> &middot; {t("Baseline", lang)}: OWASP API Security Top 10 (2023)</p></div>
@@ -346,6 +352,27 @@ def _lang_switch(lang: str) -> str:
         return f'<a class="{cls}" href="?lang={code}">{label}</a>'
 
     return f'<div class="langswitch">{_link("en", "EN")} &middot; {_link("vi", "VI")}</div>'
+
+
+def _back_bar(assessment_id: str, lang: str) -> str:
+    """A way back to the assessment this report was built from.
+
+    The report is a standalone document and was always *opened* as one — a new
+    tab from the assessment page, a link out of Jira — so the tab it came from
+    was still there to return to. A run now hands over to this page directly,
+    in the tab the tester was already in, and without this there is nothing on
+    the page that leads anywhere but the browser's own Back button.
+
+    Asked for explicitly by the route that serves the live report, rather than
+    gated on `assessment_id` the way the Jira bar and the re-run controls are:
+    those come out dead in a downloaded copy too, but a button that does nothing
+    is a smaller lie than a navigation link pointing out of a file:// document
+    at a server that is not there.
+    """
+    return (
+        f'<a class="backlink" href="/assessment/{_e(assessment_id)}?phase=results">'
+        f'&larr; {t("Back to the assessment", lang)}</a>'
+    )
 
 
 def _jira_bar(assessment_id: str, issue_key: str, lang: str) -> str:
@@ -1298,6 +1325,7 @@ VI.update({
         "nhật ký này như một lượt thực thi mới, nối vào hash bằng chứng của lượt "
         "trước, nên cả hai lần thử đều còn trên hồ sơ. Tải lại báo cáo để thấy dòng mới.",
     "Post this report to Jira ({key})": "Đăng báo cáo này lên Jira ({key})",
+    "Back to the assessment": "Quay lại assessment",
     "Posting…": "Đang đăng…", "Posted to Jira": "Đã đăng lên Jira",
     "Failed to post — open the assessment page for details.":
         "Đăng thất bại — mở trang assessment để xem chi tiết.",

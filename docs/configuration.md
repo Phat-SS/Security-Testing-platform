@@ -79,11 +79,11 @@ is no setting for it.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ANTHROPIC_MODEL` | CLI default | Pin a specific model. |
+| `ANTHROPIC_MODEL` | CLI default | Pin a specific model — an alias (`sonnet`, `opus`, `fable`) or a full versioned id. Normally left blank: the CLI then uses whatever model your Claude Code session uses. |
 | `CLAUDE_CLI_PATH` | `claude` | Path to the binary if it is not on `PATH`. |
 | `AI_REQUIRE_PINNED_MODEL` | `false` | Production: refuse to run without a versioned model id. |
 | `AI_MAX_BUDGET_USD` | — | Hard ceiling per CLI call. |
-| `AI_EFFORT` | — | Reasoning effort, if the installed CLI supports it. |
+| `AI_EFFORT` | — | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Blank leaves it to the CLI. |
 | `ADJUDICATOR_CHALLENGE` | `true` | A second adversarial pass tries to refute the adjudicator's own reading before a result is shown as settled; an objection sends it back to a human. Doubles the model cost of an auto-resolved row and catches the failure mode that matters — a confident wrong reading handed over as an answer. Set `false` and single-pass readings are labelled "read by the agent" instead of "read, then challenged". |
 
 ### Evidence and report integrity
@@ -105,7 +105,7 @@ is no setting for it.
 | `AUTH_ENABLED` | `false` | `false` runs open in single-user local-admin mode. `true` requires an API key from `config/users.json` on every mutating route. |
 | `AUTH_USERS_CONFIG` | `config/users.json` | Where those SHA-256 key hashes live. |
 | `AUTH_SESSION_TTL_S` | `43200` | Browser session lifetime (minimum 300). The API key itself is never stored in the cookie. |
-| `AUTH_COOKIE_SECURE` | off | Required when served over HTTPS; local HTTP cannot send a `Secure` cookie. |
+| `AUTH_COOKIE_SECURE` | off | Required when served over HTTPS; local HTTP cannot send a `Secure` cookie. A `PLATFORM_BASE_URL` starting with `https://` sets the flag on its own. With auth on, **Readiness** checks this and offers a one-click fix. |
 
 ### Arbitrary-Python PoC runner
 

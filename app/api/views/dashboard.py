@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 
 from collections import Counter
+from urllib.parse import quote_plus
 
 from app.api import ui
 from app.api.ui import attr
@@ -34,6 +35,9 @@ def dashboard(
     sort: str = "recent",
     page_no: int = 1,
     per: int = 24,
+    total_matched: int | None = None,
+    status_counts: dict[str, int] | None = None,
+    totals: dict[str, int] | None = None,
 ) -> str:
     """The assessment list.
 
@@ -45,13 +49,21 @@ def dashboard(
     flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
     warn_html = f"<div class='card pad warn'>&#9888; {_e(warning)}</div>" if warning else ""
 
-    counts = Counter(a.status for a in assessments)
+    # Counts describe the whole list, not the page being shown. `assessments`
+    # is one window of it, so a 40-assessment install used to read "24
+    # Assessments" the moment paging kicked in — the strip was counting the
+    # page it was sitting above.
+    counts = totals if totals is not None else Counter(a.status for a in assessments)
+    n_all = counts.get("ALL", len(assessments)) if totals is not None else len(assessments)
     summary = ui.stats([
-        (str(len(assessments)), _t("Assessments"), "", ""),
+        (str(n_all), _t("Assessments"), "", ""),
         (str(counts.get("CREATED", 0)), _t("Imported"), _t("Analyzed, no plan generated yet."), ""),
         (str(counts.get("ANALYZED", 0)), _t("Designed"), _t("A plan exists; it may not be approved."), ""),
         (str(counts.get("EXECUTED", 0)), _t("Executed"), _t("At least one run has happened."), ""),
     ])
+
+    matched = total_matched if total_matched is not None else len(assessments)
+    pages = max(1, -(-matched // max(1, per)))
 
     by_id = {r["id"]: r for r in (rows or [])}
     cards = "".join(_assessment_card(a, by_id.get(a.id, {})) for a in assessments)
@@ -129,8 +141,9 @@ def dashboard(
 <p class="muted" style="margin:8px 0 0;font-size:13px">{hint}</p></div>
 {summary}
 <h2 class="section">{_t("Recent assessments")}</h2>
-{_dashboard_toolbar(q, status, sort, per, len(assessments), page_no)}
+{_dashboard_toolbar(q, status, sort, per, page_no, matched, n_all, status_counts or {})}
 <div class="grid-cards">{cards}</div>
+{_dashboard_pager(q, status, sort, per, page_no, pages)}
 <script>
 // Import can now include a planning + review pass, which takes tens of seconds
 // with the AI path on. A button that looks idle for that long reads as broken and
@@ -170,38 +183,131 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
 """, active="dashboard", appbar_html=bar)
 
 
-_DASH_STATUS = [("", "Any status"), ("CREATED", "Imported"), ("ANALYZED", "Designed"),
+_DASH_STATUS = [("", "All"), ("CREATED", "Imported"), ("ANALYZED", "Designed"),
                 ("EXECUTED", "Executed")]
 _DASH_SORT = [("recent", "Newest first"), ("oldest", "Oldest first"),
               ("issue", "Issue key"), ("findings", "Most findings")]
+_DASH_PER = (12, 24, 48, 96)
 
 
-def _dashboard_toolbar(q: str, status: str, sort: str, per: int, shown: int,
-                       page_no: int) -> str:
-    """The list grows without bound, so it gets the same treatment as the plan:
-    search, filter, sort, paging — rather than one long wall of cards."""
-    def options(name, current, choices):
+def _dash_url(q: str, status: str, sort: str, per: int, page_no: int = 1) -> str:
+    """One canonical link shape, so a facet click never drops the search box's
+    contents and a page link never drops the facet."""
+    parts = []
+    if q:
+        parts.append(f"q={quote_plus(q)}")
+    if status:
+        parts.append(f"status={quote_plus(status)}")
+    if sort and sort != "recent":
+        parts.append(f"sort={quote_plus(sort)}")
+    if per != 24:
+        parts.append(f"per={per}")
+    if page_no > 1:
+        parts.append(f"page={page_no}")
+    # `&amp;` rather than `&`: every caller puts this straight into an href.
+    return ("/?" + "&amp;".join(parts)) if parts else "/"
+
+
+def _dashboard_toolbar(q: str, status: str, sort: str, per: int, page_no: int,
+                       matched: int, total: int, status_counts: dict[str, int]) -> str:
+    """Search on top, facets below.
+
+    The old bar was one flat row of five labelled fields plus Apply/Clear: the
+    search box — the control reached for nine times out of ten — was the same
+    size and weight as "Per page", the status filter hid behind a dropdown that
+    never said how many of anything there were, and nothing on screen told you
+    a filter was even active. Here the query gets the full first row, status
+    becomes a segmented control carrying its own counts (a facet matching
+    nothing is visibly dimmed rather than a dead end you discover by picking
+    it), and the view options sit to the right where they belong.
+
+    Selects submit on change, so "Apply" is only the search box's button.
+    """
+    # Any status except the current one keeps its own count; the "All" chip
+    # counts what the search alone matched.
+    def facet(value: str, label: str) -> str:
+        n = sum(status_counts.values()) if value == "" else status_counts.get(value, 0)
+        current = ' aria-current="page"' if value == status else ""
+        empty = " none" if not n and value else ""
+        return (f'<a class="seg-b{empty}" href="{_dash_url(q, value, sort, per)}"{current}>'
+                f'{_e(_t(label))} <b>{n}</b></a>')
+
+    def select(name: str, current: str, choices, label: str) -> str:
         opts = "".join(
             f'<option value="{attr(value)}"{" selected" if value == current else ""}>'
             f"{_e(_t(text))}</option>" for value, text in choices
         )
-        return f'<select name="{attr(name)}" style="width:auto">{opts}</select>'
+        return (f'<label class="f-sel"><span>{_e(label)}</span>'
+                f'<select name="{attr(name)}">{opts}</select></label>')
 
-    shown_label = _t("{n} shown").format(n=shown)
-    page_label = _t(" · page {n}").format(n=page_no) if page_no > 1 else ""
-    return f"""<form method="get" action="/" class="toolbar">
-<label class="field grow"><span>{_t("Search issue key")}</span>
-<input name="q" value="{attr(q)}" placeholder="BH-142" style="width:100%"></label>
-<label class="field"><span>{_t("Status")}</span>{options("status", status, _DASH_STATUS)}</label>
-<label class="field"><span>{_t("Sort")}</span>{options("sort", sort or "recent", _DASH_SORT)}</label>
-<label class="field"><span>{_t("Per page")}</span>
-{options("per", str(per), [(str(n), str(n)) for n in (12, 24, 48, 96)])}</label>
-<div class="row" style="gap:6px;align-items:flex-end">
-<button class="btn sec">{_t("Apply")}</button>
-<a class="btn ghost" href="/">{_t("Clear")}</a></div>
-<span class="count" style="align-self:flex-end;padding-bottom:8px">
-{shown_label}{page_label}</span>
+    seg = "".join(facet(value, label) for value, label in _DASH_STATUS)
+    filtered = bool(q or status)
+    count = (_t("{n} of {total}").format(n=matched, total=total) if filtered
+             else _t("{n} assessments").format(n=total))
+    if page_no > 1:
+        count += " · " + _t("page {n}").format(n=page_no)
+    clear = (f'<a class="f-clear" href="/">&#10005; {_t("Clear filters")}</a>'
+             if filtered else "")
+    # Inside the form so typing a query and pressing Enter keeps the facet;
+    # the facet links carry `q` the same way in the other direction.
+    keep_status = f'<input type="hidden" name="status" value="{attr(status)}">' if status else ""
+    reset = (f'<a class="f-x" href="{_dash_url("", status, sort, per)}" '
+             f'aria-label="{attr(_t("Clear search"))}">{ui.icon("x", 14)}</a>' if q else "")
+
+    return f"""<form method="get" action="/" class="filters" id="dash-filter" role="search">
+{keep_status}
+<div class="f-top">
+<div class="f-search">{ui.icon("search", 16)}
+<input name="q" value="{attr(q)}" autocomplete="off" spellcheck="false"
+ aria-label="{attr(_t("Search issue key or assessment id"))}"
+ placeholder="{attr(_t("Search issue key or assessment id — e.g. BH-142"))}">{reset}</div>
+<button class="btn sec">{_t("Search")}</button>
+</div>
+<div class="f-bot">
+<div class="seg" role="group" aria-label="{attr(_t("Status"))}">{seg}</div>
+<span class="f-spacer"></span>
+{select("sort", sort or "recent", _DASH_SORT, _t("Sort"))}
+{select("per", str(per), [(str(n), str(n)) for n in _DASH_PER], _t("Show"))}
+<span class="count">{_e(count)}</span>
+{clear}
+</div>
+<script>
+// The selects are view options, not a query to compose: making the tester
+// pick one and then reach for Apply was one click of pure ceremony.
+document.querySelectorAll('#dash-filter select').forEach(function (s) {{
+  s.addEventListener('change', function () {{ s.form.submit(); }});
+}});
+</script>
 </form>"""
+
+
+def _dashboard_pager(q: str, status: str, sort: str, per: int, page_no: int,
+                     pages: int) -> str:
+    """Paging existed server-side but had no control: page 2 was reachable only
+    by editing the URL, which made "Per page" a setting with no visible effect
+    other than hiding assessments."""
+    if pages <= 1:
+        return ""
+
+    def link(n: int, text: str = "") -> str:
+        if n == page_no:
+            return f'<span class="on">{_e(text or n)}</span>'
+        return f'<a href="{_dash_url(q, status, sort, per, n)}">{_e(text or n)}</a>'
+
+    window = {1, pages, page_no}
+    window.update(range(max(1, page_no - 2), min(pages, page_no + 2) + 1))
+    out = []
+    if page_no > 1:
+        out.append(link(page_no - 1, "‹"))
+    previous = 0
+    for n in sorted(window):
+        if previous and n > previous + 1:
+            out.append('<span class="gap">…</span>')
+        out.append(link(n))
+        previous = n
+    if page_no < pages:
+        out.append(link(page_no + 1, "›"))
+    return f'<div class="pager">{"".join(out)}</div>'
 
 
 def _assessment_card(a: Assessment, row: dict) -> str:

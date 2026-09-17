@@ -418,7 +418,7 @@ code{background:var(--accent-soft);padding:1px 5px;border-radius:4px;}
 .tipbox{position:fixed;display:none;z-index:60;max-width:320px;background:var(--tip-bg);
   color:var(--tip-fg);font-size:12.5px;line-height:1.45;font-weight:400;text-transform:none;
   letter-spacing:0;padding:8px 10px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.22);
-  pointer-events:none;}
+  pointer-events:none;white-space:pre-line;overflow-wrap:anywhere;}
 
 /* page head — distinct from the app topbar it used to borrow */
 .pagehead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
@@ -476,7 +476,9 @@ tbody tr:nth-child(even){background:var(--zebra);}
 tbody tr:hover{background:var(--accent-soft);}
 td.empty{text-align:center;padding:22px 10px;}
 table.compact th,table.compact td{padding:5px 8px;font-size:13px;}
-td .trunc{display:inline-block;max-width:280px;overflow:hidden;text-overflow:ellipsis;
+/* Not scoped to `td`: the assessment card uses it too, and outside a table it
+   was an unstyled class — which is how a long target URL ran past the card. */
+.trunc{display:inline-block;max-width:280px;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;vertical-align:bottom;}
 .rowact{display:flex;gap:4px;justify-content:flex-end;}
 .bar{position:relative;}
@@ -500,6 +502,52 @@ td .trunc{display:inline-block;max-width:280px;overflow:hidden;text-overflow:ell
 .pager .on{background:var(--accent);color:var(--accent-ink);font-weight:700;}
 .pager .gap{color:var(--faint);}
 .count{font-size:12.5px;color:var(--faint);white-space:nowrap;}
+
+/* Search + filter bar.
+   The generic `.toolbar` is a flat row of labelled fields and an Apply button:
+   every control has equal weight, the one you reach for most (search) is the
+   same size as "Per page", and nothing says what is currently filtered. This
+   splits it into the two things it actually is — one query box on top, the
+   facets and view options below — so the shape of the control matches the shape
+   of the decision. */
+.filters{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:14px;}
+.f-top{display:flex;gap:10px;align-items:center;padding:12px 14px;}
+.f-search{position:relative;flex:1;min-width:0;display:flex;align-items:center;}
+.f-search>svg{position:absolute;left:10px;color:var(--faint);pointer-events:none;}
+.f-search input{width:100%;padding-left:32px;padding-right:34px;}
+.f-x{position:absolute;right:6px;display:inline-flex;color:var(--faint);line-height:0;
+  padding:5px;border-radius:50%;text-decoration:none;}
+.f-x:hover{background:var(--bg);color:var(--fg);}
+.f-bot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:9px 14px;
+  border-top:1px solid var(--border);background:var(--bg);
+  border-radius:0 0 var(--radius) var(--radius);}
+.f-spacer{flex:1;min-width:0;}
+.f-sel{display:flex;align-items:center;gap:6px;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--faint);font-weight:700;white-space:nowrap;}
+.f-sel select{width:auto;max-width:170px;padding:5px 8px;font-size:12.5px;
+  background:var(--surface);}
+.f-clear{font-size:12.5px;color:var(--muted);text-decoration:none;white-space:nowrap;}
+.f-clear:hover{color:var(--crit);}
+
+/* A segmented facet. Buttons rather than a <select> because the options are
+   few, mutually exclusive, and each carries a count — a dropdown hides both
+   the count and the fact that three of the four match nothing. */
+.seg{display:inline-flex;gap:2px;padding:2px;max-width:100%;overflow-x:auto;
+  background:var(--surface);border:1px solid var(--border);border-radius:999px;}
+.seg a{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;padding:5px 11px;
+  border-radius:999px;font-size:12.5px;font-weight:600;color:var(--muted);text-decoration:none;}
+.seg a:hover{color:var(--fg);background:var(--bg);}
+.seg a[aria-current]{background:var(--accent-soft);color:var(--accent);}
+.seg a b{font-size:11.5px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--faint);}
+.seg a[aria-current] b{color:var(--accent);}
+.seg a.none{opacity:.5;}
+
+@media (max-width:640px){
+  .f-top,.f-bot{flex-wrap:wrap;}
+  .f-spacer{display:none;}
+  .seg{width:100%;}
+}
 
 /* inline editing row */
 tr.editing{background:var(--accent-soft);}

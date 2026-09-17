@@ -282,6 +282,30 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
                 f"{engagement.attacker} attacks objects owned by {engagement.victim}.",
             ))
 
+    # Only when a session cookie is actually issued. With auth off the login
+    # route refuses every key and no cookie is ever set, so a warning about its
+    # flags would be about a cookie that does not exist.
+    if os.getenv("AUTH_ENABLED", "false").lower() == "true":
+        cookie = session_cookie_state()
+        if cookie["secure"]:
+            why = ("PLATFORM_BASE_URL is HTTPS" if cookie["https_base"]
+                   else "AUTH_COOKIE_SECURE=true")
+            checks.append(Check(
+                "session_cookie", "Login session cookie", OK,
+                f"Marked Secure ({why}).",
+            ))
+        else:
+            checks.append(Check(
+                "session_cookie", "Login session cookie", WARN,
+                "Not marked Secure — it will also be sent over plain HTTP.",
+                "Turn this on for any deployment reachable over HTTPS. Leave it "
+                "off for local HTTP development, where a Secure cookie cannot be "
+                "sent at all and would lock you out of your own login.",
+                fix_action="/config/session-cookie",
+                fix_label="Mark the cookie Secure",
+                fix_fields={"secure": "true"},
+            ))
+
     return Readiness(checks=checks, environments=envs)
 
 
@@ -458,9 +482,53 @@ def ai_evidence_config_state() -> dict[str, object]:
         "values": {key: os.getenv(key, "") for key in public_keys},
         "flags": {
             key: os.getenv(key, "false").lower() == "true"
-            for key in ("USE_AI", "AI_REQUIRE_PINNED_MODEL", "AUTH_COOKIE_SECURE")
+            # AUTH_COOKIE_SECURE is deliberately NOT here. It is a login-session
+            # setting that only ever sat in this pane because it also lives in
+            # .env, and it is now a readiness check with its own writer — see
+            # `session_cookie_state()` below.
+            for key in ("USE_AI", "AI_REQUIRE_PINNED_MODEL")
         },
+        "ai": claude_cli_state(),
     }
+
+
+def claude_cli_state() -> dict[str, object]:
+    """What the AI path is actually bound to right now.
+
+    There is no Anthropic API key anywhere in this platform: `ClaudeLLM` shells
+    out to the operator's own `claude` CLI, so the model, the login and the
+    billing are whichever ones their Claude Code is already using. The pane used
+    to present a model box with a versioned placeholder, which read as "you must
+    pin a model here" — the opposite of the truth, and the placeholder had gone
+    stale besides.
+
+    The default model is reported as a description rather than resolved: naming
+    it would mean running the CLI on every config page load.
+    """
+    import shutil
+
+    from app.analysis.staged import ClaudeLLM
+
+    cli = os.environ.get("CLAUDE_CLI_PATH", "claude")
+    # No "enabled" here: USE_AI is already in `flags`, and two places reporting
+    # one switch is how they come to disagree.
+    return {
+        "found": ClaudeLLM.is_available(),
+        "path": shutil.which(cli) or cli,
+        "pinned_model": os.getenv("ANTHROPIC_MODEL", "").strip(),
+    }
+
+
+def session_cookie_state() -> dict[str, object]:
+    """Whether the login cookie is marked `Secure`, and by what.
+
+    Two signals set it (see routes/auth.py): the explicit flag, or a
+    PLATFORM_BASE_URL that is already HTTPS. Reporting only the flag would call
+    a correctly-configured HTTPS deployment misconfigured.
+    """
+    flag = os.getenv("AUTH_COOKIE_SECURE", "").lower() == "true"
+    https_base = os.getenv("PLATFORM_BASE_URL", "").lower().startswith("https://")
+    return {"flag": flag, "https_base": https_base, "secure": flag or https_base}
 
 
 def runtime_facts() -> list[tuple[str, str, str]]:

@@ -41,6 +41,11 @@ EXPECTED = [
     ("POST", "/config/identities"),
     ("POST", "/config/runner"),
     ("POST", "/config/ai-evidence"),
+    # The readiness check's one-click fix for AUTH_COOKIE_SECURE. Deliberately
+    # its own writer rather than a field in /config/ai-evidence: that handler
+    # posts every absent checkbox back as "false", so sharing it would let an
+    # AI save silently un-secure the login cookie.
+    ("POST", "/config/session-cookie"),
     ("POST", "/config/mcp/jira/reconnect"),
     ("POST", "/config/mcp/jira/refresh-token"),
     # assessments

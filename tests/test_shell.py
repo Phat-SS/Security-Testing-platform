@@ -13,7 +13,11 @@ from starlette.testclient import TestClient
 
 from app.api import ui
 
-_ROOT_BLOCK = re.compile(r":root([^{]*)\{")
+# A `:root` block that DECLARES a custom property. `:root[...]` is also used as
+# a plain state selector (the collapsed sidebar keys off `:root[data-sb=mini]`),
+# and those carry no colours — the invariant below is about where the palette
+# is defined, not about every rule that happens to be anchored on the root.
+_ROOT_BLOCK = re.compile(r":root([^{]*)\{(?=[^{}]*--[a-z-]+:)")
 
 
 @pytest.fixture()

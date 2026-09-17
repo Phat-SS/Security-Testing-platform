@@ -305,7 +305,8 @@ class Orchestrator:
         return assessment_id
 
     async def import_and_plan(self, issue_key: str, depth: str | None = None,
-                              max_rounds: int = 1, actor: str = "tester"):
+                              max_rounds: int = 1, actor: str = "tester",
+                              engagement: str = ""):
         """Import, analyze, plan, review, revise — one action, ending at approval.
 
         The whole point of the planning agent: entering a key produces a plan a
@@ -321,7 +322,7 @@ class Orchestrator:
 
         Returns (assessment_id, PlanReview | None).
         """
-        assessment_id = await self.import_and_analyze(issue_key)
+        assessment_id = await self.import_and_analyze(issue_key, engagement=engagement)
         try:
             _tests, review = self.agent_plan(assessment_id, depth=depth,
                                              max_rounds=max_rounds, actor=actor)
@@ -335,7 +336,8 @@ class Orchestrator:
             return assessment_id, None
         return assessment_id, review
 
-    async def import_and_run_poc_plan(self, issue_key: str, actor: str = "tester"):
+    async def import_and_run_poc_plan(self, issue_key: str, actor: str = "tester",
+                                      engagement: str = ""):
         """Import, then run exactly the PoC embedded in the ticket — nothing else.
 
         Unlike import_and_plan, neither the AI attack planner nor the
@@ -357,7 +359,7 @@ class Orchestrator:
         False when the ticket had no embedded PoC script to run — the caller should
         tell the tester to use Auto-plan or paste a PoC by hand instead.
         """
-        assessment_id = await self.import_and_analyze(issue_key)
+        assessment_id = await self.import_and_analyze(issue_key, engagement=engagement)
         analysis = self.get_analysis(assessment_id)
         poc = analysis.detected_poc_source if analysis else ""
         if not poc:
@@ -1745,7 +1747,8 @@ class Orchestrator:
             raise self.UnknownAssessment(assessment_id)
         return assessment
 
-    def build_report_html(self, assessment_id: str, lang: str = "en") -> str:
+    def build_report_html(self, assessment_id: str, lang: str = "en",
+                          linkback: bool = False) -> str:
         from app.reporting.quality import build_finding_drafts, verify_report
 
         assessment = self.require_assessment(assessment_id)
@@ -1784,6 +1787,10 @@ class Orchestrator:
             report_manifest=report_manifest,
             input_snapshot=(analysis.input_snapshot if analysis else {}),
             lang=lang,
+            # Only the report served over HTTP gets a link back into the app.
+            # A downloaded or CLI-rendered copy is read away from the server it
+            # would point at.
+            linkback=linkback,
         )
         self._repo.audit(
             "report", assessment_id,

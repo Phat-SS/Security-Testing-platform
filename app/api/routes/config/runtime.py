@@ -61,6 +61,30 @@ async def save_runner_route(
     return config_redirect("runner", "Runner limits saved")
 
 
+@router.post("/config/session-cookie")
+async def save_session_cookie_route(
+    secure: str = Form(""),
+    user: User = Depends(require("admin")),
+):
+    """The readiness check's one-click fix. Separate from the AI/evidence writer
+    so that neither pane can overwrite the other's setting."""
+    on = secure.lower() == "true"
+    try:
+        preflight.update_dotenv_values(
+            {"AUTH_COOKIE_SECURE": "true" if on else None},
+            state.runtime_env_path, apply_to_environ=True,
+        )
+    except (OSError, ValueError) as exc:
+        return config_redirect("readiness", f"Not saved: {type(exc).__name__}")
+    state.repo.audit("runtime_config", actor=user.name,
+                     detail=f"AUTH_COOKIE_SECURE set to {'true' if on else 'unset'}.")
+    return config_redirect(
+        "readiness",
+        "Session cookie is now marked Secure" if on
+        else "Session cookie is no longer marked Secure",
+    )
+
+
 @router.post("/config/ai-evidence")
 async def save_ai_evidence_route(
     request: Request,
@@ -75,9 +99,13 @@ async def save_ai_evidence_route(
         "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_EFFORT",
         "REPORT_SIGNING_KEY_ID", "OAST_PUBLIC_URL", "OAST_POLL_URL", "OAST_TIMEOUT_S",
     )
+    # AUTH_COOKIE_SECURE used to be in this list. It is a login-session setting,
+    # not an AI or evidence one, and leaving it here would be worse than untidy:
+    # every save from this pane posts absent checkboxes back as "false", so
+    # changing the AI model would quietly un-secure the session cookie.
     changes: dict[str, str | None] = {
         key: "true" if form.get(key) else "false"
-        for key in ("USE_AI", "AI_REQUIRE_PINNED_MODEL", "AUTH_COOKIE_SECURE")
+        for key in ("USE_AI", "AI_REQUIRE_PINNED_MODEL")
     }
 
     for key in public_keys:

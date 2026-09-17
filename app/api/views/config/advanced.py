@@ -126,102 +126,320 @@ def _mcp_pane(
 </div>"""
 
 
+#: `--effort` accepts exactly these (see `claude --help`). A closed set, so it
+#: gets a <select>: the free-text box it replaces was validated by a regex that
+#: accepted any word, including ones the CLI rejects at call time rather than at
+#: save time — which turns a typo into a failed analysis instead of an error.
+_AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+#: `--model` takes an alias for the current model or a full versioned id. These
+#: are SUGGESTIONS behind a <datalist>, never a closed list: pinning is the
+#: minority case, and a hard-coded menu of model ids goes stale — the box this
+#: replaces had a stale one baked into its placeholder.
+_AI_MODEL_HINTS = ("sonnet", "opus", "fable")
+
+#: Bytes of entropy per generated key. Both are base64url-encoded afterwards, so
+#: the stored strings comfortably clear the 16 / 32 character minimums the
+#: writer enforces.
+_KEY_BYTES = {"EVIDENCE_FINGERPRINT_KEY": 32, "REPORT_SIGNING_KEY": 48}
+
+_HINT = "font-size:11.5px;text-transform:none;letter-spacing:0"
+_GRID = "display:grid;grid-template-columns:repeat(auto-fit,minmax({0},1fr));gap:14px"
+
+
+def _hint(text: str) -> str:
+    return f'<span class="muted" style="{_HINT}">{text}</span>'
+
+
+def _clear_box(key: str) -> str:
+    return (
+        f'<label class="muted" style="display:flex;gap:6px;align-items:center;'
+        f'margin-top:6px;{_HINT}">'
+        f'<input type="checkbox" name="clear_{_e(key)}" value="true" style="width:auto">'
+        f'{_t("Clear the stored value")}</label>'
+    )
+
+
+def _ai_pane(values: dict, flags: dict, ai: dict) -> str:
+    """The Claude block, status first.
+
+    Nothing here needs an API key. `ClaudeLLM` shells out to the operator's own
+    `claude` CLI, so the login, the subscription and the default model are the
+    ones their Claude Code is already using. This pane used to open with a
+    "Versioned model ID" box carrying a versioned placeholder, which read as a
+    required field — so the one setting most people should leave alone looked
+    like the first thing to fill in, and the placeholder had gone stale besides.
+    It now says what the AI path is bound to, and the model field defaults
+    visibly to "whatever the CLI uses".
+    """
+    on = bool(flags.get("USE_AI"))
+    found = bool(ai.get("found"))
+    if not found:
+        tone, word = "med", _t("CLI NOT FOUND")
+        detail = _t(
+            "Claude Code is not installed on this machine, or is not on PATH. Analysis "
+            "runs on the deterministic path until it is."
+        )
+    elif on:
+        tone, word = "low", _t("ON")
+        detail = _t(
+            "Runs through your own Claude Code login — no separate API key, no separate bill."
+        )
+    else:
+        tone, word = "info", _t("OFF")
+        detail = _t(
+            "The CLI is available. Analysis runs on the deterministic path until you turn "
+            "this on."
+        )
+
+    pinned = str(ai.get("pinned_model") or "")
+    model_now = f"<code>{_e(pinned)}</code>" if pinned else f"<i>{_t('the CLI default')}</i>"
+    cli_path = _e(str(ai.get("path") or "claude"))
+    checked = " checked" if on else ""
+
+    hints = "".join(f'<option value="{_e(m)}">' for m in _AI_MODEL_HINTS)
+    current_effort = str(values.get("AI_EFFORT", ""))
+    efforts = "".join(
+        f'<option value="{_e(v)}"{" selected" if current_effort == v else ""}>{_e(v)}</option>'
+        for v in _AI_EFFORTS
+    )
+    effort_default = "" if current_effort else " selected"
+    pin_checked = " checked" if flags.get("AI_REQUIRE_PINNED_MODEL") else ""
+
+    model_hint = _hint(_t("Leave blank unless you need a specific one. An alias, or a full versioned id."))
+    effort_hint = _hint(_t("How much reasoning each call is allowed. Higher costs more and takes longer."))
+    budget_hint = _hint(_t("A hard stop, not a target. Blank lets the CLI decide."))
+    pin_note = _t(
+        "For deployments that must be able to say which exact model produced a report. An "
+        "alias like <code>sonnet</code> moves between releases, so it is rejected here — with "
+        "this on, a blank model field stops the AI path entirely."
+    )
+
+    return f"""<div class="card pad" style="margin-bottom:14px">
+<div class="row" style="justify-content:space-between;align-items:flex-start">
+<div style="min-width:0">
+<b>Claude</b> <span class="pill {tone}" style="margin-left:6px">{word}</span>
+<div class="muted" style="margin-top:4px">{detail}</div>
+<div class="muted" style="font-size:11.5px;margin-top:6px;overflow-wrap:anywhere">
+{_t("CLI")}: <span class="mono">{cli_path}</span> &middot; {_t("model")}: {model_now}</div>
+</div>
+<label class="row" style="gap:7px;margin:0;white-space:nowrap">
+<input type="checkbox" name="USE_AI" value="true" style="width:auto"{checked}>
+<b>{_t("Use Claude")}</b></label>
+</div>
+</div>
+
+<div class="card pad" style="margin-bottom:14px">
+<div style="{_GRID.format("215px")}">
+<label class="field"><span>{_t("Model")}</span>
+<input name="ANTHROPIC_MODEL" list="ai-model-hints" value="{_e(values.get("ANTHROPIC_MODEL", ""))}"
+ placeholder="{_t("empty — use the CLI's model")}">
+<datalist id="ai-model-hints">{hints}</datalist>
+{model_hint}</label>
+
+<label class="field"><span>{_t("Effort")}</span>
+<select name="AI_EFFORT">
+<option value=""{effort_default}>{_t("CLI default")}</option>{efforts}</select>
+{effort_hint}</label>
+
+<label class="field"><span>{_t("Spend cap per call (USD)")}</span>
+<input type="number" min="0.01" step="0.01" name="AI_MAX_BUDGET_USD"
+ value="{_e(values.get("AI_MAX_BUDGET_USD", ""))}" placeholder="{_t("no cap")}">
+{budget_hint}</label>
+</div>
+
+<details style="margin-top:12px">
+<summary class="muted" style="cursor:pointer;font-size:12.5px">{_t("Compliance option")}</summary>
+<label class="row" style="gap:7px;margin:10px 0 0">
+<input type="checkbox" name="AI_REQUIRE_PINNED_MODEL" value="true" style="width:auto"{pin_checked}>
+{_t("Refuse to run unless the model above is a full versioned id")}</label>
+<div class="muted" style="margin-top:6px;font-size:12.5px">{pin_note}</div>
+</details>
+</div>"""
+
+
+def _evidence_pane(values: dict, secrets: dict) -> str:
+    """Two capability rows, not two password boxes.
+
+    Neither key's VALUE means anything — they only have to be random and stable.
+    Presenting them as secrets to compose put the reader in front of a password
+    field with a length rule, for a decision they never actually had to make,
+    while saying nothing about what is lost by leaving them empty, which is the
+    only part that matters. The rows lead with what works and what does not; the
+    manual boxes move behind a disclosure for the one real case, pasting a key
+    back from a secret manager.
+    """
+    rows = (
+        ("EVIDENCE_FINGERPRINT_KEY", _t("Cross-identity correlation"), _t(
+            "HMACs identity values so a BOLA finding can show the attacker saw the victim's "
+            "own data. Without it that comparison is skipped and those verdicts come back "
+            "INCONCLUSIVE."
+        )),
+        ("REPORT_SIGNING_KEY", _t("Report manifest signing"), _t(
+            "Signs each report manifest, so it can be shown not to have been edited after "
+            "the run. Without it manifests are still written, just unsigned."
+        )),
+    )
+    body = ""
+    for index, (key, label, why) in enumerate(rows):
+        live = bool(secrets.get(key))
+        pill = (f'<span class="pill low">{_t("ACTIVE")}</span>' if live
+                else f'<span class="pill med">{_t("OFF")}</span>')
+        # The rule SEPARATES the rows, so the first one does not get it — it
+        # would otherwise draw a stray line across the top of the card.
+        rule = "" if index == 0 else "border-top:1px solid var(--border);"
+        body += (
+            f'<div style="{rule}padding:10px 0">'
+            f'<b>{_e(label)}</b> {pill}'
+            f'<div class="muted" style="margin-top:3px;font-size:12.5px">{why}</div></div>'
+        )
+
+    if any(not secrets.get(key) for key, _, _ in rows):
+        action = (
+            f'<button class="btn" type="button" onclick="fillEvidenceKeys()">'
+            f'{_t("Generate the missing keys")}</button>'
+            + _hint(_t("Generated in your browser, stored when you save."))
+        )
+    else:
+        action = _hint(_t("Nothing to do here."))
+
+    def box(key: str, minimum: int) -> str:
+        placeholder = _t("stored — blank keeps it") if secrets.get(key) else _t("not set")
+        return f"""<div><label class="field"><span>{_e(key)}</span>
+<input id="secret-{_e(key.lower())}" type="password" name="{_e(key)}" autocomplete="new-password"
+ minlength="{minimum}" placeholder="{placeholder}"></label>
+{_clear_box(key)}</div>"""
+
+    manual_note = _t(
+        "For restoring a key from a secret manager, or rotating one. Stored values are never "
+        "sent back to the browser: blank keeps the current key, and removing one takes the "
+        "explicit checkbox."
+    )
+    key_id_hint = _hint(_t("A label recorded in the manifest, so a verifier knows which key to reach for."))
+
+    return f"""<div class="card pad" style="margin-bottom:14px">
+{body}
+<div class="row" style="margin-top:12px;align-items:center">{action}</div>
+<details style="margin-top:12px" id="evidence-manual">
+<summary class="muted" style="cursor:pointer;font-size:12.5px">{_t("Enter keys by hand")}</summary>
+<div class="muted" style="margin:8px 0 12px;font-size:12.5px">{manual_note}</div>
+<div style="{_GRID.format("260px")}">
+{box("EVIDENCE_FINGERPRINT_KEY", 16)}
+{box("REPORT_SIGNING_KEY", 32)}
+</div>
+<label class="field" style="margin-top:12px;max-width:320px"><span>{_t("Signing key id")}</span>
+<input name="REPORT_SIGNING_KEY_ID" value="{_e(values.get("REPORT_SIGNING_KEY_ID", ""))}"
+ placeholder="local-hmac">
+{key_id_hint}</label>
+</details>
+</div>"""
+
+
+def _oast_pane(values: dict, secrets: dict) -> str:
+    """One line when it is not set up, which is the normal case.
+
+    OAST is an external callback collector. Four fields for an integration most
+    engagements do not have was most of this pane's apparent length; collapsed,
+    it states the consequence of not having one and gets out of the way.
+    """
+    configured = bool(values.get("OAST_PUBLIC_URL") and values.get("OAST_POLL_URL"))
+    pill = (f'<span class="pill low">{_t("CONFIGURED")}</span>' if configured
+            else f'<span class="pill info">{_t("NOT SET UP")}</span>')
+    if configured:
+        summary = _t("Blind and out-of-band tests can be confirmed.")
+    else:
+        summary = _t(
+            "Blind SSRF and other out-of-band tests report INCONCLUSIVE — there is nowhere "
+            "for the target's callback to land."
+        )
+    token_placeholder = (_t("stored — blank keeps it") if secrets.get("OAST_API_TOKEN")
+                         else _t("not set"))
+    footer = _t(
+        "Both URLs must be HTTPS and are set together. The token is sent only to the polling "
+        "endpoint — never into the callback URL handed to the target."
+    )
+    return f"""<div class="card pad">
+<details{" open" if configured else ""}>
+<summary style="cursor:pointer"><b>{_t("Out-of-band collaborator")}</b> {pill}
+<div class="muted" style="margin-top:4px;font-size:12.5px">{summary}</div></summary>
+<div style="{_GRID.format("260px")};margin-top:14px">
+<label class="field"><span>{_t("Public callback base URL")}</span>
+<input name="OAST_PUBLIC_URL" value="{_e(values.get("OAST_PUBLIC_URL", ""))}"
+ placeholder="https://callbacks.example.test/c"></label>
+<label class="field"><span>{_t("Authenticated polling base URL")}</span>
+<input name="OAST_POLL_URL" value="{_e(values.get("OAST_POLL_URL", ""))}"
+ placeholder="https://callbacks.example.test/api/events"></label>
+<div><label class="field"><span>{_t("Polling API token")}</span>
+<input type="password" name="OAST_API_TOKEN" autocomplete="new-password"
+ placeholder="{token_placeholder}"></label>
+{_clear_box("OAST_API_TOKEN")}</div>
+<label class="field"><span>{_t("Polling timeout (s)")}</span>
+<input type="number" min="0.1" step="0.1" name="OAST_TIMEOUT_S"
+ value="{_e(values.get("OAST_TIMEOUT_S", ""))}" placeholder="5"></label>
+</div>
+<div class="muted" style="margin-top:10px;font-size:12.5px">{footer}</div>
+</details></div>"""
+
+
+# Fills only an EMPTY box. These keys cannot be rotated in place: change the
+# signing key and every manifest already signed with the old one stops
+# verifying, so a convenience button that overwrote a live key would be a trap.
+_EVIDENCE_JS = """
+function _randomSecret(bytes) {
+  var data = new Uint8Array(bytes);
+  crypto.getRandomValues(data);
+  var raw = Array.from(data, function (b) { return String.fromCharCode(b); }).join('');
+  return btoa(raw).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+}
+function fillEvidenceKeys() {
+  var filled = 0;
+  __PAIRS__.forEach(function (pair) {
+    var el = document.getElementById(pair[0]);
+    if (!el || el.value) return;
+    el.value = _randomSecret(pair[1]);
+    filled += 1;
+  });
+  // Opened so the generated values are visible before they are saved: a button
+  // that silently stuffs a secret into a collapsed field asks for trust it has
+  // not earned.
+  if (filled) {
+    var manual = document.getElementById('evidence-manual');
+    if (manual) manual.open = true;
+  }
+}
+"""
+
+
 def _ai_evidence_pane(config: dict[str, object]) -> str:
     values = config.get("values") or {}
     flags = config.get("flags") or {}
     secrets = config.get("secrets") or {}
+    ai = config.get("ai") or {}
 
-    def checked(key: str) -> str:
-        return "checked" if flags.get(key) else ""
+    intro = _t(
+        "Written to <code>.env</code> and applied immediately, with no restart. Needs the "
+        "<b>admin</b> role when authentication is on."
+    )
+    pairs = ", ".join(
+        f"['secret-{key.lower()}', {size}]" for key, size in _KEY_BYTES.items()
+    )
+    script = _EVIDENCE_JS.replace("__PAIRS__", f"[{pairs}]")
 
-    def value(key: str) -> str:
-        return _e(values.get(key, ""))
+    return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
+<form method="post" action="/config/ai-evidence" id="ai-form">
 
-    def secret_field(key: str, label: str, minimum: int, hint: str) -> str:
-        configured = bool(secrets.get(key))
-        status = (
-            '<span class="pill low">CONFIGURED</span>'
-            if configured else '<span class="pill med">NOT SET</span>'
-        )
-        placeholder = "Configured — leave blank to keep" if configured else "Not configured"
-        field_id = f"secret-{key.lower()}"
-        return f"""<div class="card pad" style="margin-bottom:10px">
-<div class="row" style="justify-content:space-between;margin-bottom:8px">
-<div><b>{_e(label)}</b> {status}</div><code>{_e(key)}</code></div>
-<div class="row" style="align-items:flex-end">
-<label class="field" style="flex:1"><span>New value</span>
-<input id="{field_id}" type="password" name="{_e(key)}" autocomplete="new-password"
- minlength="{minimum}" placeholder="{_e(placeholder)}"></label>
-<button class="btn ghost" type="button" onclick="generateRuntimeSecret('{field_id}',{max(32, minimum)})">Generate</button>
-</div>
-<label class="muted" style="display:flex;gap:6px;align-items:center;margin-top:8px">
-<input type="checkbox" name="clear_{_e(key)}" value="true" style="width:auto">
-Clear the stored value</label>
-<div class="muted" style="margin-top:6px">{_e(hint)}</div></div>"""
+<h2 class="section" style="margin-top:0">{_t("Analyzer")}</h2>
+{_ai_pane(values, flags, ai)}
 
-    return f"""<p class="muted" style="margin:0 0 12px">
-These settings are written to <code>.env</code> and applied immediately. Secret values are
-never returned to the browser: blank keeps the current value; clearing requires the explicit
-checkbox. This pane requires the <b>admin</b> role when authentication is enabled.</p>
-<form method="post" action="/config/ai-evidence">
+<h2 class="section">{_t("Evidence keys")}</h2>
+{_evidence_pane(values, secrets)}
 
-<h2 class="section">Claude runtime</h2>
-<div class="card pad" style="margin-bottom:18px">
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px">
-<label class="field"><span>Versioned model ID</span>
-<input name="ANTHROPIC_MODEL" value="{value('ANTHROPIC_MODEL')}"
- placeholder="claude-sonnet-4-20260514"></label>
-<label class="field"><span>Maximum budget per call (USD)</span>
-<input type="number" min="0.01" step="0.01" name="AI_MAX_BUDGET_USD"
- value="{value('AI_MAX_BUDGET_USD')}" placeholder="1.00"></label>
-<label class="field"><span>Reasoning effort</span>
-<input name="AI_EFFORT" value="{value('AI_EFFORT')}" placeholder="high"></label>
-</div>
-<div class="row" style="margin-top:12px;gap:18px">
-<label><input type="checkbox" name="USE_AI" value="true" style="width:auto" {checked('USE_AI')}> Enable Claude AI</label>
-<label><input type="checkbox" name="AI_REQUIRE_PINNED_MODEL" value="true" style="width:auto" {checked('AI_REQUIRE_PINNED_MODEL')}> Require a versioned model ID</label>
-</div></div>
+<h2 class="section">{_t("Optional integration")}</h2>
+{_oast_pane(values, secrets)}
 
-<h2 class="section">Evidence and report integrity</h2>
-{secret_field('EVIDENCE_FINGERPRINT_KEY', 'Evidence correlation HMAC key', 16,
-              'HMACs identity values used for cross-persona correlation. Use a deployment-specific random key.')}
-{secret_field('REPORT_SIGNING_KEY', 'Report manifest signing key', 32,
-              'Signs report manifests. Production requires at least 32 characters and secret-manager backup.')}
-<div class="card pad" style="margin-bottom:18px"><label class="field">
-<span>Signing key ID</span><input name="REPORT_SIGNING_KEY_ID"
- value="{value('REPORT_SIGNING_KEY_ID')}" placeholder="prod-report-key-2026"></label></div>
-
-<h2 class="section">OAST collaborator</h2>
-<div class="card pad" style="margin-bottom:10px">
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-<label class="field"><span>Public callback base URL</span>
-<input name="OAST_PUBLIC_URL" value="{value('OAST_PUBLIC_URL')}"
- placeholder="https://callbacks.example.test/c"></label>
-<label class="field"><span>Authenticated polling base URL</span>
-<input name="OAST_POLL_URL" value="{value('OAST_POLL_URL')}"
- placeholder="https://callbacks.example.test/api/events"></label>
-</div><label class="field" style="margin-top:12px"><span>Polling timeout (seconds)</span>
-<input type="number" min="0.1" step="0.1" name="OAST_TIMEOUT_S"
- value="{value('OAST_TIMEOUT_S')}" placeholder="5"></label></div>
-{secret_field('OAST_API_TOKEN', 'OAST polling API token', 1,
-              'Sent only to the polling endpoint; never injected into the target callback URL.')}
-
-<h2 class="section">Browser session</h2>
-<div class="card pad"><label>
-<input type="checkbox" name="AUTH_COOKIE_SECURE" value="true" style="width:auto" {checked('AUTH_COOKIE_SECURE')}>
-Set the browser session cookie only over HTTPS</label>
-<div class="muted" style="margin-top:6px">Enable this for every HTTPS deployment. Local HTTP development cannot send a Secure cookie.</div></div>
-
-<div class="row" style="margin-top:16px"><button class="btn">Save AI &amp; evidence configuration</button></div>
+<div class="row" style="margin-top:16px"><button class="btn">{_t("Save")}</button></div>
 </form>
-<script>
-function generateRuntimeSecret(id, bytes) {{
-  var data = new Uint8Array(bytes);
-  crypto.getRandomValues(data);
-  var raw = Array.from(data, function (b) {{ return String.fromCharCode(b); }}).join('');
-  document.getElementById(id).value = btoa(raw).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
-}}
-</script>"""
+<script>{script}</script>"""
 
 
 def _runtime_pane(facts: list[tuple[str, str, str]]) -> str:
@@ -273,7 +491,7 @@ def _advanced_pane(
     return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
 {_section("Runner limits", "timeouts and request caps",
           _runner_pane(limits, runner_overrides), open_section in ("runner", "advanced"))}
-{_section("AI &amp; Evidence", "Claude runtime, signing keys, OAST — writes to .env",
+{_section("AI &amp; Evidence", "analyzer, evidence keys — writes to .env",
           _ai_evidence_pane(ai_evidence), open_section == "ai-evidence")}
 {_section("Jira connector (MCP)", "live server vs offline mock",
           _mcp_pane(jira_mode, jira_live, jira_warning, jira_env, jira_keys),

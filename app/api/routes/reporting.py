@@ -42,7 +42,11 @@ def _audit_export(aid: str, fmt: str, user: User) -> None:
 
 @router.get("/assessment/{aid}/report", response_class=HTMLResponse)
 async def report(aid: str, user: User = Depends(require_page())) -> str:
-    return state.orch.build_report_html(aid, lang=i18n.get_lang())
+    # `linkback`: a run now hands over to this page in the tab the tester was
+    # already in, rather than only ever being opened in a new one, so the live
+    # report carries a way back to the assessment. The downloaded copy below
+    # does not — it is read away from the server that link points at.
+    return state.orch.build_report_html(aid, lang=i18n.get_lang(), linkback=True)
 
 
 @router.get("/assessment/{aid}/export.html")

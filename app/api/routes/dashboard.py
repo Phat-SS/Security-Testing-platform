@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 
+from collections import Counter
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import (
     HTMLResponse,
@@ -37,11 +39,16 @@ async def dashboard(flash: str = "", q: str = "", status: str = "",
     by_id = {r["id"]: r for r in rows}
 
     needle = q.strip().lower()
-    shown = [
+    # Two stages, because the status chips need counts: `searched` is what the
+    # query alone matched (that is what each chip counts within), and `shown`
+    # applies the chip on top. Counting the chips against `shown` would make
+    # every chip except the selected one read 0.
+    searched = [
         a for a in everything
-        if (not needle or needle in a.issue_key.lower() or needle in a.id.lower())
-        and (not status or a.status == status)
+        if not needle or needle in a.issue_key.lower() or needle in a.id.lower()
     ]
+    status_counts = Counter(a.status for a in searched)
+    shown = [a for a in searched if not status or a.status == status]
     if sort not in _DASH_SORTS:
         sort = "recent"
     if sort == "oldest":
@@ -52,7 +59,11 @@ async def dashboard(flash: str = "", q: str = "", status: str = "",
         shown = sorted(shown, key=lambda a: -by_id[a.id]["n_findings"])
 
     per = max(1, min(per, 96))
-    page = max(1, page)
+    # Clamped to a page that exists. Filtering down from page 4 of the unfiltered
+    # list used to land on an empty grid reading "no assessments match" when
+    # several did — they were just all on page 1.
+    pages = max(1, -(-len(shown) // per))
+    page = min(max(1, page), pages)
     window = shown[(page - 1) * per: page * per]
 
     return views.dashboard(
@@ -69,4 +80,9 @@ async def dashboard(flash: str = "", q: str = "", status: str = "",
         sort=sort,
         page_no=page,
         per=per,
+        total_matched=len(shown),
+        status_counts=dict(status_counts),
+        # The strip above the list describes the install, not the filter — so
+        # it is counted over everything, before either stage above.
+        totals={"ALL": len(everything), **Counter(a.status for a in everything)},
     )

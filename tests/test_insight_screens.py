@@ -119,6 +119,61 @@ def test_findings_do_not_mix_two_clients(client):
     assert "CRM-1234" not in client.get("/findings?engagement=globex").text
 
 
+# -- being scoped out of existence ------------------------------------------
+#
+# Both screens filter on the engagement stamped on the assessment. Anything that
+# leaves that stamp empty does not merely land in the wrong engagement — it
+# lands in none, and the screens come up empty on an engagement full of work.
+
+
+@pytest.mark.parametrize("mode", ["analyze", "auto_plan", "ticket_poc"])
+def test_every_import_mode_stamps_the_engagement(client, mode):
+    """Only the analyze path passed it. An assessment opened through Auto-plan
+    or the ticket's own PoC was invisible to both screens forever after."""
+    from app.api.main import state
+
+    aid = client.post("/import?engagement=acme", follow_redirects=True,
+                      data={"issue_key": "CRM-1234", "mode": mode}
+                      ).url.path.rsplit("/", 1)[-1]
+
+    assert state.repo.assessment_engagement(aid) == "acme"
+
+
+@pytest.mark.parametrize("path", ["/activity", "/findings"])
+def test_an_unstamped_assessment_is_still_visible(client, path):
+    """Rows written before the stamp existed carry an empty string. Matching on
+    equality alone hid every one of them, which is how an engagement with dozens
+    of assessments showed an empty Activity screen."""
+    from app.api.main import state
+    from app.schemas.finding import (
+        Confidence, CorrelationEvidence, Finding, OwaspApiCategory, Severity,
+    )
+
+    state.repo.create_assessment("A-legacy", "OLD-1", "OLD", engagement="")
+    state.repo.audit("import_issue", "A-legacy", detail="OLD-1")
+    state.repo.save_findings("A-legacy", [Finding(
+        finding_id="SEC-LEGACY", title="A legacy break",
+        owasp_category=OwaspApiCategory.API1, severity=Severity.HIGH,
+        confidence=Confidence.HIGH, endpoint="GET /old", dedup_key="k-legacy",
+        correlation=CorrelationEvidence(baseline_summary="", attack_summary="",
+                                        expected="", actual=""),
+        impact="", recommendation="",
+    )])
+
+    assert "OLD-1" in client.get(path).text
+
+
+def test_an_engagement_wide_entry_is_not_dropped(client):
+    """A config change belongs to no assessment. Filtering on the joined
+    assessment turned the outer join back into an inner one and took every one
+    of them out of the log."""
+    from app.api.main import state
+
+    state.repo.audit("runtime_config", actor="local-admin", detail="AI enabled")
+
+    assert "runtime_config" in client.get("/activity").text
+
+
 def test_findings_are_ordered_worst_first(client):
     """The most recent critical is the top line, because that is the one
     somebody has to act on."""

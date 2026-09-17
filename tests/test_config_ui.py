@@ -252,7 +252,6 @@ def test_ai_evidence_secrets_can_be_saved_without_being_echoed(client):
         "OAST_POLL_URL": "https://oast.example/events",
         "OAST_API_TOKEN": oast_token,
         "OAST_TIMEOUT_S": "7",
-        "AUTH_COOKIE_SECURE": "true",
     }, follow_redirects=True)
 
     assert response.status_code == 200
@@ -263,7 +262,12 @@ def test_ai_evidence_secrets_can_be_saved_without_being_echoed(client):
     assert os.environ["REPORT_SIGNING_KEY"] == signing
     page = client.get("/config?tab=ai-evidence").text
     assert "AI &amp; Evidence" in page or "AI & Evidence" in page
-    assert page.count("CONFIGURED") >= 3
+    # Each of the three secrets reports that it is set, and none of the three
+    # values reaches the browser. The wording of the badges is the pane's own
+    # business; that they SAY something and leak nothing is the contract.
+    assert "ACTIVE" in page          # the two evidence keys
+    assert "CONFIGURED" in page      # the OAST collaborator
+    assert "OFF" not in page.split("Evidence keys")[1].split("Optional integration")[0]
     assert fingerprint not in page
     assert signing not in page
     assert oast_token not in page

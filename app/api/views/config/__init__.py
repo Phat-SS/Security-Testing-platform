@@ -181,14 +181,20 @@ VI.update({
         "Chạy lại {issue}?\n\nTạo một assessment mới với cùng kế hoạch và các duyệt hiện "
         "có, rồi chạy các test không phá huỷ đã duyệt. Test phá huỷ không bao giờ được "
         "đưa vào lượt chạy lại. Lượt chạy trước được giữ làm mốc so sánh.",
-    # -- dashboard toolbar --
-    "Any status": "Mọi trạng thái", "Newest first": "Mới nhất trước",
+    # -- dashboard search + filter bar --
+    "Newest first": "Mới nhất trước",
     "Oldest first": "Cũ nhất trước", "Issue key": "Issue key",
     "Most findings": "Nhiều phát hiện nhất",
-    "Search issue key": "Tìm theo issue key",
-    "Status": "Trạng thái", "Sort": "Sắp xếp", "Per page": "Mỗi trang",
-    "Apply": "Áp dụng", "Clear": "Xoá bộ lọc",
-    "{n} shown": "{n} đang hiển thị", " · page {n}": " · trang {n}",
+    "Search issue key or assessment id": "Tìm theo issue key hoặc mã assessment",
+    "Search issue key or assessment id — e.g. BH-142":
+        "Tìm theo issue key hoặc mã assessment — ví dụ BH-142",
+    "Status": "Trạng thái", "Sort": "Sắp xếp", "Show": "Hiển thị",
+    "Search": "Tìm kiếm", "Clear": "Xoá bộ lọc",
+    "Clear filters": "Xoá bộ lọc", "Clear search": "Xoá từ khoá",
+    "{n} of {total}": "{n} trên {total}", "{n} assessments": "{n} assessment",
+    "page {n}": "trang {n}",
+    # -- sidebar --
+    "Collapse sidebar": "Thu gọn thanh bên", "Expand sidebar": "Mở rộng thanh bên",
     # -- assessment card --
     "{n} test(s)": "{n} test", "{n} approved": "{n} đã duyệt", "{n} run": "{n} lượt chạy",
     "Re-run": "Chạy lại", "Re-import": "Nhập lại", "Delete": "Xoá",
@@ -399,4 +405,107 @@ VI.update({
     "<code>.env</code>, never in <code>engagement.json</code>.":
         "Bí mật không bao giờ hiển thị ở đây — chỉ báo có tồn tại hay không. Giữ token "
         "trong <code>.env</code>, không bao giờ trong <code>engagement.json</code>.",
+    # -- AI & Evidence pane ---------------------------------------------------
+    # Previously the one pane that rendered in raw English whatever the language.
+    "Written to <code>.env</code> and applied immediately, with no restart. Needs the "
+    "<b>admin</b> role when authentication is on.":
+        "Ghi vào <code>.env</code> và áp dụng ngay, không cần restart. Cần vai trò "
+        "<b>admin</b> khi bật xác thực.",
+    # "Analyzer" and "Save" are already mapped above — same words, same meaning.
+    "Evidence keys": "Khoá bằng chứng", "Optional integration": "Tích hợp tuỳ chọn",
+    "ON": "BẬT", "OFF": "TẮT", "ACTIVE": "ĐANG DÙNG",
+    "CLI NOT FOUND": "KHÔNG TÌM THẤY CLI",
+    "CONFIGURED": "ĐÃ CẤU HÌNH", "NOT SET UP": "CHƯA THIẾT LẬP",
+    "Use Claude": "Dùng Claude", "CLI": "CLI", "model": "model",
+    "Runs through your own Claude Code login — no separate API key, no separate bill.":
+        "Chạy bằng chính đăng nhập Claude Code của bạn — không cần API key riêng, "
+        "không tính phí riêng.",
+    "The CLI is available. Analysis runs on the deterministic path until you turn "
+    "this on.":
+        "CLI đã sẵn sàng. Phân tích vẫn chạy theo hướng tất định cho tới khi bạn bật.",
+    "Claude Code is not installed on this machine, or is not on PATH. Analysis "
+    "runs on the deterministic path until it is.":
+        "Máy này chưa cài Claude Code, hoặc nó không nằm trong PATH. Phân tích chạy theo "
+        "hướng tất định cho tới khi có.",
+    "the CLI default": "model mặc định của CLI",
+    "Model": "Model", "empty — use the CLI's model": "để trống — dùng model của CLI",
+    "Leave blank unless you need a specific one. An alias, or a full versioned id.":
+        "Để trống trừ khi bạn cần một model cụ thể. Có thể là alias hoặc id đầy đủ "
+        "có version.",
+    "Effort": "Mức suy luận", "CLI default": "Mặc định của CLI",
+    "How much reasoning each call is allowed. Higher costs more and takes longer.":
+        "Cho phép mỗi lần gọi suy luận tới đâu. Cao hơn thì tốn hơn và lâu hơn.",
+    "Spend cap per call (USD)": "Trần chi phí mỗi lần gọi (USD)",
+    "no cap": "không giới hạn",
+    "A hard stop, not a target. Blank lets the CLI decide.":
+        "Đây là mức chặn cứng, không phải mục tiêu. Để trống thì CLI tự quyết.",
+    "Compliance option": "Tuỳ chọn tuân thủ",
+    "Refuse to run unless the model above is a full versioned id":
+        "Không chạy nếu model ở trên không phải id đầy đủ có version",
+    "For deployments that must be able to say which exact model produced a report. An "
+    "alias like <code>sonnet</code> moves between releases, so it is rejected here — with "
+    "this on, a blank model field stops the AI path entirely.":
+        "Dành cho triển khai cần nói được chính xác model nào đã tạo ra báo cáo. Alias như "
+        "<code>sonnet</code> thay đổi theo từng bản phát hành nên bị từ chối ở đây — bật "
+        "tuỳ chọn này mà để trống ô model thì hướng AI dừng hẳn.",
+    "Cross-identity correlation": "Đối chiếu chéo danh tính",
+    "HMACs identity values so a BOLA finding can show the attacker saw the victim's own "
+    "data. Without it that comparison is skipped and those verdicts come back "
+    "INCONCLUSIVE.":
+        "Băm HMAC các giá trị định danh để một phát hiện BOLA chứng minh được kẻ tấn công "
+        "đã thấy đúng dữ liệu của nạn nhân. Không có nó thì phép so sánh bị bỏ qua và các "
+        "kết luận đó trả về INCONCLUSIVE.",
+    "Report manifest signing": "Ký manifest báo cáo",
+    "Signs each report manifest, so it can be shown not to have been edited after "
+    "the run. Without it manifests are still written, just unsigned.":
+        "Ký từng manifest báo cáo để chứng minh nó không bị sửa sau khi chạy. Không có nó "
+        "manifest vẫn được ghi, chỉ là không có chữ ký.",
+    "Generate the missing keys": "Tạo các khoá còn thiếu",
+    "Generated in your browser, stored when you save.":
+        "Sinh ngay trên trình duyệt của bạn, chỉ lưu lại khi bạn bấm Lưu.",
+    "Nothing to do here.": "Không còn gì phải làm ở đây.",
+    "Enter keys by hand": "Nhập khoá thủ công",
+    "For restoring a key from a secret manager, or rotating one. Stored values are never "
+    "sent back to the browser: blank keeps the current key, and removing one takes the "
+    "explicit checkbox.":
+        "Dùng khi khôi phục khoá từ secret manager, hoặc khi xoay khoá. Giá trị đã lưu "
+        "không bao giờ được gửi lại về trình duyệt: để trống là giữ nguyên khoá hiện tại, "
+        "và muốn xoá thì phải tick ô xác nhận.",
+    "stored — blank keeps it": "đã lưu — để trống là giữ nguyên", "not set": "chưa đặt",
+    "Clear the stored value": "Xoá giá trị đã lưu",
+    "Signing key id": "Mã khoá ký",
+    "A label recorded in the manifest, so a verifier knows which key to reach for.":
+        "Một nhãn được ghi vào manifest để bên kiểm chứng biết cần dùng khoá nào.",
+    "Out-of-band collaborator": "Collaborator ngoài luồng",
+    "Blind and out-of-band tests can be confirmed.":
+        "Các test blind và ngoài luồng có thể được xác nhận.",
+    "Blind SSRF and other out-of-band tests report INCONCLUSIVE — there is nowhere "
+    "for the target's callback to land.":
+        "Blind SSRF và các test ngoài luồng khác sẽ trả về INCONCLUSIVE — callback từ mục "
+        "tiêu không có chỗ nào để đáp xuống.",
+    "Public callback base URL": "URL gốc nhận callback công khai",
+    "Authenticated polling base URL": "URL gốc để poll có xác thực",
+    "Polling API token": "Token API để poll",
+    "Polling timeout (s)": "Timeout poll (giây)",
+    "Both URLs must be HTTPS and are set together. The token is sent only to the polling "
+    "endpoint — never into the callback URL handed to the target.":
+        "Cả hai URL phải là HTTPS và được đặt cùng lúc. Token chỉ gửi tới endpoint poll — "
+        "không bao giờ nhét vào URL callback đưa cho mục tiêu.",
+    # -- gaps this tab already had -------------------------------------------
+    "Everything here already has a working default — a normal engagement never "
+    "needs to open this tab. Full reference: <code>docs/configuration.md</code>.":
+        "Mọi thứ ở đây đều đã có giá trị mặc định chạy được — một engagement bình thường "
+        "không bao giờ cần mở tab này. Tham khảo đầy đủ: "
+        "<code>docs/configuration.md</code>.",
+    "Tests in flight at once": "Số test chạy song song",
+    "1 runs a plan one test at a time. Higher finishes a long plan faster, at "
+    "proportionally higher request rate against the target — a blast-radius decision, "
+    "so it is not raised for you.":
+        "Để 1 thì kế hoạch chạy tuần tự từng test. Cao hơn thì xong nhanh hơn, đổi lại "
+        "tần suất request lên mục tiêu tăng tương ứng — đây là quyết định về mức độ ảnh "
+        "hưởng, nên hệ thống không tự nâng giúp bạn.",
+    "Refresh token": "Làm mới token",
+    # -- readiness: the relocated session-cookie check ------------------------
+    "Login session cookie": "Cookie phiên đăng nhập",
+    "Mark the cookie Secure": "Đánh dấu cookie là Secure",
 })

@@ -132,7 +132,11 @@ def _sidebar_chrome(user: User | None, path: str = "") -> dict:
         "engagement_url": host or url,
         "readiness_state": readiness,
         "readiness_tag": "" if readiness == "READY" else "!",
-        "user_name": user.name if user else "",
+        # Only a REAL signed-in identity. With auth off every request is the
+        # same synthetic `local-admin`, and printing that in the footer named a
+        # user who does not exist and a role nobody chose — it said nothing
+        # except that the single-user mode has an internal placeholder.
+        "user_name": user.name if (user and state.auth.enabled) else "",
         "auth_enabled": state.auth.enabled,
         "engagements": engagements,
         "current_engagement": registry.current_name,

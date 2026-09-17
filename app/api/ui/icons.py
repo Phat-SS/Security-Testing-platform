@@ -27,6 +27,8 @@ _PATHS = {
     "power": '<path d="M12 4v8"/><path d="M7.5 7a7 7 0 109 0"/>',
     "chevron-updown": '<path d="M8 9l4-4 4 4"/><path d="M16 15l-4 4-4-4"/>',
     "panel": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/>',
+    "search": '<circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8L20 20"/>',
+    "x": '<path d="M6 6l12 12M18 6L6 18"/>',
     "external": '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/>',
 }
 

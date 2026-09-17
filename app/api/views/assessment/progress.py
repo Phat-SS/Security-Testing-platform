@@ -109,9 +109,14 @@ def panel_fragment(aid: str, job) -> str:
     if job.state == "FAILED" and job.error:
         error = f'<p class="muted mono" style="margin:8px 0 0">{e(job.error)}</p>'
 
-    # The poll reads this to know the run has settled. A data attribute on the
-    # host would not survive `innerHTML`, which replaces only the children.
-    finished = "" if running else '<span id="run-finished" hidden></span>'
+    # The poll reads this to know the run has settled, and whether it settled
+    # well enough to hand over to the report. A data attribute on the host would
+    # not survive `innerHTML`, which replaces only the children.
+    if running:
+        finished = ""
+    else:
+        ok = "0" if job.state == "FAILED" else "1"
+        finished = f'<span id="run-finished" data-ok="{ok}" hidden></span>'
 
     return f"""{finished}<div class="card pad {tone}" style="margin-bottom:14px">
 <div class="row" style="justify-content:space-between;align-items:baseline">
@@ -167,13 +172,18 @@ _POLL_JS = """
         if (html === null) return;
         host.innerHTML = html;
         if (host.dataset.done === '1') return;
-        if (document.getElementById('run-finished')) {
+        var end = document.getElementById('run-finished');
+        if (end) {
           host.dataset.done = '1';
           clearInterval(timer);
           // The findings are only assembled once the run ends, so this is the
-          // handover to the finished page rather than a refresh of this one.
-          window.location.href =
-            '/assessment/' + encodeURIComponent(aid) + '?phase=results';
+          // handover to the report rather than a refresh of this panel. A
+          // failed run stays here: its error is on this panel, and the report
+          // would have nothing to show for it.
+          if (end.dataset.ok === '1') {
+            window.location.href =
+              '/assessment/' + encodeURIComponent(aid) + '/report';
+          }
         }
       })
       .catch(function () {})

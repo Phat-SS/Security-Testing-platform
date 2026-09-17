@@ -60,8 +60,13 @@ async def import_issue(issue_key: str = Form(...), mode: str = Form(""),
         # used to surface as a confusing "issue does not exist".
         _, key = parse_issue_ref(issue_key)
         effective_mode = mode or ("auto_plan" if plan == "true" else "analyze")
+        # Stamped on every import path, not just the analyze one. An assessment
+        # created without it is invisible to /findings and /activity, which scope
+        # themselves to the current engagement.
+        engagement = state.engagements.current_name
         if effective_mode == "ticket_poc":
-            aid, _review, poc_found = await state.orch.import_and_run_poc_plan(key)
+            aid, _review, poc_found = await state.orch.import_and_run_poc_plan(
+                key, engagement=engagement)
             if not poc_found:
                 flash = ("No PoC script found in this ticket description — "
                          "use Auto-plan or paste one manually in Design.")
@@ -69,10 +74,10 @@ async def import_issue(issue_key: str = Form(...), mode: str = Form(""),
                     f"/assessment/{aid}?flash={quote(flash, safe='')}", status_code=303
                 )
         elif effective_mode == "auto_plan":
-            aid, _review = await state.orch.import_and_plan(key, depth=depth or "standard")
+            aid, _review = await state.orch.import_and_plan(
+                key, depth=depth or "standard", engagement=engagement)
         else:
-            aid = await state.orch.import_and_analyze(
-                key, engagement=state.engagements.current_name)
+            aid = await state.orch.import_and_analyze(key, engagement=engagement)
     except Exception as exc:
         headline, hint = import_error(issue_key, exc)
         return HTMLResponse(views.error_page("Import failed", headline, hint), status_code=400)
@@ -88,6 +93,11 @@ async def view_assessment(
     phase: str = "",
     flash: str = "",
     ticket_url: str = "",
+    # Set by the redirect that starts a run, and by nothing else. It says "this
+    # request is the handover from pressing Run", which is what lets a finished
+    # run go straight to Results without a page that already finished bouncing
+    # every time someone opens it.
+    job: str = "",
     # The test-plan filter lives in the query string so it survives a redirect,
     # can be linked to (the coverage table links straight into a category) and is
     # the same thing a bulk action resolves "all matching" against.
@@ -104,6 +114,15 @@ async def view_assessment(
     a = state.repo.get_assessment(aid)
     if not a:
         return views.page("Not found", "<p>Assessment not found.</p>")
+    # A short run can be over before this redirect is even served, and then the
+    # Run panel renders finished, starts no poll, and nothing carries the tester
+    # to what the run just produced. A failed run stays put: its error is on the
+    # panel, and the report has nothing to show for it.
+    if job:
+        started = state.repo.get_job(job)
+        if (started is not None and started.assessment_id == aid
+                and started.kind == "execute" and started.state == "SUCCEEDED"):
+            return RedirectResponse(f"/assessment/{aid}/report", status_code=303)
     filters = {"q": q, "cat": cat, "sev": sev, "appr": appr, "dest": dest, "src": src,
                "sort": sort or "id", "per": per}
     plan = state.repo.query_test_cases(aid, page=max(1, page), **filters)
