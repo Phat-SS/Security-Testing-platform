@@ -186,6 +186,10 @@ class ExecutionSignals:
     # record was disclosed, whatever else was or was not in the payload.
     owner_coverage: float = 0.0
     identical_body: bool = False
+    #: Distinctive (identity-like) values in the owner's response. Zero means the
+    #: body carries nothing specific to its owner — a catalogue, a config, a
+    #: public document — so byte-equality does not prove cross-identity leakage.
+    owner_value_count: int = 0
 
     refusal_in_body: bool = False
     validation_in_body: bool = False
@@ -563,6 +567,7 @@ def analyze_evidence(test: TestCase | None, execution: Execution) -> ExecutionSi
     signals.owner_coverage = (
         round(len(shared) / len(owner_values), 3) if owner_values else 0.0
     )
+    signals.owner_value_count = len(owner_values)
 
     if signals.identical_body:
         signals.signals.append(Signal(
@@ -668,9 +673,13 @@ def measure(test: TestCase | None, execution: Execution,
 
     # M1 — the attacker received the owner's bytes.
     if signals.identical_body:
+        owner_specific = signals.owner_value_count > 0
         return MeasuredReading(
             result="FAIL",
-            confidence="HIGH",
+            # Without identity-like values the same bytes may simply be public
+            # data every caller gets, so this stays a lead for a person (MEDIUM
+            # is never promoted) rather than a sealed finding.
+            confidence="HIGH" if owner_specific else "MEDIUM",
             rule="identical_body",
             rationale=(
                 "The attacker's response body is byte-identical to the positive "

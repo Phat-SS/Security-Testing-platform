@@ -26,6 +26,16 @@ from app.vault.personas import Persona, PersonaVault
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+#: Persona headers may only reference variables that are clearly credentials
+#: for the *target* (prefix convention), never the platform's own secrets.
+_ENV_REF_PREFIXES = ("PERSONA_", "TARGET_", "PENTEST_")
+
+
+def env_ref_allowed(name: str) -> bool:
+    extra = tuple(p.strip().upper() for p in os.getenv("PERSONA_ENV_PREFIXES", "").split(",") if p.strip())
+    return name.upper().startswith(_ENV_REF_PREFIXES + extra)
+
+
 def resolve_env_refs(value: str) -> tuple[str, tuple[str, ...]]:
     """Substitute ${VAR} from the process environment.
 
@@ -37,6 +47,12 @@ def resolve_env_refs(value: str) -> tuple[str, tuple[str, ...]]:
 
     def _sub(match: re.Match[str]) -> str:
         name = match.group(1)
+        if not env_ref_allowed(name):
+            # A persona header is sent to the TARGET. Letting it name any
+            # variable would let whoever can save a persona exfiltrate the
+            # platform's own secrets (Jira token, signing key, DB URL).
+            missing.append(name)
+            return match.group(0)
         found = os.environ.get(name)
         if not found:
             missing.append(name)
@@ -120,6 +136,7 @@ def load_engagement(path: str | None = None) -> Engagement:
         allowed_hosts=set(scope_cfg.get("allowed_hosts", [])),
         blocked_hosts=set(scope_cfg.get("blocked_hosts", [])),
         allow_private_ranges=bool(scope_cfg.get("allow_private_ranges", False)),
+        allowed_ports={int(p) for p in scope_cfg.get("allowed_ports", []) if str(p).isdigit()},
     )
     personas = [_persona_from_config(p) for p in data.get("personas", [])]
 
@@ -294,6 +311,7 @@ def save_scope(
     allowed_hosts: list[str],
     blocked_hosts: list[str],
     allow_private_ranges: bool,
+    allowed_ports: list[int] | None = None,
 ) -> None:
     """Replace the scope block. This is the authorization boundary, so it is
     written verbatim from what the human submitted — merging with the previous
@@ -304,6 +322,7 @@ def save_scope(
         "allowed_hosts": _dedupe(allowed_hosts),
         "blocked_hosts": _dedupe(blocked_hosts),
         "allow_private_ranges": bool(allow_private_ranges),
+        "allowed_ports": sorted({int(p) for p in (allowed_ports or []) if 0 < int(p) < 65536}),
     }
     write_config(path, data)
 

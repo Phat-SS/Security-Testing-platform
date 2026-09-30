@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from app.core.redaction import redact_text
 from app.schemas.enums import Confidence, Severity
 from app.schemas.execution import Execution
-from app.schemas.finding import Finding
+from app.schemas.finding import Finding, cvss_estimate
 from app.schemas.testcase import TestCase
 
 
@@ -143,6 +143,7 @@ def build_finding_drafts(
             severity=finding.severity,
             confidence=finding.confidence,
             cwe=references,
+            cvss_vector=finding.cvss_vector or cvss_estimate(finding.severity),
             recommendation=finding.recommendation,
             retest_criteria=[
                 "Repeat every affected test with the same authorized personas and fixture data.",

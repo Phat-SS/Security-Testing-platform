@@ -51,7 +51,7 @@ from urllib.parse import urlsplit
 from app.core.redaction import redact_text
 from app.schemas.enums import TestStatus
 from app.schemas.execution import Execution
-from app.schemas.finding import Finding
+from app.schemas.finding import Finding, cvss_score
 from app.schemas.testcase import TestCase
 
 # Colour cues that cannot fail to render. A {color} macro depends on markup
@@ -142,20 +142,24 @@ def _findings_table(findings: list[Finding], limit: int) -> list[str]:
     that cannot show either.
     """
     lines = [
-        "| Finding | Severity | OWASP | Endpoint | Confirmed by |",
-        "|---|---|---|---|---|",
+        "| Finding | Severity | CVSS* | OWASP | Endpoint | Confirmed by |",
+        "|---|---|---|---|---|---|",
     ]
     for finding in findings[:limit]:
         emoji = SEVERITY_EMOJI.get(finding.severity.value, "")
+        score = cvss_score(finding.severity) if finding.cvss_vector else ""
         lines.append(
             f"| **{_cell(finding.finding_id, 16)}** — {_cell(finding.title, 44)} "
             f"| {emoji} **{finding.severity.value}** "
+            f"| {score} "
             f"| {_cell(finding.owasp_category.value, 12)} "
             f"| {_cell(finding.endpoint, 52)} "
             f"| {_cell(', '.join(finding.affected_tests), 30)} |"
         )
     if len(findings) > limit:
-        lines.append(f"| … | | | | {len(findings) - limit} more not shown |")
+        lines.append(f"| … | | | | | {len(findings) - limit} more not shown |")
+    lines.append("")
+    lines.append("_\\*CVSS is a base-severity estimate, not a full manual assessment._")
     return lines
 
 

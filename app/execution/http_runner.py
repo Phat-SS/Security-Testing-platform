@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse
@@ -64,6 +67,8 @@ class ApprovalRequired(Exception):
 # Mirrors the same floor `adjudicator._MIN_CORRELATION_BODY` applies to the
 # sibling byte-identical-body correlation check.
 _MIN_MARKER_LEN = 6
+
+logger = logging.getLogger(__name__)
 
 
 class HttpRunner:
@@ -131,7 +136,25 @@ class HttpRunner:
                 f"Test {test.test_id} is {test.approval_status.value}; execution "
                 "is prohibited until it is APPROVED."
             )
+        # Created here, not inside `_run_inner`, and passed down by reference:
+        # teardown needs whatever setup captured (a created object's id), and
+        # this is the one copy of that both sides read/write, whichever of
+        # `_run_inner`'s several return points was actually taken.
+        context: dict = {}
+        try:
+            return self._run_inner(test, execution_id, prev_hash, context)
+        finally:
+            # Best-effort, always — whatever `setup` created (a disposable
+            # object, a coupon claimed to get a valid id) must not outlive the
+            # test regardless of how it ended. Failures are swallowed inside
+            # _run_teardown and never raised: cleanup is a courtesy to the
+            # target, not part of what is under test.
+            if test.teardown:
+                self._run_teardown(test, context)
 
+    def _run_inner(
+        self, test: TestCase, execution_id: str, prev_hash: str | None, context: dict,
+    ) -> Execution:
         log: list[str] = []
         oast_token = ""
         oast_callback = ""
@@ -144,7 +167,6 @@ class HttpRunner:
                 runtime.attack_mutation.detail["value"] = oast_callback
                 test = runtime
                 log.append("OAST: issued a unique callback token for this execution")
-        context: dict = {}
         supporting: list[SupportingExchange] = []
 
         attacker = self._vault.get(test.auth_context.persona)
@@ -567,6 +589,36 @@ class HttpRunner:
             log.append(f"{tag}: captured {name} "
                        f"({'resolved' if value is not None else 'no match'}) as {step.as_persona}")
 
+    def _run_teardown(self, test: TestCase, context: dict) -> None:
+        """Best-effort cleanup of whatever `setup` created.
+
+        Every failure mode here — a scope refusal, a persona that no longer
+        exists, a request that never completes, an unresolved template — is
+        swallowed. Teardown is the platform tidying up after itself, not a
+        second test; it must never turn a sealed PASS/FAIL into anything else,
+        and never raise into `run()`'s finally block.
+        """
+        for i, step in enumerate(test.teardown):
+            tag = f"{test.test_id}.teardown[{i}]"
+            try:
+                persona = self._vault.get(step.as_persona)
+                spec: RequestSpec = step.request
+                path = resolve(spec.path, context)
+                url = self._absolute_url(path)
+                result = self._scope.validate_url(url)
+                if not result.allowed:
+                    logger.info("%s skipped: %s", tag, result.reason)
+                    continue
+                headers = {**persona.auth_headers,
+                          **{k: resolve(str(v), context) for k, v in spec.headers.items()}}
+                query = _resolve_query(spec.query, context)
+                body = resolve_deep(spec.body, context)
+                _, resp, _raw = self._send(spec.method, url, headers, query, body, result.resolved_ip)
+                logger.info("%s: %s", tag,
+                           f"HTTP {resp.status_code}" if resp is not None else "did not complete")
+            except Exception:  # noqa: BLE001 — cleanup must never fail the test
+                logger.warning("%s raised during cleanup", tag, exc_info=True)
+
     def _send_attack(
         self,
         prepared: PreparedRequest,
@@ -591,7 +643,12 @@ class HttpRunner:
             )
             return req, resp, raw, None
 
-        count = prepared.repeat
+        # `max_requests_per_test` is the operator's ceiling on fan-out. It was
+        # displayed and stored but never enforced; the mutation layer's own
+        # hard cap (50) is a safety net, not the configured limit.
+        count = max(1, min(prepared.repeat, self._settings.limits.max_requests_per_test))
+        if count < prepared.repeat:
+            log.append(f"multi-request probe capped at {count} (RUNNER_MAX_REQUESTS_PER_TEST)")
         results: list[tuple[CapturedRequest, CapturedResponse | None, str | None]] = []
 
         def _one(_i: int):
@@ -605,8 +662,23 @@ class HttpRunner:
         # probe needed all along: the old version serialised the whole process
         # around the very requests it was trying to overlap.
         if prepared.concurrent:
-            with ThreadPoolExecutor(max_workers=min(count, 16)) as pool:
-                results = list(pool.map(_one, range(count)))
+            workers = min(count, 16)
+            # A ThreadPoolExecutor.map schedules workers as they're picked up,
+            # not all at once — the first request can be well into its own
+            # connect/TLS handshake before the last one is even dispatched,
+            # which widens exactly the check-to-commit window this probe
+            # exists to hit narrowly. A barrier makes every worker in this wave
+            # block immediately before its `_send`, so they release together
+            # rather than trickling in — still not a single wire packet, but a
+            # real tightening of the window, not a cosmetic one.
+            release = threading.Barrier(workers)
+
+            def _synchronized(i: int):
+                release.wait()
+                return _one(i)
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(_synchronized, range(count)))
         else:
             results = [_one(i) for i in range(count)]
 
@@ -633,7 +705,58 @@ class HttpRunner:
             f"{succeeded} succeeded; throttled={throttled}; spread {status_counts}"
         )
         first_req, first_resp, first_raw = results[0]
-        return first_req, first_resp, first_raw, stats
+        # The first exchange is the stored evidence, but a leak that only shows
+        # up on attempt 2..N (a cache warming, a race that finally lands) must
+        # not be missed: leak detection scans every DISTINCT body, bounded so a
+        # 50-request burst cannot balloon the text searched.
+        scan = [first_raw or ""]
+        seen = {first_raw}
+        for _, _resp, raw in results[1:]:
+            if raw and raw not in seen and len(scan) < 10:
+                seen.add(raw)
+                scan.append(raw)
+        return first_req, first_resp, "\n".join(scan), stats
+
+    # Errors worth one more try: the connection or the read itself failed,
+    # nothing about the request. httpx.HTTPStatusError (a status code) is
+    # never in this set, and neither is anything else — a request that reached
+    # the server and got an answer is not retried, whatever the answer was.
+    _RETRYABLE_EXCEPTIONS = (
+        httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+        httpx.PoolTimeout, httpx.RemoteProtocolError,
+    )
+    # Retrying is safe only for a method with no side effect to double: a
+    # dropped POST/PUT/PATCH/DELETE response must never be resent blind, since
+    # the runner cannot tell "the server never saw it" from "it landed and the
+    # ack was lost" — retrying the latter would be an unrequested second write
+    # against someone else's system, is_destructive or not.
+    _RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+    def _send_with_retry(self, build_request, method: str) -> httpx.Response | None:
+        """`build_request` is called fresh for each attempt.
+
+        A retried attempt must not reuse the first attempt's `httpx.Request`:
+        httpx ties response/elapsed-timing state to the specific object a
+        request stream was read against, and replaying the same one produces a
+        Response whose `.elapsed` raises rather than a second honest exchange.
+        Rebuilding is cheap (no network I/O) and side-effect free.
+        """
+        attempts = max(1, self._settings.limits.retry_max_attempts)
+        if method.upper() not in self._RETRYABLE_METHODS:
+            attempts = 1
+        backoff_s = max(0, self._settings.limits.retry_backoff_ms) / 1000
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._client.send(build_request())
+            except self._RETRYABLE_EXCEPTIONS:
+                if attempt == attempts:
+                    return None
+                time.sleep(backoff_s * attempt)
+            except httpx.HTTPError:
+                # Any other transport failure (e.g. an SSL error) is not one of
+                # the narrow set above — no retry, same as always.
+                return None
+        return None
 
     def _send(
         self,
@@ -673,10 +796,18 @@ class HttpRunner:
         # separately (e.g. ssrf_url, oversized_payload write into `query`,
         # not into `url`/`path`), not just whatever happened to already be
         # embedded in the `url` string.
-        request = self._client.build_request(
-            method, url, params=query, headers=headers,
-            content=req_body_text.encode("utf-8") if req_body_text is not None else None,
-        )
+        content = req_body_text.encode("utf-8") if req_body_text is not None else None
+
+        def _build() -> httpx.Request:
+            req = self._client.build_request(method, url, params=query, headers=headers, content=content)
+            # The pin travels with this one request (see execution/pinning.py),
+            # so the connection goes to the address the validator approved
+            # without any process-global state and without serialising the
+            # whole runner.
+            req.extensions = {**req.extensions, **pin(pinned_ip)}
+            return req
+
+        request = _build()  # only for the URL/headers actually sent, as evidence
         captured_req = CapturedRequest(
             method=method,
             url=redact_url(str(request.url)),
@@ -686,13 +817,13 @@ class HttpRunner:
             timestamp=timestamp,
         )
 
-        # The pin travels with this one request (see execution/pinning.py), so
-        # the connection goes to the address the validator approved without any
-        # process-global state and without serialising the whole runner.
-        request.extensions = {**request.extensions, **pin(pinned_ip)}
-        try:
-            response = self._client.send(request)
-        except httpx.HTTPError:
+        response = self._send_with_retry(_build, method)
+        # No cookie state carries between exchanges: identity in this platform
+        # is the explicit persona auth header, never a cookie jar, and a
+        # Set-Cookie from one persona's response must never ride along on the
+        # next persona's (or the next test's) request against the same client.
+        self._client.cookies.clear()
+        if response is None:
             return captured_req, None, None
 
         raw = response.content[: self._settings.limits.max_response_bytes]

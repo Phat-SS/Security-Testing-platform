@@ -454,6 +454,10 @@ def update_dotenv_values(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
     temporary.write_text(newline.join(out) + newline, encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)  # holds tokens; no-op on Windows ACLs
+    except OSError:
+        pass
     os.replace(temporary, destination)
 
     if apply_to_environ:

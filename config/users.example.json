@@ -1,10 +1,16 @@
 {
-  "_comment": "Multi-user auth. Copy to users.json and set AUTH_ENABLED=true. Only SHA-256 hashes of API keys are stored — generate entries with: python -m app.core.auth add <name> <role>. Roles: viewer < tester < admin. When AUTH_ENABLED is false the app runs open in single-user (local-admin) mode.",
+  "_comment": "Multi-user auth. Copy to users.json and set AUTH_ENABLED=true. Only SHA-256 hashes of API keys are stored — generate entries with: python -m app.core.auth add <name> <role>. Roles: viewer < tester < admin. When AUTH_ENABLED is false the app runs open in single-user (local-admin) mode. 'engagements' is optional and off by default: omit it (or leave it empty) and that user sees every engagement on this box, exactly like before this field existed. List the engagement names (from ENGAGEMENTS_DIR, or the legacy single-engagement name) a user should be scoped to, and everything else — reading another engagement's assessments, evidence, exports, or switching to it in the sidebar — is refused with a 403.",
   "users": [
     {
       "name": "example-tester",
       "role": "tester",
       "api_key_sha256": "REPLACE-WITH-OUTPUT-OF-app.core.auth-add"
+    },
+    {
+      "name": "example-client-scoped-viewer",
+      "role": "viewer",
+      "api_key_sha256": "REPLACE-WITH-OUTPUT-OF-app.core.auth-add",
+      "engagements": ["acme"]
     }
   ]
 }

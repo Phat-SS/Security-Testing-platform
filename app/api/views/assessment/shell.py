@@ -166,6 +166,7 @@ def body(
     plan_review=None,
     run_assessment=None,
     triage: dict | None = None,
+    finding_triage: dict | None = None,
     flash: str = "",
     ticket_url: str = "",
     uncovered_poc_endpoints: list[str] | None = None,
@@ -237,7 +238,8 @@ def body(
                                  active_environment, planner_enabled, True, job=run_job)
     else:
         panes = _results_section(aid, assessment.issue_key, st, findings, verdicts, True,
-                                 run=run_assessment, triage=triage or {})
+                                 run=run_assessment, triage=triage or {},
+                                 finding_triage=finding_triage or {})
 
     counts = {
         "scope": str(st.n_endpoints or ""),

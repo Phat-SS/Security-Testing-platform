@@ -671,7 +671,9 @@ class Orchestrator:
         # test — it proposes, the approval gate still disposes.
         ai_tests = []
         if use_planner and self._planner is not None:
-            plan = self._planner.plan(analysis, existing=poc_tests + generated)
+            prior_context = self._prior_run_digest(assessment.issue_key, assessment_id)
+            plan = self._planner.plan(analysis, existing=poc_tests + generated,
+                                      prior_context=prior_context)
             ai_tests = plan.tests
             self._repo.audit("ai_plan", assessment_id, detail=plan.summary())
             for rejection in plan.rejected:
@@ -1800,6 +1802,43 @@ class Orchestrator:
         )
         return html
 
+    def _prior_run_digest(self, issue_key: str, assessment_id: str, limit: int = 15) -> str:
+        """What a person already decided about this SAME ticket's last run —
+        the attack planner's only memory across runs.
+
+        Deliberately narrow: which findings a human explicitly ruled out as
+        false positives (`get_finding_triage`, so the planner does not spend a
+        proposal re-discovering exactly what was already dismissed, and why),
+        and which are still open (so it knows the ground already covered).
+        Never includes request/response evidence or raw ticket text — those
+        are what `analysis` and the fenced ticket context already carry; this
+        is just "what did the last review conclude".
+        """
+        prev = self._repo.previous_assessment_for_issue(issue_key, assessment_id)
+        if prev is None:
+            return ""
+        findings = self._repo.get_findings(prev.id)
+        if not findings:
+            return ""
+        triage = self._repo.get_finding_triage(prev.id)
+        lines: list[str] = []
+        for f in findings[:limit]:
+            decision = triage.get(f.finding_id)
+            if decision and decision.get("status") == "false_positive":
+                note = decision.get("note", "")
+                lines.append(
+                    f"- RULED OUT (false positive): {f.owasp_category.value} {f.endpoint} "
+                    f"— {f.title}" + (f" ({note})" if note else "")
+                )
+            else:
+                lines.append(
+                    f"- previously confirmed, still open as of that run: "
+                    f"{f.owasp_category.value} {f.endpoint} — {f.title}"
+                )
+        if len(findings) > limit:
+            lines.append(f"- (+{len(findings) - limit} more finding(s) from that run, not listed)")
+        return "\n".join(lines)
+
     # regression: diff this assessment's findings against the previous run -----
 
     def regression_diff(self, assessment_id: str):
@@ -1851,6 +1890,15 @@ class Orchestrator:
                      self._repo.get_findings(assessment_id), a.coverage_json,
                      plan_stale=bool(analysis and analysis.plan_is_stale()),
                      uncovered_endpoints=_uncovered(analysis, tests) if analysis else [])
+
+    def export_markdown(self, assessment_id: str) -> str:
+        from app.reporting.exports import export_markdown as _md
+
+        a = self.require_assessment(assessment_id)
+        return _md(a.issue_key, a.target_base_url or "(not executed)",
+                   self._repo.get_test_cases(assessment_id),
+                   self._repo.get_executions(assessment_id),
+                   self._repo.get_findings(assessment_id), a.coverage_json)
 
     def export_pdf(self, assessment_id: str) -> bytes:
         from app.owasp.coverage import uncovered_poc_endpoints as _uncovered

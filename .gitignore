@@ -6,6 +6,8 @@ __pycache__/
 *.db.bak*
 reports/*.html
 evidence/*
+.coverage
+coverage.xml
 # real engagement config carries target + test-account tokens — never commit it
 config/engagement.json
 # user API-key hashes and the live egress allowlist are per-deployment secrets

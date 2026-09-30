@@ -363,3 +363,100 @@ def test_escalate_persona_persona_headers_are_additive_to_an_explicit_list():
 
     assert "entity-context" not in prepared.headers
     assert "X-Role" not in prepared.headers
+
+
+# -- Phase 2: depth additions --------------------------------------------------
+
+
+def test_swap_id_in_body_targets_the_victim_object():
+    prepared = _apply("swap_id_in_body", {"field": "customerId"},
+                      base=RequestSpec(method="POST", path="/orders", body={"customerId": "own"}))
+    assert prepared.body["customerId"] == "2002"
+
+
+def test_swap_id_in_body_supports_a_nested_path():
+    prepared = _apply("swap_id_in_body", {"field": "owner.id"},
+                      base=RequestSpec(method="POST", path="/orders", body={}))
+    assert prepared.body["owner"]["id"] == "2002"
+
+
+@pytest.mark.parametrize("variant,expected", [
+    ("zero", "0"), ("negative", "-1"), ("me", "me"), ("wildcard", "*"), ("null", "null"),
+])
+def test_mutate_id_format_fixed_variants(variant, expected):
+    prepared = _apply("mutate_id_format", {"id_field": "customer_id", "variant": variant})
+    assert expected in prepared.path or prepared.note.count(expected)
+
+
+def test_mutate_id_format_padded_uses_the_victims_real_id():
+    prepared = _apply("mutate_id_format", {"id_field": "customer_id", "variant": "padded"})
+    assert "002002" in prepared.note or "00" in prepared.note
+
+
+def test_mutate_id_format_rejects_unknown_variant():
+    with pytest.raises(MutationError):
+        _apply("mutate_id_format", {"id_field": "customer_id", "variant": "bogus"})
+
+
+def test_jwt_header_injection_adds_jku_keeps_signature():
+    prepared = _apply("jwt_header_injection", {"jku_url": "https://collab.example/jwks.json"})
+    token = prepared.headers["Authorization"].removeprefix("Bearer ")
+    header, _, sig = jwt_tools.split(token)
+    assert header["jku"] == "https://collab.example/jwks.json"
+    assert sig == "originalsignature"
+    assert "jku" in prepared.note
+
+
+def test_jwt_header_injection_requires_something_to_inject():
+    with pytest.raises(MutationError):
+        _apply("jwt_header_injection", {})
+
+
+def test_method_switch_changes_the_verb():
+    prepared = _apply("method_switch", {"method": "put"}, base=RequestSpec(method="GET", path="/x"))
+    assert prepared.method == "PUT"
+
+
+def test_method_switch_rejects_unsupported_verb():
+    with pytest.raises(MutationError):
+        _apply("method_switch", {"method": "CONNECT"})
+
+
+@pytest.mark.parametrize("variant", ["uppercase", "double_slash", "dot_segment", "trailing_slash", "semicolon"])
+def test_path_normalization_bypass_preserves_placeholders(variant):
+    prepared = _apply("path_normalization_bypass", {"variant": variant, "path": "/admin/customers/{customer_id}"})
+    assert "{customer_id}" in prepared.path
+
+
+def test_path_normalization_bypass_rejects_absolute_url():
+    with pytest.raises(MutationError):
+        _apply("path_normalization_bypass", {"path": "https://evil.example/admin"})
+
+
+# -- Phase (injection-adjacent, detect-only): type confusion -------------------
+
+
+@pytest.mark.parametrize("variant,expect_type", [
+    ("huge_number", int), ("negative_number", int), ("null", type(None)),
+    ("empty_string", str), ("array_where_scalar", list), ("long_unicode", str),
+])
+def test_type_confusion_probe_query_variants(variant, expect_type):
+    prepared = _apply("type_confusion_probe", {"field": "q", "variant": variant, "location": "query"})
+    assert "q" in prepared.query
+
+
+def test_type_confusion_probe_body_location():
+    prepared = _apply("type_confusion_probe",
+                      {"field": "count", "variant": "huge_number", "location": "body"},
+                      base=RequestSpec(method="POST", path="/x", body={"count": 1}))
+    assert prepared.body["count"] == 10 ** 30
+
+
+def test_type_confusion_probe_rejects_unknown_variant():
+    with pytest.raises(MutationError):
+        _apply("type_confusion_probe", {"field": "q", "variant": "bogus"})
+
+
+def test_type_confusion_probe_requires_a_field():
+    with pytest.raises(MutationError):
+        _apply("type_confusion_probe", {"variant": "huge_number"})

@@ -185,3 +185,38 @@ def test_leak_signal_unaffected_when_no_baseline_was_configured():
         baseline_ok=None,
     )
     assert v.result == TestStatus.FAIL
+
+
+# -- Phase 1: fewer false positives / less over-confident PASS ---------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("status", [404, 301, 302, 405, 429])
+def test_auth_bypass_tier_ignores_statuses_that_do_not_show_the_request_was_processed(status):
+    # A 404 (hidden route), a redirect to a login page, a 405 or a 429 say
+    # nothing about whether the credential was checked: undecided, not a FAIL.
+    v = evaluate(_auth_bypass_test(), _resp(status), leaked_markers=[],
+                 baseline_ok=True, baseline_summary="agent_B succeeded")
+    assert v.result == TestStatus.INCONCLUSIVE
+
+
+@pytest.mark.parametrize("status", [200, 204, 400, 422])
+def test_auth_bypass_tier_still_fires_when_the_request_was_processed(status):
+    v = evaluate(_auth_bypass_test(), _resp(status), leaked_markers=[],
+                 baseline_ok=True, baseline_summary="agent_B succeeded")
+    assert v.result == TestStatus.FAIL
+
+
+def test_rejection_without_positive_control_is_not_high_confidence():
+    v = evaluate(_test([403, 404]), _resp(404), leaked_markers=[], baseline_ok=None)
+    assert v.result == TestStatus.PASS
+    assert v.confidence.value == "MEDIUM"
+    assert "unverified" in v.actual_summary
+
+
+def test_rejection_with_positive_control_stays_high_confidence():
+    v = evaluate(_test([403, 404]), _resp(404), leaked_markers=[], baseline_ok=True,
+                 baseline_summary="owner got 200")
+    assert v.result == TestStatus.PASS
+    assert v.confidence.value == "HIGH"

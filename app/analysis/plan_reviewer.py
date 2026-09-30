@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.analysis.prompt_fencing import FENCE_INSTRUCTION, fence
 from app.analysis.staged import LLMClient, structured_completion
 from app.execution.mutations import MUTATION_KINDS
 from app.schemas.agent import PlanReview, PlanReviewGap, RequirementDigestItem, RequirementItem
@@ -433,7 +434,8 @@ class PlanReviewer:
         endpoints = "\n".join(
             f"- {e.method} {e.path} (auth_required={e.auth_required}, "
             f"object_ids={e.object_id_params}, writes_properties={e.writes_properties}, "
-            f"url_fields={e.url_fields})"
+            f"url_fields={e.url_fields}, query_params={e.query_params}, "
+            f"body_fields={e.body_fields})"
             for e in analysis.endpoints
         ) or "(none extracted)"
         reqs = "\n".join(
@@ -453,14 +455,19 @@ class PlanReviewer:
         omitted = (f"\n(+{len(tests) - 120} further test(s) not listed)" if len(tests) > 120 else "")
         structural = "\n".join(f"- [{g.severity}] {g.label()}" for g in base.gaps) or "(none)"
 
-        return (
-            f"Ticket: {analysis.issue_key}\n"
+        ticket_derived = (
             f"Business summary: {analysis.business_summary}\n"
             f"Business impact: {analysis.business_impact}\n"
             f"Actors: {', '.join(analysis.actors) or '(none)'}\n"
             f"Sensitive operation: {analysis.sensitive_operation}\n\n"
-            f"Requirements extracted from the ticket:\n{reqs}\n\n"
-            f"Endpoints (the only ones you may reference):\n{endpoints}\n\n"
+            f"Requirements extracted from the ticket:\n{reqs}"
+        )
+
+        return (
+            f"Ticket: {analysis.issue_key}\n\n"
+            f"{FENCE_INSTRUCTION}\n\n"
+            + fence("TICKET_CONTEXT", ticket_derived, max_chars=8_000) + "\n\n"
+            + f"Endpoints (the only ones you may reference):\n{endpoints}\n\n"
             f"OWASP categories the rule engine marked applicable: "
             f"{', '.join(c.value for c in analysis.applicable_categories()) or '(none)'}\n\n"
             f"The plan under review ({len(tests)} test(s)):\n{plan}{omitted}\n\n"

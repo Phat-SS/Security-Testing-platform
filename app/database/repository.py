@@ -21,6 +21,7 @@ from app.database.models import (
     AuditLog,
     ExecutionRow,
     FindingRow,
+    FindingTriageRow,
     JobRow,
     RunSnapshotRow,
     TestCaseRow,
@@ -32,7 +33,7 @@ from app.schemas.execution import Execution
 from app.schemas.finding import Finding
 from app.schemas.job import Job
 from app.schemas.manifest import ReportManifest
-from app.schemas.testcase import DESTRUCTIVE_METHODS, TestCase
+from app.schemas.testcase import DESTRUCTIVE_METHODS, TestCase, is_destructive_mutation
 
 
 # Approval states that represent a decision a person made about a specific test.
@@ -309,8 +310,10 @@ class Repository:
             # is_destructive=False and let it run under the default
             # "non-destructive only" execution path, skipping the
             # destructive-action confirmation gate entirely.
+            mutation = data.get("attack_mutation") or {}
             data["is_destructive"] = bool(data.get("is_destructive")) or (
                 str(request_json.get("method", "")).upper() in DESTRUCTIVE_METHODS
+                or is_destructive_mutation(str(mutation.get("kind", "")), mutation.get("detail"))
             )
             row.approval_status = "PENDING"
             row.data_json = data
@@ -874,6 +877,64 @@ class Repository:
                 (row.assessment_id, a.issue_key, Finding.model_validate(row.data_json))
                 for row, a in q.limit(limit).all()
             ]
+
+    def set_finding_triage(
+        self, assessment_id: str, finding_id: str, dedup_key: str, status: str,
+        note: str = "", actor: str = "system",
+    ) -> None:
+        """Record a reviewer's own false-positive/reopen decision on a finding.
+
+        Upsert on (assessment_id, finding_id): one current decision per
+        finding, not a growing pile a reader has to fold themselves — the
+        audit log (`audit()`) is where the history of who-said-what-when
+        already lives.
+        """
+        with self._sf() as s:
+            row = (
+                s.query(FindingTriageRow)
+                .filter_by(assessment_id=assessment_id, finding_id=finding_id)
+                .one_or_none()
+            )
+            if row is None:
+                row = FindingTriageRow(assessment_id=assessment_id, finding_id=finding_id)
+                s.add(row)
+            row.dedup_key = dedup_key
+            row.status = status
+            row.note = note
+            row.actor = actor
+            s.commit()
+        self.audit("finding_triage", assessment_id, actor=actor,
+                   detail=f"{finding_id} -> {status}" + (f" ({note})" if note else ""))
+
+    def get_finding_triage(self, assessment_id: str) -> dict[str, FindingTriageRow]:
+        """`{finding_id: row}` for every finding on this assessment that has
+        ever been triaged — callers decide what "false_positive" means for
+        display (hide by default, badge, etc.), this only reports the record."""
+        with self._sf() as s:
+            rows = s.query(FindingTriageRow).filter_by(assessment_id=assessment_id).all()
+            return {
+                r.finding_id: {
+                    "status": r.status, "note": r.note, "actor": r.actor,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else "",
+                }
+                for r in rows
+            }
+
+    def get_finding_triage_across(self, engagement: str = "") -> dict[tuple[str, str], dict]:
+        """`{(assessment_id, finding_id): {...}}` across every assessment in the
+        engagement, for the cross-assessment Findings page."""
+        with self._sf() as s:
+            q = s.query(FindingTriageRow, Assessment).join(
+                Assessment, Assessment.id == FindingTriageRow.assessment_id
+            )
+            if engagement:
+                q = q.filter(_belongs_to(engagement))
+            return {
+                (r.assessment_id, r.finding_id): {
+                    "status": r.status, "note": r.note, "actor": r.actor,
+                }
+                for r, _a in q.all()
+            }
 
     def recent_activity(self, engagement: str = "", limit: int = 200) -> list[tuple]:
         """The audit log, across assessments. `(entry, issue_key)`.

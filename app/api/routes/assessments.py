@@ -147,6 +147,7 @@ async def view_assessment(
         plan_review=state.orch.plan_review(aid),
         run_assessment=state.orch.run_assessment(aid),
         triage=triage_counts,
+        finding_triage=state.repo.get_finding_triage(aid),
         uncovered_poc_endpoints=state.orch.uncovered_poc_endpoints(aid),
         environments=state.engagement.environments,
         active_environment=state.engagement.active_environment,
@@ -236,6 +237,11 @@ async def save_endpoint(aid: str, method: str = Form("GET"), path: str = Form(""
     return _endpoints_redirect(aid, f"{verb.capitalize()} {endpoint.signature}")
 
 
+#: A real OpenAPI document is well under this; the cap exists so one upload (or
+#: a YAML alias bomb) cannot exhaust memory before the parser ever sees it.
+_MAX_SPEC_BYTES = 5 * 1024 * 1024
+
+
 @router.post("/assessment/{aid}/openapi")
 async def import_openapi(aid: str, spec: str = Form(""), spec_file: UploadFile | None = File(None),
                          user: User = Depends(require("tester"))):
@@ -246,8 +252,14 @@ async def import_openapi(aid: str, spec: str = Form(""), spec_file: UploadFile |
     did not authorize. `servers:` is read for information only.
     """
     text = spec or ""
+    if len(text.encode("utf-8", "ignore")) > _MAX_SPEC_BYTES:
+        return _endpoints_redirect(
+            aid, f"Not imported: the spec is larger than {_MAX_SPEC_BYTES // (1024 * 1024)} MiB")
     if spec_file is not None and spec_file.filename:
-        raw = await spec_file.read()
+        raw = await spec_file.read(_MAX_SPEC_BYTES + 1)
+        if len(raw) > _MAX_SPEC_BYTES:
+            return _endpoints_redirect(
+                aid, f"Not imported: the spec is larger than {_MAX_SPEC_BYTES // (1024 * 1024)} MiB")
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:

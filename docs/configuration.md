@@ -70,6 +70,8 @@ Two settings look like they could be env vars and deliberately are not:
 | `RUNNER_TIMEOUT_S` | `15` | Per-request timeout. Raise for a slow staging host. |
 | `RUNNER_MAX_RESPONSE_BYTES` | `2000000` | Body larger than this is truncated before storage. |
 | `RUNNER_MAX_REQUESTS_PER_TEST` | `25` | Caps one test's fan-out, race windows included. |
+| `RUNNER_RETRY_MAX_ATTEMPTS` | `2` | Attempts for a GET/HEAD/OPTIONS request that hit a transient connect/read error (`1` = no retry). A POST/PUT/PATCH/DELETE is never retried, since the runner cannot tell "never reached the server" from "reached it and the reply was lost" — retrying the latter would be an unrequested second write. |
+| `RUNNER_RETRY_BACKOFF_MS` | `200` | Delay before a retry, multiplied by the attempt number. |
 
 The runner never follows redirects — a 302 to an internal host is the same SSRF
 wearing a hat, and chasing it would re-resolve DNS outside the scope gate. There
@@ -106,6 +108,13 @@ is no setting for it.
 | `AUTH_USERS_CONFIG` | `config/users.json` | Where those SHA-256 key hashes live. |
 | `AUTH_SESSION_TTL_S` | `43200` | Browser session lifetime (minimum 300). The API key itself is never stored in the cookie. |
 | `AUTH_COOKIE_SECURE` | off | Required when served over HTTPS; local HTTP cannot send a `Secure` cookie. A `PLATFORM_BASE_URL` starting with `https://` sets the flag on its own. With auth on, **Readiness** checks this and offers a one-click fix. |
+
+| `UI_ALLOWED_HOSTS` | *(loopback names only)* | Comma-separated `Host` names the UI answers to, beyond `localhost`/`127.0.0.1`/`::1`. Any other `Host` gets a 400, which is what stops a DNS-rebinding page from driving an unauthenticated local UI. `*` disables the check (only behind a proxy that already validates `Host`). |
+| `PERSONA_ENV_PREFIXES` | *(empty)* | Extra prefixes a persona header's `${VAR}` may reference. Built in: `PERSONA_`, `TARGET_`, `PENTEST_`. Anything else (e.g. `JIRA_MCP_TOKEN`) is refused, because persona headers are sent to the target. |
+
+Scope edits (`/config/scope`) need the **admin** role and are written to the audit log. Ports other than 80/443 must be listed under `scope.allowed_ports` unless the engagement is in lab mode (`allow_private_ranges`).
+
+**Per-user engagement scoping.** A `users.json` entry may add `"engagements": ["acme"]`. Omit it (the default for every existing entry) and that user is unrestricted — sees every engagement on the box, exactly as before this existed. List one or more engagement names and everything under `/assessment/{aid}/...` for a *different* engagement's assessment is refused with a 403 (not a redirect, not a filtered list — the same request another engagement's data would otherwise answer), the sidebar's engagement switcher only offers the ones listed, and `?engagement=<other>` is refused the same way. An assessment created before engagements existed (no stamp at all) stays visible to everyone, the same rule `findings`/`activity` already use for it. This is the one enforcement point (`app/api/middleware.py`'s `engagement_middleware`), so a new export format or a new page under `/assessment/{aid}` is covered without adding its own check.
 
 ### Arbitrary-Python PoC runner
 

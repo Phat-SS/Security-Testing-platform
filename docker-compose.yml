@@ -21,11 +21,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     ports:
-      - "8100:8100"
+      - "127.0.0.1:8100:8100"
     env_file:
       - .env
     volumes:
-      - ./config:/app/config:ro
+      - ./config:/app/config   # read-write: the UI saves scope/personas/environments here
       - sectest-data:/app/data
       - ./reports:/app/reports
     # Read-only app dir on purpose: a security-testing tool whose own code

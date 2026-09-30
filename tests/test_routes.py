@@ -74,12 +74,14 @@ EXPECTED = [
     ("GET", "/assessment/{aid}/report"),
     ("GET", "/assessment/{aid}/export.html"),
     ("GET", "/assessment/{aid}/export.json"),
+    ("GET", "/assessment/{aid}/export.md"),
     ("GET", "/assessment/{aid}/export.xlsx"),
     ("GET", "/assessment/{aid}/export.pdf"),
     ("GET", "/assessment/{aid}/export.postman"),
     ("GET", "/assessment/{aid}/regression"),
     ("GET", "/assessment/{aid}/comment"),
     ("POST", "/assessment/{aid}/comment"),
+    ("POST", "/assessment/{aid}/findings/{finding_id}/triage"),
     # JSON API
     ("GET", "/api/readiness"),
     ("GET", "/api/jobs/{job_id}"),
@@ -160,9 +162,14 @@ def test_csrf_runs_before_anything_reads_the_request():
     is about to refuse should not cause that work. Starlette prepends, so the
     outermost handler is the one registered last — easy to get backwards."""
     names = [m.kwargs["dispatch"].__name__ for m in app.user_middleware]
-    assert names[0] == "csrf_guard", f"csrf is not outermost: {names}"
-    # The engagement is bound before the chrome that renders it.
-    assert names.index("engagement_middleware") < names.index("chrome_middleware")
+    # security_headers is outermost so even a refused request (bad Host, CSRF)
+    # still gets the hardening headers on its response; host_guard and
+    # csrf_guard are the other cheap up-front refusals. All three must still
+    # run before anything that authenticates the caller or loads the
+    # engagement/chrome, which is the property this test actually protects.
+    assert names[:3] == ["security_headers", "host_guard", "csrf_guard"], names
+    gate = max(names.index(n) for n in ("security_headers", "host_guard", "csrf_guard"))
+    assert gate < names.index("engagement_middleware") < names.index("chrome_middleware")
 
 
 def test_each_route_module_has_exactly_one_router():
