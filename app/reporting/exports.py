@@ -67,6 +67,83 @@ def export_json(
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+def export_markdown(
+    issue_key: str,
+    target: str,
+    tests: list[TestCase],
+    executions: list[Execution],
+    findings: list[Finding],
+    coverage: list[dict] | None = None,
+) -> str:
+    """A single self-contained Markdown document.
+
+    Not the Jira ticket comment (`jira_comment.py`, deliberately a capped
+    summary that points back at the live HTML report) and not a slice of the
+    JSON export — this is meant to be pasted whole into a GitHub/GitLab issue,
+    a wiki page, or a PR description without needing this platform's own
+    viewer, so it carries the same finding detail (impact, reproduction,
+    recommendation, CVSS) the HTML report does, minus the raw request/response
+    evidence panes — those stay in the HTML/JSON, where the redaction and
+    "view exchange" UI they depend on already live.
+    """
+    summary = _summary(executions, findings)
+    lines = [f"# Security Assessment — {issue_key}", "", f"**Target:** {target}", ""]
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| Result | Count |")
+    lines.append("|---|---|")
+    lines += [f"| {k} | {v} |" for k, v in summary["results"].items()]
+    lines.append("")
+    lines.append("| Severity | Count |")
+    lines.append("|---|---|")
+    lines += [f"| {k} | {v} |" for k, v in summary["severities"].items()]
+    lines.append("")
+
+    if coverage:
+        lines.append("## OWASP API Security Coverage")
+        lines.append("")
+        lines.append("| Category | State | Coverage % | Depth % | Techniques missing |")
+        lines.append("|---|---|---|---|---|")
+        for r in coverage:
+            if not r.get("applicable"):
+                continue
+            missing = ", ".join(r.get("techniques_missing") or ()) or "—"
+            lines.append(
+                f"| {r.get('category')} | {r.get('state')} | {r.get('pct', 0)}% "
+                f"| {r.get('depth_pct', 0)}% | {missing} |"
+            )
+        lines.append("")
+
+    lines.append(f"## Findings ({len(findings)})")
+    lines.append("")
+    if not findings:
+        lines.append("No confirmed findings.")
+    for f in findings:
+        lines.append(f"### {f.finding_id} — {f.title}")
+        lines.append("")
+        lines.append(
+            f"**Severity:** {f.severity.value}"
+            + (f" · **CVSS (estimated):** `{f.cvss_vector}`" if f.cvss_vector else "")
+            + f" · **Confidence:** {f.confidence.value}"
+        )
+        lines.append(f"**OWASP:** {f.owasp_category.value} · **Endpoint:** `{f.endpoint}`")
+        lines.append("")
+        lines.append(f"**Impact:** {f.impact}")
+        lines.append("")
+        lines.append(f"**Recommendation:** {f.recommendation}")
+        if f.reproduction:
+            lines.append("")
+            lines.append("**Reproduction:**")
+            lines += [f"{i}. {step}" for i, step in enumerate(f.reproduction, 1)]
+        if f.references:
+            lines.append("")
+            lines.append(f"**References:** {', '.join(f.references)}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def export_xlsx(
     issue_key: str,
     target: str,
@@ -112,10 +189,16 @@ def export_xlsx(
 
     # Coverage
     ws = wb.create_sheet("Coverage")
-    _header(ws, ["Category", "State", "Coverage %", "Existing PoC", "Generated"], bold)
+    _header(ws, ["Category", "State", "Coverage %", "Existing PoC", "Generated",
+                "Depth %", "Techniques missing"], bold)
     for r in coverage or []:
+        # Depth is the honest companion to "Coverage %": a category reads
+        # COVERED from a single test while most of its known techniques were
+        # never tried, and depth is what would tell a reader that.
+        missing = r.get("techniques_missing") or ()
         ws.append([r.get("category"), r.get("state"), r.get("pct", 0),
-                   r.get("existing_tests", 0), r.get("generated_tests", 0)])
+                   r.get("existing_tests", 0), r.get("generated_tests", 0),
+                   r.get("depth_pct", 0), ", ".join(missing)])
 
     # Test cases
     suffix = " ".join(filter(None, ["(STALE)" if plan_stale else "",
@@ -135,10 +218,11 @@ def export_xlsx(
 
     # Findings
     ws = wb.create_sheet("Findings")
-    _header(ws, ["ID", "Title", "OWASP", "Severity", "Confidence", "Endpoint", "Recommendation"], bold)
+    _header(ws, ["ID", "Title", "OWASP", "Severity", "CVSS (estimated)", "Confidence",
+                "Endpoint", "Recommendation"], bold)
     for f in findings:
         ws.append([f.finding_id, f.title, f.owasp_category.value, f.severity.value,
-                   f.confidence.value, f.endpoint, f.recommendation])
+                   f.cvss_vector, f.confidence.value, f.endpoint, f.recommendation])
 
     buf = io.BytesIO()
     wb.save(buf)

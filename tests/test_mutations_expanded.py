@@ -431,3 +431,32 @@ def test_path_normalization_bypass_preserves_placeholders(variant):
 def test_path_normalization_bypass_rejects_absolute_url():
     with pytest.raises(MutationError):
         _apply("path_normalization_bypass", {"path": "https://evil.example/admin"})
+
+
+# -- Phase (injection-adjacent, detect-only): type confusion -------------------
+
+
+@pytest.mark.parametrize("variant,expect_type", [
+    ("huge_number", int), ("negative_number", int), ("null", type(None)),
+    ("empty_string", str), ("array_where_scalar", list), ("long_unicode", str),
+])
+def test_type_confusion_probe_query_variants(variant, expect_type):
+    prepared = _apply("type_confusion_probe", {"field": "q", "variant": variant, "location": "query"})
+    assert "q" in prepared.query
+
+
+def test_type_confusion_probe_body_location():
+    prepared = _apply("type_confusion_probe",
+                      {"field": "count", "variant": "huge_number", "location": "body"},
+                      base=RequestSpec(method="POST", path="/x", body={"count": 1}))
+    assert prepared.body["count"] == 10 ** 30
+
+
+def test_type_confusion_probe_rejects_unknown_variant():
+    with pytest.raises(MutationError):
+        _apply("type_confusion_probe", {"field": "q", "variant": "bogus"})
+
+
+def test_type_confusion_probe_requires_a_field():
+    with pytest.raises(MutationError):
+        _apply("type_confusion_probe", {"variant": "huge_number"})

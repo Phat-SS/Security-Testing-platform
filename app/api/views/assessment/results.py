@@ -262,8 +262,49 @@ def _how_settled_line(run) -> str:
     return f"<p class='muted' style='margin:6px 0 0'>{', '.join(parts)}.</p>"
 
 
+_DECISION_SOURCE_LABEL = {
+    "sealed_runner": ("runner-sealed", "low"),
+    "measured": ("measured", "low"),
+    "ai_consensus": ("AI-adjudicated", "med"),
+}
+
+
+def _finding_provenance_pill(decision_source: str) -> str:
+    label, tone = _DECISION_SOURCE_LABEL.get(decision_source, (decision_source, "info"))
+    return ui.pill(_t(label), tone)
+
+
+def _finding_triage_controls(aid: str, finding_id: str, state: dict | None, back: str) -> str:
+    """Mark-as-false-positive / reopen — never touches the sealed verdict or
+    the finding's own fields, just a reviewer's own opinion recorded beside it."""
+    is_fp = bool(state) and state.get("status") == "false_positive"
+    if is_fp:
+        note = e(state.get("note", "")) if state.get("note") else ""
+        badge = ui.pill(_t("False positive"), "med") + (
+            f'<div class="muted" style="font-size:11px;margin-top:2px">{note}</div>' if note else ""
+        )
+        return (
+            f'{badge}<form method="post" style="margin-top:4px" '
+            f'action="/assessment/{attr(aid)}/findings/{attr(finding_id)}/triage">'
+            f'<input type="hidden" name="status" value="open">'
+            f'<input type="hidden" name="back" value="{attr(back)}">'
+            f'<button class="btn sec" style="font-size:11px;padding:2px 8px">{_t("Reopen")}</button></form>'
+        )
+    return (
+        f'<form method="post" action="/assessment/{attr(aid)}/findings/{attr(finding_id)}/triage">'
+        f'<input type="hidden" name="status" value="false_positive">'
+        f'<input type="hidden" name="back" value="{attr(back)}">'
+        f'<input type="text" name="note" placeholder="{attr(_t("Why? (optional)"))}" '
+        f'style="font-size:11px;width:110px;margin-right:4px">'
+        f'<button class="btn sec" style="font-size:11px;padding:2px 8px">{_t("Mark FP")}</button></form>'
+    )
+
+
 def _results_section(aid: str, issue_key: str, st: _State, findings, verdicts: dict,
-                     opened: bool, run=None, triage: dict | None = None) -> str:
+                     opened: bool, run=None, triage: dict | None = None,
+                     finding_triage: dict | None = None) -> str:
+    finding_triage = finding_triage or {}
+    back = f"/assessment/{attr(aid)}?phase=results"
     rows = ""
     for f in findings:
         tone = ui.SEV_CLASS.get(f.severity.value, "info")
@@ -272,11 +313,15 @@ def _results_section(aid: str, issue_key: str, st: _State, findings, verdicts: d
             f"<td>{e(f.title)}</td>"
             f'<td class="mono">{e(f.owasp_category.value.split(":")[0])}</td>'
             f"<td>{ui.pill(f.severity.value, tone)}</td>"
+            f'<td>{_finding_provenance_pill(f.decision_source)}</td>'
             f'<td class="mono"><span class="trunc">{e(f.endpoint)}</span></td>'
-            f'<td class="mono muted">{e(", ".join(f.affected_tests))}</td></tr>'
+            f'<td class="mono muted">{e(", ".join(f.affected_tests))}</td>'
+            f'<td>{_finding_triage_controls(aid, f.finding_id, finding_triage.get(f.finding_id), back)}</td>'
+            "</tr>"
         )
     findings_table = ui.table(
-        [_t("ID"), _t("Title"), "OWASP", _t("Severity"), _t("Endpoint"), _t("Tests")],
+        [_t("ID"), _t("Title"), "OWASP", _t("Severity"), _t("Source"), _t("Endpoint"),
+         _t("Tests"), _t("Triage")],
         rows,
         empty=_t(
             "No confirmed findings. An inconclusive result is not a finding — "
@@ -345,11 +390,12 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
 </div>
 <div class="glabel">{_t("Export")}</div>
 <div class="actionrow">
-<a class="btn sec" href="/assessment/{attr(aid)}/export.html">HTML</a>
-<a class="btn sec" href="/assessment/{attr(aid)}/export.pdf">PDF</a>
-<a class="btn sec" href="/assessment/{attr(aid)}/export.xlsx">XLSX</a>
-<a class="btn sec" href="/assessment/{attr(aid)}/export.json">JSON</a>
-<a class="btn sec" href="/assessment/{attr(aid)}/export.postman">Postman (Newman)</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/export.html" title="{_t('Full report: findings, coverage, and every captured request/response with copy-cURL replay.')}">HTML</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/export.pdf" title="{_t('Findings and coverage only — no request/response evidence, for a quick print/share.')}">PDF</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/export.md" title="{_t('Findings and coverage as Markdown — paste straight into a GitHub/GitLab issue, wiki, or PR description.')}">Markdown</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/export.xlsx" title="{_t('Everything in sortable/filterable spreadsheet form — summary, coverage, test cases, executions, findings.')}">XLSX</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/export.json" title="{_t('The full machine-readable record — everything the other formats are rendered from.')}">JSON</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/export.postman" title="{_t('Approved tests as a Postman collection, for replay with Newman outside this platform.')}">Postman (Newman)</a>
 </div>"""
     summary = _t("{n} finding(s)").format(n=len(findings)) if st.n_executions else _t("not run yet")
     if run is not None:

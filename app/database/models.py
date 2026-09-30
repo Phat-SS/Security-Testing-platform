@@ -166,6 +166,45 @@ class RunSnapshotRow(Base):
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class FindingTriageRow(Base):
+    """A reviewer's own triage decision on a confirmed finding — false-positive
+    or reopened — kept beside the finding, not inside it.
+
+    A new table, same reasoning as `AgentRecordRow`: `init_db` is `create_all`,
+    which creates a missing table but never adds a missing column, so a new
+    table picks up on an existing `sectest.db` at the next boot rather than
+    raising OperationalError. `finding_id` is stable across a re-run (it is
+    derived from the finding's dedup key upstream), so a triage decision
+    survives the assessment being re-executed; `dedup_key` is stored alongside
+    it so a triage row can still be matched to a *different* assessment's
+    finding carrying the same underlying weakness, without needing to change
+    this table if that matching later gets smarter.
+
+    This never touches the sealed verdict or a finding's own fields — it is a
+    reviewer's opinion recorded next to the evidence, exactly like the AI
+    adjudicator's opinion is, and for the same reason: the finding a triage
+    decision was made against must remain inspectable afterward.
+    """
+
+    __tablename__ = "finding_triage"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "finding_id",
+                         name="uq_finding_triage_assessment_finding"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    finding_id: Mapped[str] = mapped_column(String(32), index=True)
+    dedup_key: Mapped[str] = mapped_column(String(256), default="")
+    # "false_positive" | "open" (open = explicitly reopened after being marked FP)
+    status: Mapped[str] = mapped_column(String(24), default="false_positive")
+    note: Mapped[str] = mapped_column(Text, default="")
+    actor: Mapped[str] = mapped_column(String(128), default="system")
+    updated_at: Mapped["DateTime"] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class AuditLog(Base):
     """Who did what, when, to which issue/target/test. Never stores secrets."""
 

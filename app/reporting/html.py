@@ -107,9 +107,25 @@ def _manifest_banner(manifest) -> str:
     if manifest is None:
         return ""
     if manifest.signed:
+        # "Signed" and "verifies right now" are different claims: the former is
+        # a fact about how the report was built, the latter is a fact about
+        # whether the KEY CONFIGURED ON THIS SERVER, right now, still produces
+        # that signature — which is what a reader actually wants to know
+        # before trusting the report in front of them, and the only thing the
+        # signature is actually FOR. Checking it once at build time and never
+        # again would silently stop meaning anything the day the key rotates.
+        from app.reporting.manifest import verify_manifest
+        verified = verify_manifest(manifest)
+        status = (
+            '<span style="color:#2f855a">&#10003; verified against the '
+            'currently configured signing key</span>' if verified else
+            '<span style="color:#b8860b">&#9888; does NOT verify against the '
+            'currently configured signing key — the key may have rotated, or '
+            'this manifest may have been altered</span>'
+        )
         return (
             '<p class="muted" style="margin:0 0 18px">Signed report manifest '
-            f'<code>{_e(manifest.signature[:20])}…</code> ({_e(manifest.key_id)}).</p>'
+            f'<code>{_e(manifest.signature[:20])}…</code> ({_e(manifest.key_id)}) — {status}.</p>'
         )
     return (
         '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #b8860b;'
@@ -450,18 +466,37 @@ def _coverage_section(rows: list[dict], lang: str) -> str:
         color = _COVERAGE_COLOR.get(state, "#718096")
         pct = r.get("pct", 0)
         bar_w = pct if state != "NOT_APPLICABLE" else 0
+        # "COVERED" is reached by one test in the category — this is depth, the
+        # honest answer to "COVERED with how many of the known techniques?".
+        # Without it a single drop_auth test reads as the whole of API2.
+        depth_pct = r.get("depth_pct", 0)
+        missing = r.get("techniques_missing") or ()
+        depth_cell = (
+            f"<div class='bar' title='{_e(', '.join(missing)) or t('none — every known technique is exercised', lang)}'>"
+            f"<div class='fill' style='width:{depth_pct}%;background:{color}'></div></div>"
+            f"<span class='muted' style='font-size:11px'>{depth_pct}%"
+            + (f" &middot; {t('missing', lang)}: {_e(', '.join(missing[:4]))}"
+               + (f" (+{len(missing) - 4})" if len(missing) > 4 else "")
+               if missing else "")
+            + "</span>"
+        ) if state != "NOT_APPLICABLE" else "<span class='muted'>&mdash;</span>"
         body += (
             f"<tr><td><b>{_e(r.get('category'))}</b></td>"
             f"<td>{_e(r.get('existing_tests', 0))}</td>"
             f"<td>{_e(r.get('generated_tests', 0))}</td>"
             f"<td style='color:{color};font-weight:700'>{t(state, lang)}</td>"
             f"<td><div class='bar'><div class='fill' style='width:{bar_w}%;"
-            f"background:{color}'></div></div></td></tr>"
+            f"background:{color}'></div></div></td>"
+            f"<td>{depth_cell}</td></tr>"
         )
     heading = t("OWASP API Security Coverage ({n} applicable)", lang).format(n=len(applicable))
+    depth_th = (
+        f'<th title="{t("What share of the known attack techniques for this category were actually tried — a category can read COVERED from a single test while most of its techniques were never attempted", lang)}">'
+        f"{t('Depth', lang)}</th>"
+    )
     return f"""<h2>{heading}</h2>
 <div class="tblwrap"><table>
-<tr><th>{t("Category", lang)}</th><th>{t("Existing PoC", lang)}</th><th>{t("Generated", lang)}</th><th>{t("State", lang)}</th><th>{t("Coverage", lang)}</th></tr>
+<tr><th>{t("Category", lang)}</th><th>{t("Existing PoC", lang)}</th><th>{t("Generated", lang)}</th><th>{t("State", lang)}</th><th>{t("Coverage", lang)}</th>{depth_th}</tr>
 {body}</table></div>"""
 
 
@@ -477,6 +512,7 @@ def _finding_block(f: Finding, lang: str) -> str:
 <b>OWASP</b><span>{_e(f.owasp_category.value)}</span>
 <b>{t("Endpoint", lang)}</b><span><code>{_e(f.endpoint)}</code></span>
 <b>{t("Confidence", lang)}</b><span>{t(f.confidence.value, lang)}</span>
+{f'<b>{t("CVSS (estimated)", lang)}</b><span class="mono" style="font-size:12px">{_e(f.cvss_vector)}</span>' if f.cvss_vector else ''}
 <b>{t("Affected tests", lang)}</b><span>{_e(', '.join(f.affected_tests))}</span>
 <b>{t("Expected", lang)}</b><span>{_e(f.correlation.expected)}</span>
 <b>{t("Actual", lang)}</b><span>{_e(f.correlation.actual)}</span>

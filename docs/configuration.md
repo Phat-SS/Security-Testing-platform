@@ -114,6 +114,8 @@ is no setting for it.
 
 Scope edits (`/config/scope`) need the **admin** role and are written to the audit log. Ports other than 80/443 must be listed under `scope.allowed_ports` unless the engagement is in lab mode (`allow_private_ranges`).
 
+**Per-user engagement scoping.** A `users.json` entry may add `"engagements": ["acme"]`. Omit it (the default for every existing entry) and that user is unrestricted — sees every engagement on the box, exactly as before this existed. List one or more engagement names and everything under `/assessment/{aid}/...` for a *different* engagement's assessment is refused with a 403 (not a redirect, not a filtered list — the same request another engagement's data would otherwise answer), the sidebar's engagement switcher only offers the ones listed, and `?engagement=<other>` is refused the same way. An assessment created before engagements existed (no stamp at all) stays visible to everyone, the same rule `findings`/`activity` already use for it. This is the one enforcement point (`app/api/middleware.py`'s `engagement_middleware`), so a new export format or a new page under `/assessment/{aid}` is covered without adding its own check.
+
 ### Arbitrary-Python PoC runner
 
 Off by default, and all of these must line up before arbitrary code runs.

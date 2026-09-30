@@ -372,3 +372,51 @@ def test_ticket_poc_mode_with_no_embedded_poc_is_reported_not_silently_skipped()
     actions = {a.action for a in repo.get_audit(aid)}
     assert "ticket_poc_missing" in actions
     assert "design_tests" not in actions
+
+
+# -- Phase (AI memory): prior-run digest for the same ticket ------------------
+
+
+def _finding(finding_id="SEC-001", title="BOLA"):
+    from app.schemas.finding import CorrelationEvidence, Finding
+
+    return Finding(
+        finding_id=finding_id, title=title, owasp_category=OwaspApiCategory.API1,
+        severity=Severity.HIGH, confidence="HIGH", endpoint="GET /x",
+        dedup_key=f"API1:2023|GET /x|{title}",
+        correlation=CorrelationEvidence(baseline_summary="b", attack_summary="a",
+                                        expected="e", actual="a"),
+        impact="impact", recommendation="fix it",
+    )
+
+
+def test_prior_run_digest_is_empty_with_no_earlier_run():
+    repo, orch = _setup()
+    repo.create_assessment("A-1", "CRM-9", "CRM")
+    assert orch._prior_run_digest("CRM-9", "A-1") == ""
+
+
+def test_prior_run_digest_reports_ruled_out_and_still_open():
+    repo, orch = _setup()
+    repo.create_assessment("A-1", "CRM-9", "CRM")
+    repo.replace_findings("A-1", [_finding("SEC-001", "BOLA"), _finding("SEC-002", "Broken auth")])
+    repo.save_executions("A-1", [])  # marks A-1 EXECUTED
+    repo.set_finding_triage("A-1", "SEC-001", "k", "false_positive", note="shared account")
+    repo.create_assessment("A-2", "CRM-9", "CRM")
+
+    digest = orch._prior_run_digest("CRM-9", "A-2")
+
+    assert "RULED OUT (false positive)" in digest
+    assert "shared account" in digest
+    assert "BOLA" in digest
+    assert "previously confirmed, still open" in digest
+    assert "Broken auth" in digest
+
+
+def test_prior_run_digest_ignores_a_non_executed_assessment():
+    repo, orch = _setup()
+    repo.create_assessment("A-1", "CRM-9", "CRM")
+    repo.replace_findings("A-1", [_finding()])  # never executed — status stays CREATED
+    repo.create_assessment("A-2", "CRM-9", "CRM")
+
+    assert orch._prior_run_digest("CRM-9", "A-2") == ""

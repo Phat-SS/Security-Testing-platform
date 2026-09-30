@@ -179,7 +179,10 @@ def _sidebar_chrome(user: User | None, path: str = "") -> dict:
     switchable = not _ASSESSMENT_PATH.match(path or "")
     engagements: list[tuple[str, str]] = []
     if switchable:
-        engagements = [(n, registry.describe(n)) for n in registry.names()]
+        engagements = [
+            (n, registry.describe(n)) for n in registry.names()
+            if user is None or user.may_see_engagement(n)
+        ]
 
     return {
         "engagement_name": name or (host or ""),
@@ -223,11 +226,53 @@ def _engagement_for(request: Request) -> str:
     return request.query_params.get("engagement") or request.cookies.get("engagement") or ""
 
 
+def _bearer_key(request: Request) -> str | None:
+    key = request.headers.get("x-api-key")
+    if key:
+        return key
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1]
+    return None
+
+
+def _authenticated_user(request: Request) -> User | None:
+    """The caller, resolved the same way `deps.optional_user` would — but as a
+    plain function, for the one place (this middleware) that has to know who
+    is asking before any route's own `Depends()` runs at all."""
+    key = _bearer_key(request)
+    if key:
+        return state.auth.authenticate(key)
+    return state.auth.authenticate_session(request.cookies.get("session_key"))
+
+
 async def engagement_middleware(request: Request, call_next):
-    """Bind the engagement before anything reads `state.engagement`."""
+    """Bind the engagement before anything reads `state.engagement` — and
+    refuse a request for an engagement this caller is not scoped to.
+
+    This is the one enforcement point for engagement isolation, deliberately:
+    an assessment's own routes (`GET /assessment/{aid}`, every export, every
+    write under it) look the row up by id alone and have no engagement check
+    of their own — nothing downstream of this middleware does. Putting the
+    gate at the one place that already resolves "which engagement does this
+    request touch" (`_engagement_for`) means every current and future route
+    under `/assessment/{aid}` is covered by construction, not by remembering
+    to add the same check to each one.
+    """
     if runtime.ready():
+        target = _engagement_for(request)
+        if state.auth.enabled and target:
+            user = _authenticated_user(request)
+            if user is not None and not user.may_see_engagement(target):
+                # A read of another client's engagement is exactly the wrong
+                # kind of information to include in a 403 body, so this says
+                # only that access was refused, never which engagement or
+                # assessment was asked for.
+                return PlainTextResponse(
+                    "Not authorized for this engagement.", status_code=403,
+                )
         try:
-            chosen = state.engagements.select(_engagement_for(request))
+            chosen = state.engagements.select(target)
         except Exception:
             logger.debug("could not select an engagement", exc_info=True)
             chosen = ""

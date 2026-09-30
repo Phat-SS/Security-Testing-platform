@@ -109,7 +109,7 @@ class _FollowUpPlanner:
                                     known_personas=["agent_A", "agent_B", "anonymous"])
         self.calls = 0
 
-    def plan(self, analysis, existing=None):
+    def plan(self, analysis, existing=None, prior_context=""):
         return PlanResult()
 
     def follow_up(self, analysis, test, execution, id_prefix="AI"):

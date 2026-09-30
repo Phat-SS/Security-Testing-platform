@@ -147,6 +147,7 @@ async def view_assessment(
         plan_review=state.orch.plan_review(aid),
         run_assessment=state.orch.run_assessment(aid),
         triage=triage_counts,
+        finding_triage=state.repo.get_finding_triage(aid),
         uncovered_poc_endpoints=state.orch.uncovered_poc_endpoints(aid),
         environments=state.engagement.environments,
         active_environment=state.engagement.active_environment,

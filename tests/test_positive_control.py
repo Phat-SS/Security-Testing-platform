@@ -761,3 +761,38 @@ def test_a_failing_teardown_step_does_not_raise_or_change_the_verdict():
     execution = _runner(app).run(test, "E18")  # must not raise
 
     assert execution.verdict.result in (TestStatus.PASS, TestStatus.INCONCLUSIVE)
+
+
+def test_race_condition_workers_are_barrier_synchronized():
+    """Every worker in a concurrent burst blocks on a shared barrier immediately
+    before sending, so they release together rather than trickling in as
+    ThreadPoolExecutor happens to schedule them — a real tightening of the
+    race window, not a cosmetic one."""
+    import time
+
+    starts = []
+    lock = __import__("threading").Lock()
+
+    async def redeem(request):
+        with lock:
+            starts.append(time.monotonic())
+        return JSONResponse({"ok": True})
+
+    test = TestCase(
+        test_id="API6-RACE", title="race", objective="o",
+        owasp_category="API6:2023", severity="HIGH",
+        auth_context=AuthContext(persona="agent_A"),
+        request=RequestSpec(method="POST", path="/redeem"),
+        attack_mutation=Mutation(kind="race_condition", detail={"count": 8}),
+        expected=ExpectedResult(status_in=[200, 409], max_successful_repeats=1),
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    execution = _runner(_app(Route("/redeem", redeem, methods=["POST"]))).run(test, "E19")
+
+    assert (execution.repeat.sent, execution.repeat.concurrent) == (8, True)
+    assert len(starts) == 8
+    # A generous bound: independently-scheduled threads under load can easily
+    # spread over tens of milliseconds; barrier-released ones land in a much
+    # tighter cluster. This is a regression guard against the barrier being
+    # silently dropped, not a precise timing claim.
+    assert max(starts) - min(starts) < 0.25

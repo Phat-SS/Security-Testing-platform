@@ -12,7 +12,7 @@ from app.analysis.promotion import verify_event
 from app.schemas.enums import OwaspApiCategory, TestStatus
 from app.schemas.decision import DerivedVerdictEvent
 from app.schemas.execution import Execution
-from app.schemas.finding import CorrelationEvidence, Finding
+from app.schemas.finding import CorrelationEvidence, Finding, cvss_estimate
 from app.schemas.testcase import TestCase
 
 
@@ -96,6 +96,7 @@ def build_findings(
                 ],
                 recommendation=_recommendation_for(test.owasp_category),
                 references=list(control.references),
+                cvss_vector=cvss_estimate(test.severity),
                 decision_source=decision.source if decision is not None else "sealed_runner",
                 derived_event_id=decision.event_id if decision is not None else "",
             )

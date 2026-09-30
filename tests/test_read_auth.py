@@ -31,6 +31,7 @@ READ_ROUTES = [
     "/assessment/{aid}/comment",
     "/assessment/{aid}/export.html",
     "/assessment/{aid}/export.json",
+    "/assessment/{aid}/export.md",
     "/assessment/{aid}/export.xlsx",
     "/assessment/{aid}/export.pdf",
     "/assessment/{aid}/export.postman",

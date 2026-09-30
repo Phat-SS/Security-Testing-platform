@@ -789,6 +789,58 @@ def _host_header_injection(req: _Req, m: Mutation, env: _Env) -> None:
     )
 
 
+# --- API8 (continued): unsanitised input surfacing an internal error ---------
+#
+# Detect-only, and deliberately NOT an injection-payload catalogue: every value
+# here is a boundary/type-confusion value a well-formed client would never
+# send, chosen to break a parser or a type coercion rather than to exploit any
+# specific backend. The signal is the SAME one `debug_probe` already asserts
+# against (`_DEBUG_FINGERPRINTS`, defined once in test_designer.py and reused
+# here rather than duplicated) — an unhandled exception leaking a stack trace,
+# a driver name, or an internal path. A target that mishandles one of these
+# values badly enough to crash is worth a person's attention regardless of
+# which specific bug is under it; naming that bug is exactly what a reviewed,
+# team-specific payload set (out of scope for this generic designer) is for.
+_TYPE_CONFUSION_VARIANTS = ("huge_number", "negative_number", "null", "empty_string",
+                            "array_where_scalar", "long_unicode")
+
+
+def _type_confusion_value(variant: str) -> object:
+    if variant == "huge_number":
+        return 10 ** 30
+    if variant == "negative_number":
+        return -1
+    if variant == "null":
+        return None
+    if variant == "empty_string":
+        return ""
+    if variant == "array_where_scalar":
+        return [1, 2, 3]
+    if variant == "long_unicode":
+        return "é" * 5000
+    raise MutationError(
+        f"type_confusion_probe: unknown variant {variant!r}; use one of {list(_TYPE_CONFUSION_VARIANTS)}"
+    )
+
+
+def _type_confusion_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    variant = str(m.detail.get("variant", "huge_number"))
+    value = _type_confusion_value(variant)  # raises MutationError on a bad variant
+    field_name = m.detail.get("field")
+    if not field_name:
+        raise MutationError("type_confusion_probe requires detail['field'] naming the parameter to aim at.")
+    location = str(m.detail.get("location", "query"))
+    if location == "query":
+        req.query[str(field_name)] = "" if value is None else str(value)
+    elif location == "body":
+        body = _as_dict_body(req)
+        _set_dotted(body, str(field_name), value)
+        req.body = body
+    else:
+        raise MutationError("type_confusion_probe: 'location' must be query or body.")
+    req.note = f"sent a {variant} boundary value in {location} field '{field_name}' (parser/type-coercion probe)"
+
+
 # --- API9: inventory management ----------------------------------------------
 
 _GRAPHQL_INTROSPECTION_QUERY = (
@@ -959,6 +1011,7 @@ for _spec, _handler in [
     (MutationSpec("debug_probe", _A.API8, "Request verbose/debug output"), _debug_probe),
     (MutationSpec("security_headers_probe", _A.API8, "Inspect response hardening headers"), _security_headers_probe),
     (MutationSpec("host_header_injection", _A.API8, "Test whether an absolute URL in the response trusts a client-supplied Host"), _host_header_injection),
+    (MutationSpec("type_confusion_probe", _A.API8, "Send a boundary/type-confusion value into one field and check for an unhandled-exception disclosure"), _type_confusion_probe),
     # API9
     (MutationSpec("version_downgrade", _A.API9, "Re-aim at a superseded API version"), _version_downgrade),
     (MutationSpec("undocumented_path_probe", _A.API9, "Probe for spec dumps / actuators / admin surfaces"), _undocumented_path_probe),

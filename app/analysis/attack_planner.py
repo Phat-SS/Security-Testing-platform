@@ -193,12 +193,24 @@ class AttackPlanner:
 
     # -- public API ---------------------------------------------------------
 
-    def plan(self, analysis: IssueAnalysis, existing: list[TestCase] | None = None) -> PlanResult:
+    def plan(self, analysis: IssueAnalysis, existing: list[TestCase] | None = None,
+            prior_context: str = "") -> PlanResult:
         """Propose additional test cases. Never raises: a planner failure must
-        degrade to 'no extra tests', never to a broken design step."""
+        degrade to 'no extra tests', never to a broken design step.
+
+        `prior_context`: a short digest of what a previous run of the SAME
+        ticket already settled — findings a human already reviewed and
+        dismissed as false positives, and ones still open. The only memory
+        this planner has across runs; without it, every re-plan starts cold
+        and can propose the same test a person already looked at and rejected.
+        Built by the orchestrator from `repo.get_findings`/`get_finding_triage`
+        on the previous assessment for this issue key, so it costs nothing
+        this module needs to know how to fetch.
+        """
         try:
             raw = structured_completion(
-                self._llm, _SYSTEM, self._user_prompt(analysis, existing or []),
+                self._llm, _SYSTEM,
+                self._user_prompt(analysis, existing or [], prior_context),
                 _ProposedPlan, "attack-plan.v1",
             )
         except Exception as exc:  # noqa: BLE001 - any client/transport failure
@@ -539,7 +551,8 @@ class AttackPlanner:
 
     # -- prompt -------------------------------------------------------------
 
-    def _user_prompt(self, analysis: IssueAnalysis, existing: list[TestCase]) -> str:
+    def _user_prompt(self, analysis: IssueAnalysis, existing: list[TestCase],
+                     prior_context: str = "") -> str:
         endpoints = "\n".join(
             f"- {e.method} {e.path} (auth_required={e.auth_required}, "
             f"object_ids={e.object_id_params}, writes_properties={e.writes_properties}, "
@@ -588,7 +601,14 @@ class AttackPlanner:
             f"{', '.join(sorted(self._personas))}\n\n"
             f"Mutation catalogue — `mutation_kind` must be one of these:\n"
             f"{mutation_catalogue()}\n\n"
-            "Propose additional high-value test cases that the list above misses. "
+            + (
+                f"{FENCE_INSTRUCTION} A prior run of this SAME ticket left this record — a "
+                "person already reviewed some of these findings, so do not spend a proposal "
+                "re-discovering one marked ruled out; prefer new surface or added depth "
+                "instead:\n" + fence("PRIOR_RUN", prior_context, max_chars=4_000) + "\n\n"
+                if prior_context else ""
+            )
+            + "Propose additional high-value test cases that the list above misses. "
             "Favour depth over breadth: a smaller number of decidable tests with "
             "baselines and verifications beats many undecidable ones."
         )

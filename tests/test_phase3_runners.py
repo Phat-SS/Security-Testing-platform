@@ -75,6 +75,18 @@ def test_export_xlsx_is_a_workbook():
     assert len(blob) > 2000
 
 
+def test_export_markdown_is_pasteable_and_carries_coverage_depth():
+    from app.reporting.exports import export_markdown
+
+    tests = _sample_tests()
+    coverage = [{"category": "API1:2023", "applicable": True, "state": "COVERED",
+                "pct": 100, "depth_pct": 20, "techniques_missing": ["swap_id_in_query"]}]
+    out = export_markdown("CRM-1", "http://t", tests, [], [], coverage=coverage)
+    assert out.startswith("# Security Assessment")
+    assert "swap_id_in_query" in out  # depth gap is surfaced, not just coverage %
+    assert "No confirmed findings." in out
+
+
 # -- Staged analyzer (fake LLM) --------------------------------------------
 
 class FakeLLM:

@@ -7,7 +7,7 @@ import hashlib
 import logging
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Form, Header
 from fastapi.responses import (
     HTMLResponse,
     RedirectResponse,
@@ -88,6 +88,14 @@ async def export_pdf(aid: str, user: User = Depends(require_page())):
                     headers={"Content-Disposition": f"attachment; filename={aid}.pdf"})
 
 
+@router.get("/assessment/{aid}/export.md")
+async def export_markdown(aid: str, user: User = Depends(require_page())):
+    payload = state.orch.export_markdown(aid)
+    _audit_export(aid, "markdown", user)
+    return Response(payload, media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename={aid}.md"})
+
+
 @router.get("/assessment/{aid}/export.postman")
 async def export_postman(aid: str, user: User = Depends(require_page())):
     payload = state.orch.export_postman(aid)
@@ -107,6 +115,33 @@ async def regression(aid: str, flash: str = "",
     # last time" is the question it was started to answer.
     return views.regression_page(aid, a.issue_key, prev_id, diff,
                                  render_diff_comment(a.issue_key, diff), flash=flash)
+
+
+@router.post("/assessment/{aid}/findings/{finding_id}/triage")
+async def triage_finding(
+    aid: str, finding_id: str, status: str = Form(...), note: str = Form(""),
+    back: str = Form(""), user: User = Depends(require("tester")),
+):
+    """A reviewer's own false-positive/reopen call on a confirmed finding.
+
+    Never touches the sealed verdict, the finding's own fields, or the finding
+    count reported elsewhere — this is a reviewer's opinion recorded next to
+    the evidence, the same standing as the AI adjudicator's, and shown as a
+    badge, not a deletion: the finding a triage decision was made against must
+    stay inspectable afterward.
+    """
+    if status not in ("false_positive", "open"):
+        return RedirectResponse(f"/assessment/{aid}?phase=results&flash=Invalid+triage+status",
+                                status_code=303)
+    findings = {f.finding_id: f for f in state.repo.get_findings(aid)}
+    finding = findings.get(finding_id)
+    dedup_key = finding.dedup_key if finding is not None else ""
+    state.repo.set_finding_triage(aid, finding_id, dedup_key, status,
+                                  note=note.strip()[:500], actor=user.name)
+    flash = "Marked+as+false+positive" if status == "false_positive" else "Reopened"
+    target = back or f"/assessment/{aid}?phase=results"
+    sep = "&" if "?" in target else "?"
+    return RedirectResponse(f"{target}{sep}flash={flash}", status_code=303)
 
 
 @router.get("/assessment/{aid}/comment", response_class=HTMLResponse)

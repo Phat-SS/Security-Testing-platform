@@ -689,6 +689,21 @@ class TestDesigner:
                 body_must_not_contain=list(_DEBUG_FINGERPRINTS),
             ),
         ))
+        field = ep.query_params[0] if ep.query_params else "q"
+        for variant in ("huge_number", "array_where_scalar", "long_unicode"):
+            tests.append(self._mk(
+                OwaspApiCategory.API8, c, Severity.LOW, ep,
+                title=f"Malformed input handling on {ep.signature}: {variant}",
+                objective="Verify a boundary/type-confusion value is rejected cleanly "
+                          "rather than crashing into a stack trace or internal detail.",
+                auth=AuthContext(persona=self._attacker),
+                mutation=Mutation(kind="type_confusion_probe",
+                                  detail={"field": field, "variant": variant}),
+                expected=ExpectedResult(
+                    status_in=[200, 201, 204, *range(400, 500)],
+                    body_must_not_contain=list(_DEBUG_FINGERPRINTS),
+                ),
+            ))
         return tests
 
     # -- API9: inventory management -----------------------------------------

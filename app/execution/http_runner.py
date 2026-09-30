@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -661,8 +662,23 @@ class HttpRunner:
         # probe needed all along: the old version serialised the whole process
         # around the very requests it was trying to overlap.
         if prepared.concurrent:
-            with ThreadPoolExecutor(max_workers=min(count, 16)) as pool:
-                results = list(pool.map(_one, range(count)))
+            workers = min(count, 16)
+            # A ThreadPoolExecutor.map schedules workers as they're picked up,
+            # not all at once — the first request can be well into its own
+            # connect/TLS handshake before the last one is even dispatched,
+            # which widens exactly the check-to-commit window this probe
+            # exists to hit narrowly. A barrier makes every worker in this wave
+            # block immediately before its `_send`, so they release together
+            # rather than trickling in — still not a single wire packet, but a
+            # real tightening of the window, not a cosmetic one.
+            release = threading.Barrier(workers)
+
+            def _synchronized(i: int):
+                release.wait()
+                return _one(i)
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(_synchronized, range(count)))
         else:
             results = [_one(i) for i in range(count)]
 

@@ -36,9 +36,22 @@ _ROLE_RANK = {"viewer": 1, "tester": 2, "admin": 3}
 class User:
     name: str
     role: str
+    # Which engagements this user may read/act on. Empty means unrestricted —
+    # every existing users.json entry (no "engagements" key) keeps seeing
+    # everything, exactly as before this field existed; an operator opts a
+    # user INTO isolation by listing the engagements they should see, the same
+    # "capability exists, off until configured" shape as allow_private_ranges.
+    engagements: tuple[str, ...] = ()
 
     def can(self, min_role: str) -> bool:
         return _ROLE_RANK.get(self.role, 0) >= _ROLE_RANK.get(min_role, 99)
+
+    def may_see_engagement(self, name: str) -> bool:
+        """True when unrestricted, or `name` is unstamped (belongs to
+        whoever is looking — see `_belongs_to`'s own docstring for why an
+        assessment created before engagements existed is not walled off from
+        everyone), or `name` is on this user's explicit allowlist."""
+        return not self.engagements or not name or name in self.engagements
 
 
 _SINGLE_USER = User(name="local-admin", role="admin")
@@ -61,7 +74,10 @@ class AuthManager:
         if self._enabled and Path(path).exists():
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             for u in data.get("users", []):
-                self._by_hash[u["api_key_sha256"]] = User(u["name"], u.get("role", "viewer"))
+                self._by_hash[u["api_key_sha256"]] = User(
+                    u["name"], u.get("role", "viewer"),
+                    engagements=tuple(u.get("engagements", [])),
+                )
 
     @property
     def enabled(self) -> bool:

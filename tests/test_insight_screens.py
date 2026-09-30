@@ -197,3 +197,56 @@ def test_findings_are_ordered_worst_first(client):
     html = views.findings_page(rows)
 
     assert html.index("SEC-b") < html.index("SEC-a")
+
+
+# -- Phase (UI quick-wins): filter/search/false-positive toggle -------------
+
+
+def test_findings_search_and_severity_facet(client):
+    from app.api.main import state
+
+    aid = _ran(client, "acme")
+    findings = state.repo.get_findings(aid)
+    if not findings:
+        pytest.skip("the run produced no confirmed finding to filter")
+    finding = findings[0]
+
+    # A search that cannot match anything empties the list without erroring.
+    html = client.get("/findings?q=zzz-does-not-exist-anywhere").text
+    assert finding.finding_id not in html
+    assert "No findings match this filter." in html or "filter" in html
+
+    # The finding's own severity facet still finds it.
+    html = client.get(f"/findings?sev={finding.severity.value}").text
+    assert finding.finding_id in html
+
+
+def test_marking_a_finding_false_positive_hides_it_by_default(client):
+    from app.api.main import state
+
+    aid = _ran(client, "acme")
+    findings = state.repo.get_findings(aid)
+    if not findings:
+        pytest.skip("the run produced no confirmed finding to triage")
+    finding = findings[0]
+
+    before = client.get("/findings").text
+    assert finding.finding_id in before
+
+    r = client.post(f"/assessment/{aid}/findings/{finding.finding_id}/triage",
+                    data={"status": "false_positive", "note": "shared fixture data"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+    after = client.get("/findings").text
+    assert finding.finding_id not in after  # hidden by default
+
+    with_fp = client.get("/findings?fp=1").text
+    assert finding.finding_id in with_fp
+    assert "False positive" in with_fp
+
+    # Reopening brings it back to the default view.
+    client.post(f"/assessment/{aid}/findings/{finding.finding_id}/triage",
+               data={"status": "open"}, follow_redirects=False)
+    reopened = client.get("/findings").text
+    assert finding.finding_id in reopened

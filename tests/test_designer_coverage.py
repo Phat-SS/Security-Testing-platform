@@ -258,3 +258,15 @@ def test_method_switch_to_a_destructive_verb_is_marked_destructive():
     assert is_destructive_mutation("method_switch", {"method": "DELETE"}) is True
     assert is_destructive_mutation("method_switch", {"method": "GET"}) is False
     assert is_destructive_mutation("method_override", {"method": "DELETE"}) is True
+
+
+def test_aggressive_api8_adds_type_confusion_probes():
+    ep = Endpoint(method="GET", path="/search", query_params=["term"])
+    kinds = _kinds(_plan([ep], aggressive=True))
+    assert "type_confusion_probe" in kinds
+
+
+def test_standard_depth_does_not_add_type_confusion_probes():
+    ep = Endpoint(method="GET", path="/search", query_params=["term"])
+    kinds = _kinds(_plan([ep], aggressive=False))
+    assert "type_confusion_probe" not in kinds
