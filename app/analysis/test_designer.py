@@ -38,6 +38,7 @@ from app.schemas.enums import (
 from app.schemas.testcase import (
     DESTRUCTIVE_METHODS,
     AuthContext,
+    is_destructive_mutation,
     BaselineSpec,
     ExpectedResult,
     OastExpectation,
@@ -210,11 +211,34 @@ class TestDesigner:
         if ep.writes_properties:
             tests.append(self._mk(
                 OwaspApiCategory.API1, c, Severity.HIGH, ep,
+                title=f"BOLA variant on {ep.signature}: victim id supplied in the body",
+                objective="Verify object-level authorization is enforced on a body-carried "
+                          "id, not only the one in the path.",
+                auth=AuthContext(persona=self._attacker, target_persona=self._victim),
+                mutation=Mutation(kind="swap_id_in_body", detail={"field": id_field, "id_field": id_field}),
+                expected=ExpectedResult(status_in=[400, 403, 404, 422]),
+                destructive=destructive,
+                baseline=baseline,
+            ))
+            tests.append(self._mk(
+                OwaspApiCategory.API1, c, Severity.HIGH, ep,
                 title=f"Authorization bypass via content-type switch on {ep.signature}",
                 objective="Verify authorization is enforced regardless of body encoding.",
                 auth=AuthContext(persona=self._attacker, target_persona=self._victim),
                 mutation=Mutation(kind="content_type_switch", detail={"to": "form"}),
                 expected=ExpectedResult(status_in=[400, 403, 404, 415, 422]),
+                destructive=destructive,
+                baseline=baseline,
+            ))
+        for variant in ("zero", "negative", "me", "wildcard"):
+            tests.append(self._mk(
+                OwaspApiCategory.API1, c, Severity.MEDIUM, ep,
+                title=f"BOLA id-format variant on {ep.signature}: {variant}",
+                objective="Verify the authorization check and the data layer agree on "
+                          "what the id means for a special-cased spelling.",
+                auth=AuthContext(persona=self._attacker, target_persona=self._victim),
+                mutation=Mutation(kind="mutate_id_format", detail={"id_field": id_field, "variant": variant}),
+                expected=ExpectedResult(status_in=[400, 403, 404, 422]),
                 destructive=destructive,
                 baseline=baseline,
             ))
@@ -449,6 +473,32 @@ class TestDesigner:
             destructive=destructive,
             baseline=baseline,
         ))
+        # A verb the router may register a handler for without wiring the same
+        # authorization decorator onto it (routers commonly protect POST/DELETE
+        # explicitly but forget PUT, or leave OPTIONS/TRACE unprotected).
+        tests.append(self._mk(
+            OwaspApiCategory.API5, c, Severity.MEDIUM, ep,
+            title=f"BFLA across HTTP verbs on {ep.signature}",
+            objective="Verify every verb the router accepts on this path enforces the "
+                      "same authorization, not just the one the ticket names.",
+            auth=AuthContext(persona=self._attacker, target_persona=self._victim),
+            mutation=Mutation(kind="method_switch", detail={"method": "OPTIONS"}),
+            expected=ExpectedResult(status_in=[401, 403, 404, 405]),
+            destructive=False,
+            baseline=baseline,
+        ))
+        for variant in ("uppercase", "double_slash", "trailing_slash"):
+            tests.append(self._mk(
+                OwaspApiCategory.API5, c, Severity.MEDIUM, ep,
+                title=f"BFLA via path spelling on {ep.signature}: {variant}",
+                objective="Verify an authorization rule keyed on the exact path string "
+                          "cannot be sidestepped by an equivalent spelling of the route.",
+                auth=AuthContext(persona=self._attacker, target_persona=self._victim),
+                mutation=Mutation(kind="path_normalization_bypass", detail={"variant": variant}),
+                expected=ExpectedResult(status_in=[400, 401, 403, 404]),
+                destructive=destructive,
+                baseline=baseline,
+            ))
         return tests
 
     # -- API6: sensitive business flows -------------------------------------
@@ -764,7 +814,8 @@ class TestDesigner:
         cat_num = category.value.split(":")[0]  # "API1"
         # Any state-changing method is destructive by default — a broken control
         # means the write actually happened. Gate it out of default execution.
-        destructive = destructive or ep.method.upper() in DESTRUCTIVE_METHODS
+        destructive = (destructive or ep.method.upper() in DESTRUCTIVE_METHODS
+                       or is_destructive_mutation(mutation.kind, mutation.detail))
         return TestCase(
             test_id=f"{cat_num}-{num:03d}",
             title=title,

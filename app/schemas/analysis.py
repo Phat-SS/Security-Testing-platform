@@ -35,6 +35,10 @@ class Endpoint(BaseModel):
     writes_properties: bool = False
     # Fields that carry a server-consumed URL (SSRF surface).
     url_fields: list[str] = Field(default_factory=list)
+    # Declared input surface, when a spec (or a person) knows it. Injection and
+    # pagination probes aim at these instead of guessing a field called "q".
+    query_params: list[str] = Field(default_factory=list)
+    body_fields: list[str] = Field(default_factory=list)
     # True when a human typed this endpoint in the UI rather than the analyzer
     # extracting it from the ticket. Re-analyzing the ticket rebuilds the
     # extracted rows and would otherwise silently discard hand-entered ones,

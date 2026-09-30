@@ -208,11 +208,14 @@ def parse(text: str) -> tuple[list[Endpoint], dict]:
             params = [_resolve(p, document) for p in (*shared_params, *(operation.get("parameters") or []))]
             object_ids: list[str] = []
             url_fields: list[str] = []
+            query_params: list[str] = []
             for param in params:
                 name = param.get("name") or ""
                 location = param.get("in")
                 if not name or location == "body":
                     continue
+                if location == "query" and name not in query_params:
+                    query_params.append(name)
                 if _looks_like_id(name):
                     object_ids.append(name)
                 if _URL_NAME.search(name):
@@ -235,6 +238,13 @@ def parse(text: str) -> tuple[list[Endpoint], dict]:
                 object_id_params=object_ids,
                 writes_properties=bool(properties) or method.upper() in _WRITE_METHODS,
                 url_fields=url_fields,
+                # Sorted so a re-import of the same spec is a no-op: `merge()`
+                # recombines these as a sorted set, and unsorted insertion order
+                # here would make the FIRST import (nothing to merge with yet,
+                # so it keeps this order verbatim) disagree with every import
+                # after it.
+                query_params=sorted(query_params)[:30],
+                body_fields=sorted(dict.fromkeys(properties))[:40],
             ))
 
     if not endpoints:
@@ -278,6 +288,8 @@ def merge(existing: list[Endpoint], imported: list[Endpoint]) -> tuple[list[Endp
             "object_id_params": sorted({*current.object_id_params, *endpoint.object_id_params}),
             "url_fields": sorted({*current.url_fields, *endpoint.url_fields}),
             "writes_properties": current.writes_properties or endpoint.writes_properties,
+            "query_params": sorted({*current.query_params, *endpoint.query_params}),
+            "body_fields": sorted({*current.body_fields, *endpoint.body_fields}),
         })
         if merged != current:
             enriched.append(endpoint.signature)

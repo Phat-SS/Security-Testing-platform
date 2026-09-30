@@ -49,6 +49,11 @@ async def lifespan(app: FastAPI):
         logger.info("loaded %d setting(s) from the .env file", len(loaded))
     configure_error_tracking()
     st = runtime.init()
+    if not st.auth.enabled:
+        logger.warning(
+            "AUTH_ENABLED is off: every request is the built-in admin. Keep this "
+            "bound to loopback, or set AUTH_ENABLED=true before exposing it."
+        )
     orphaned = st.repo.fail_orphaned_jobs(
         "The server restarted while this job was running; it did not finish."
     )

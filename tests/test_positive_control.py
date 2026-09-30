@@ -523,3 +523,47 @@ def test_the_attackers_own_ids_stay_reachable_under_an_explicit_prefix():
     )
     _runner(_app(Route("/customers/{cid}", capture))).run(test, "E15")
     assert seen["path"] == "/customers/1001"
+
+
+# -- Phase 1: configured fan-out ceiling, and leaks on later attempts ----------
+
+
+def _runner_with_cap(app: Starlette, cap: int) -> HttpRunner:
+    from dataclasses import replace
+
+    client = TestClient(app, base_url=_BASE_URL)
+    client.follow_redirects = False
+    scope = ScopeValidator(ScopePolicy(allowed_hosts={_HOST}), resolver=lambda h: "203.0.113.10")
+    settings = Settings.from_env()
+    settings = replace(settings, limits=replace(settings.limits, max_requests_per_test=cap))
+    return HttpRunner(_BASE_URL, scope, _VAULT, settings, client=client)
+
+
+def test_max_requests_per_test_caps_a_burst():
+    hits = {"n": 0}
+
+    async def search(request):
+        hits["n"] += 1
+        return JSONResponse({"results": []})
+
+    execution = _runner_with_cap(_app(Route("/search", search)), 4).run(
+        _rate_test("rate_probe", 20, 1), "E9")
+    assert execution.repeat.sent == 4
+    assert hits["n"] == 4
+    assert any("capped at 4" in line for line in execution.log)
+
+
+def test_a_leak_that_only_appears_on_a_later_attempt_is_still_detected():
+    seen = {"n": 0}
+
+    async def search(request):
+        seen["n"] += 1
+        if seen["n"] == 3:
+            return JSONResponse({"results": [{"email": "victim-secret-7781@x.com"}]})
+        return JSONResponse({"results": []})
+
+    test = _rate_test("rate_probe", 5, 100)
+    test.expected.body_must_not_contain = ["victim-secret-7781@x.com"]
+    execution = _runner(_app(Route("/search", search))).run(test, "E10")
+    assert execution.verdict.result == TestStatus.FAIL
+    assert "DISCLOSURE" in " ".join(execution.log)

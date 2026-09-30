@@ -109,3 +109,50 @@ def test_raise_if_blocked():
     v = make(policy, {})
     with pytest.raises(ScopeViolation):
         v.validate_host("nope.com").raise_if_blocked()
+
+
+# -- hardening: every DNS answer, extra ranges, port/scheme/userinfo ----------
+
+def _multi(policy, answers):
+    return ScopeValidator(policy, resolver=lambda h: answers)
+
+
+def test_mixed_public_and_private_answers_are_refused():
+    v = _multi(ScopePolicy(allowed_hosts={"h.com"}), ["203.0.113.5", "10.0.0.7"])
+    r = v.validate_url("https://h.com/")
+    assert not r.allowed
+    assert "10.0.0.0/8" in r.reason
+
+
+@pytest.mark.parametrize("ip", [
+    "100.100.100.200",  # CGNAT: Alibaba metadata
+    "198.18.0.1", "224.0.0.1", "240.0.0.1", "ff02::1",
+    "2002:a00:1::1",  # 6to4 wrapping 10.0.0.1
+    "2001:0:4136:e378:8000:63bf:3fff:fdd2",  # Teredo
+])
+def test_additional_non_public_ranges_are_blocked(ip):
+    v = _multi(ScopePolicy(allowed_hosts={"h.com"}), [ip])
+    assert not v.validate_url("https://h.com/").allowed
+
+
+@pytest.mark.parametrize("url", [
+    "ftp://h.com/", "file://h.com/etc/passwd", "gopher://h.com/",
+    "https://user:pw@h.com/", r"https://h.com\@evil.com/",
+])
+def test_non_http_schemes_and_parser_tricks_are_refused(url):
+    v = _multi(ScopePolicy(allowed_hosts={"h.com"}), ["203.0.113.5"])
+    assert not v.validate_url(url).allowed
+
+
+def test_non_default_port_needs_explicit_allowance():
+    v = _multi(ScopePolicy(allowed_hosts={"h.com"}), ["203.0.113.5"])
+    assert v.validate_url("https://h.com:443/").allowed
+    assert not v.validate_url("https://h.com:6379/").allowed
+    v = _multi(ScopePolicy(allowed_hosts={"h.com"}, allowed_ports={8443}), ["203.0.113.5"])
+    assert v.validate_url("https://h.com:8443/").allowed
+    assert not v.validate_url("https://h.com:22/").allowed
+
+
+def test_lab_mode_waives_the_port_rule():
+    v = _multi(ScopePolicy(allowed_hosts={"127.0.0.1"}, allow_private_ranges=True), ["127.0.0.1"])
+    assert v.validate_url("http://127.0.0.1:8100/x").allowed

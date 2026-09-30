@@ -32,7 +32,7 @@ from app.schemas.execution import Execution
 from app.schemas.finding import Finding
 from app.schemas.job import Job
 from app.schemas.manifest import ReportManifest
-from app.schemas.testcase import DESTRUCTIVE_METHODS, TestCase
+from app.schemas.testcase import DESTRUCTIVE_METHODS, TestCase, is_destructive_mutation
 
 
 # Approval states that represent a decision a person made about a specific test.
@@ -309,8 +309,10 @@ class Repository:
             # is_destructive=False and let it run under the default
             # "non-destructive only" execution path, skipping the
             # destructive-action confirmation gate entirely.
+            mutation = data.get("attack_mutation") or {}
             data["is_destructive"] = bool(data.get("is_destructive")) or (
                 str(request_json.get("method", "")).upper() in DESTRUCTIVE_METHODS
+                or is_destructive_mutation(str(mutation.get("kind", "")), mutation.get("detail"))
             )
             row.approval_status = "PENDING"
             row.data_json = data

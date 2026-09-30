@@ -27,16 +27,25 @@ async def save_scope_route(
     allowed_hosts: str = Form(""),
     blocked_hosts: str = Form(""),
     allow_private_ranges: bool = Form(False),
-    user: User = Depends(require("tester")),
+    allowed_ports: str = Form(""),
+    user: User = Depends(require("admin")),
 ):
+    # The authorization boundary: admin-only and audited, because widening it
+    # (or flipping allow_private_ranges) is what turns the runner into a weapon.
+    ports = [int(p) for p in _lines(allowed_ports.replace(",", "\n")) if p.isdigit()]
     save_scope(state.engagement_path, _lines(allowed_hosts), _lines(blocked_hosts),
-               allow_private_ranges)
+               allow_private_ranges, ports)
+    state.repo.audit(
+        "scope_change", actor=user.name,
+        detail=f"allowed={_lines(allowed_hosts)} blocked={_lines(blocked_hosts)} "
+               f"private={bool(allow_private_ranges)} ports={ports}")
     state.reload_engagement()
     return config_redirect("scope", "Scope saved")
 
 
 @router.post("/config/scope/allow-host")
-async def allow_host_route(host: str = Form(...), user: User = Depends(require("tester"))):
+async def allow_host_route(host: str = Form(...), user: User = Depends(require("admin"))):
     allow_host(state.engagement_path, host)
+    state.repo.audit("scope_allow_host", actor=user.name, detail=host.strip().lower())
     state.reload_engagement()
     return config_redirect("readiness", f"{host} added to the approved scope")

@@ -128,13 +128,18 @@ def _has_grounded_citation(execution: Execution, adjudication: Adjudication) -> 
     corpus = " ".join(corpus_parts).lower()
     corpus_tokens = _meaningful_tokens(corpus)
     statuses = set(re.findall(r"\b[1-5]\d{2}\b", corpus))
+    # EVERY citation must trace back to captured facts. "Any one matches" let a
+    # single valid citation launder several invented ones, and a bare "200" was
+    # enough to ground a sentence about something else entirely.
+    if not adjudication.evidence_cited:
+        return False
     for citation in adjudication.evidence_cited:
         lowered = citation.lower()
-        if set(re.findall(r"\b[1-5]\d{2}\b", lowered)) & statuses:
-            return True
-        if len(_meaningful_tokens(lowered) & corpus_tokens) >= 2:
-            return True
-    return False
+        shared = len(_meaningful_tokens(lowered) & corpus_tokens)
+        status_hit = bool(set(re.findall(r"\b[1-5]\d{2}\b", lowered)) & statuses)
+        if not (shared >= 2 or (status_hit and shared >= 1)):
+            return False
+    return True
 
 
 def _meaningful_tokens(value: str) -> set[str]:

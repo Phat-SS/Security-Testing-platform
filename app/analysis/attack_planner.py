@@ -47,6 +47,7 @@ from app.schemas.enums import (
 )
 from app.schemas.testcase import (
     DESTRUCTIVE_METHODS,
+    is_destructive_mutation,
     AuthContext,
     BaselineSpec,
     ExpectedResult,
@@ -515,7 +516,8 @@ class AttackPlanner:
             # DELETE as non-destructive would otherwise slip past the
             # destructive-test exclusion that keeps write probes out of a
             # default run.
-            is_destructive=method in DESTRUCTIVE_METHODS,
+            is_destructive=(method in DESTRUCTIVE_METHODS
+                            or is_destructive_mutation(p.mutation_kind, p.mutation_detail)),
             source=TestSource.AI,
             # Non-negotiable. A proposal cannot approve itself.
             approval_status=ApprovalStatus.PENDING,

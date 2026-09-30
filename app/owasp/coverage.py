@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.execution.mutations import kinds_for
 from app.schemas.analysis import IssueAnalysis
 from app.schemas.enums import Applicability, OwaspApiCategory, TestSource
 from app.schemas.testcase import TestCase
@@ -24,6 +25,11 @@ class CoverageRow:
     generated_tests: int
     state: str  # COVERED | PARTIAL | MISSING | NOT_APPLICABLE
     pct: int
+    #: How much of this category's technique catalogue the plan exercises. A
+    #: single `drop_auth` makes API2 "COVERED", but it is one of several ways
+    #: authentication fails; this is the honest "how deep" number next to it.
+    depth_pct: int = 0
+    techniques_missing: tuple[str, ...] = ()
 
 
 def compute_coverage(
@@ -52,7 +58,16 @@ def compute_coverage(
             state, pct = "MISSING", 0  # a gap the designer is now filling
         else:
             state, pct = "MISSING", 0
-        rows.append(CoverageRow(cat, is_applicable, existing, generated, state, pct))
+        catalogue = kinds_for(cat) if is_applicable else []
+        used = {
+            t.attack_mutation.kind
+            for t in (*existing_poc_tests, *generated_tests)
+            if t.owasp_category == cat
+        }
+        missing = tuple(k for k in catalogue if k not in used)
+        depth = _pct(len(catalogue) - len(missing), len(catalogue))
+        rows.append(CoverageRow(cat, is_applicable, existing, generated, state, pct,
+                                depth, missing))
     return rows
 
 
@@ -75,6 +90,7 @@ def coverage_summary(rows: list[CoverageRow]) -> dict:
     overall = _pct(covered + 0.5 * partial, len(applicable))
     return {
         "overall_pct": overall,
+        "depth_pct": _pct(sum(r.depth_pct for r in applicable), len(applicable) * 100),
         "applicable": len(applicable),
         "covered": covered,
         "partial": partial,

@@ -128,3 +128,27 @@ def test_tampered_derived_event_cannot_mint_a_finding():
     event.reason = "tampered after signing"
 
     assert build_findings({_test().test_id: _test()}, [execution], [event]) == []
+
+
+def _consensus(evidence):
+    execution = _execution()
+    return evaluate_promotion(execution, Adjudication(
+        execution_id=execution.execution_id, test_id=execution.test_id,
+        sealed_result=TestStatus.INCONCLUSIVE, needs_manual_review=False,
+        assessed_result="FAIL", confidence=Confidence.HIGH, adjudicator="ai",
+        resolution="ai_consensus", challenged=True, challenge_agreed=True,
+        evidence_cited=evidence, model_id="claude-sonnet-4-20260514", prompt_hash="abc123",
+    ))
+
+
+def test_one_valid_citation_cannot_launder_an_invented_one():
+    event = _consensus([
+        "HTTP 422 reached business validation",
+        "the body listed the victim's credit card number",  # nothing like it was captured
+    ])
+    assert event is not None and event.promoted is False
+
+
+def test_a_bare_status_code_does_not_ground_a_citation():
+    event = _consensus(["the server answered 422 and leaked the admin password hash"])
+    assert event is not None and event.promoted is False

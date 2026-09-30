@@ -113,11 +113,28 @@ def test_readiness_never_echoes_the_token(tmp_path, monkeypatch):
 
 
 def test_several_references_in_one_value_report_every_unset_name(monkeypatch):
-    monkeypatch.setenv("SET_ONE", "a")
-    monkeypatch.delenv("UNSET_ONE", raising=False)
-    monkeypatch.delenv("UNSET_TWO", raising=False)
+    monkeypatch.setenv("PERSONA_SET_ONE", "a")
+    monkeypatch.delenv("UNPERSONA_SET_ONE", raising=False)
+    monkeypatch.delenv("PERSONA_UNSET_TWO", raising=False)
 
-    resolved, missing = resolve_env_refs("${SET_ONE}/${UNSET_ONE}/${UNSET_TWO}")
+    resolved, missing = resolve_env_refs("${PERSONA_SET_ONE}/${UNPERSONA_SET_ONE}/${PERSONA_UNSET_TWO}")
 
-    assert resolved == "a/${UNSET_ONE}/${UNSET_TWO}"
-    assert missing == ("UNSET_ONE", "UNSET_TWO")
+    assert resolved == "a/${UNPERSONA_SET_ONE}/${PERSONA_UNSET_TWO}"
+    assert missing == ("UNPERSONA_SET_ONE", "PERSONA_UNSET_TWO")
+
+
+def test_persona_header_cannot_reference_platform_secrets(monkeypatch):
+    # Persona headers are sent to the target, so naming the platform's own
+    # secrets must not resolve — whoever can save a persona could otherwise
+    # exfiltrate them.
+    monkeypatch.setenv("JIRA_MCP_TOKEN", "super-secret")
+    monkeypatch.setenv("REPORT_SIGNING_KEY", "also-secret")
+    resolved, missing = resolve_env_refs("${JIRA_MCP_TOKEN} ${REPORT_SIGNING_KEY}")
+    assert "super-secret" not in resolved and "also-secret" not in resolved
+    assert set(missing) == {"JIRA_MCP_TOKEN", "REPORT_SIGNING_KEY"}
+
+
+def test_extra_prefix_can_be_allowed(monkeypatch):
+    monkeypatch.setenv("PERSONA_ENV_PREFIXES", "ACME_")
+    monkeypatch.setenv("ACME_TOKEN", "t0k")
+    assert resolve_env_refs("${ACME_TOKEN}") == ("t0k", ())

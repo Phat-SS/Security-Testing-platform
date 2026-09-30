@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import re
 from urllib.parse import urlsplit
 
@@ -65,6 +66,59 @@ async def csrf_guard(request: Request, call_next):
             status_code=403,
         )
     return await call_next(request)
+
+
+# -- Host allowlist (DNS-rebinding guard) -------------------------------------
+#
+# With auth off, the UI trusts the network path. A page on attacker.example that
+# re-resolves its own name to 127.0.0.1 is *same-origin* to the browser, so the
+# Sec-Fetch-Site check above passes it. The one thing it cannot forge is the
+# Host header: it still says attacker.example. Refusing unknown Hosts closes it.
+_DEFAULT_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver"}
+
+
+def _allowed_ui_hosts() -> set[str] | None:
+    raw = os.getenv("UI_ALLOWED_HOSTS", "").strip()
+    if raw == "*":
+        return None
+    return _DEFAULT_HOSTS | {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def _host_only(header: str) -> str:
+    header = header.strip().lower()
+    if header.startswith("["):  # [::1]:8100
+        return header.split("]")[0] + "]"
+    return header.rsplit(":", 1)[0] if header.count(":") == 1 else header
+
+
+async def host_guard(request: Request, call_next):
+    allowed = _allowed_ui_hosts()
+    if allowed is not None and _host_only(request.headers.get("host", "")) not in allowed:
+        return PlainTextResponse(
+            "Host header not allowed. Set UI_ALLOWED_HOSTS=<name>[,<name>] to serve "
+            "this UI under another hostname.",
+            status_code=400,
+        )
+    return await call_next(request)
+
+
+_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'self'; "
+    "form-action 'self'; frame-ancestors 'none'"
+)
+
+
+async def security_headers(request: Request, call_next):
+    """Defence in depth: captured target responses are rendered in reports, so
+    a CSP limits what a stored-XSS slip could do. No external origins are used
+    by the UI, hence 'self' only."""
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
 
 
 def _is_literal_private_host(host: str) -> bool:
@@ -235,7 +289,8 @@ async def lang_middleware(request: Request, call_next):
 #: the execution order match the order written here.
 #: `engagement_middleware` runs before `chrome_middleware`, which renders the
 #: sidebar's engagement card and so has to be told which one first.
-_MIDDLEWARE = (csrf_guard, engagement_middleware, chrome_middleware, lang_middleware)
+_MIDDLEWARE = (security_headers, host_guard, csrf_guard, engagement_middleware,
+               chrome_middleware, lang_middleware)
 
 
 def register(app) -> None:

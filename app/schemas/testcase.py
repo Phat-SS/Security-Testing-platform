@@ -27,6 +27,21 @@ from .enums import (
 # request is edited), so the two can't silently drift apart.
 DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+
+def is_destructive_mutation(kind: str, detail: dict | None = None) -> bool:
+    """Whether a mutation changes the request's *effective* method to a write.
+
+    A GET probe that is re-sent as DELETE (`method_switch`, `method_override`)
+    is destructive whatever its declared method says; the declared method alone
+    would let it run under the default "non-destructive only" path.
+    """
+    detail = detail or {}
+    if kind == "method_override":
+        return str(detail.get("method", "DELETE")).upper() in DESTRUCTIVE_METHODS
+    if kind == "method_switch":
+        return str(detail.get("method", "")).upper() in DESTRUCTIVE_METHODS
+    return False
+
 # Placeholders like {victim_id} are resolved at runtime from the persona vault
 # or from values captured in a prior `setup` step. Templating is a fixed,
 # whitelisted syntax — not eval — see execution.templating.
@@ -173,6 +188,16 @@ class ExpectedResult(BaseModel):
     # When the mutation sends N requests, at most this many may succeed before
     # throttling is expected to kick in. None → no limit asserted.
     max_successful_repeats: int | None = None
+
+    # -- observed-vulnerability assertions (injection / traversal probes) -----
+    # Regular expressions that should NEVER match the attack's response. A match
+    # is a directly observed fingerprint (a DB error string, an evaluated
+    # template, /etc/passwd content) — the same standing as a forbidden header,
+    # not an inference from a status code.
+    vulnerable_body_patterns: list[str] = Field(default_factory=list)
+    # Upper bound on the response size. Lets an unbounded-pagination probe be
+    # measured (the server served a huge page) instead of inferred.
+    max_response_bytes: int | None = None
 
 
 class AuthContext(BaseModel):

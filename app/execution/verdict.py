@@ -46,6 +46,20 @@ from app.schemas.testcase import TestCase
 # deliberately excluded — it presents another persona's VALID credential, so a
 # non-401/403 response there is a different (BOLA-flavoured) question, not
 # evidence the auth check itself was skipped.
+# Statuses that show the request was actually handled by application logic. A
+# 404 (an unauthenticated route may legitimately hide), a 3xx (typically a
+# redirect to a login page), a 405 or a 429 say nothing about whether the
+# credential was checked, so they stay undecided instead of becoming a FAIL.
+_PROCESSED_STATUSES = frozenset({*range(200, 300), 400, 409, 415, 422})
+
+# Authorization probes whose rejection is only meaningful if the same operation
+# works for the entitled identity.
+_NEEDS_CONTROL_KINDS = frozenset({
+    "swap_object_id", "swap_id_in_query", "swap_id_in_header", "id_param_pollution",
+    "wrap_id_array", "content_type_switch", "escalate_persona", "method_override",
+    "admin_path_swap", "borrowed_token",
+})
+
 _AUTH_BYPASS_MUTATION_KINDS = {
     "drop_auth",
     "tamper_token",
@@ -236,8 +250,7 @@ def evaluate(
         baseline_ok is True
         and not status_ok
         and test.attack_mutation.kind in _AUTH_BYPASS_MUTATION_KINDS
-        and response.status_code not in (401, 403)
-        and response.status_code < 500
+        and response.status_code in _PROCESSED_STATUSES
     ):
         return Verdict(
             result=TestStatus.FAIL,
@@ -260,12 +273,17 @@ def evaluate(
 
     # --- 5. The control held: attack rejected AND nothing leaked. ----------
     if status_ok:
+        # An authorization probe rejected with no positive control cannot tell
+        # "the control held" from "the object was never reachable" (a 404/400 on
+        # a stale id). Still PASS — nothing leaked — but not HIGH.
+        unverified = baseline_ok is None and test.attack_mutation.kind in _NEEDS_CONTROL_KINDS
         return Verdict(
             result=TestStatus.PASS,
-            confidence=Confidence.HIGH,
+            confidence=Confidence.MEDIUM if unverified else Confidence.HIGH,
             expected_summary=exp_summary,
             actual_summary=f"HTTP {response.status_code}, no sensitive data returned"
-            + (f"; positive control confirmed reachable ({baseline_summary})" if baseline_ok else ""),
+            + (f"; positive control confirmed reachable ({baseline_summary})" if baseline_ok else "")
+            + ("; no positive control ran, so reachability is unverified" if unverified else ""),
             reason=(
                 "The endpoint rejected the attack as a secure control should "
                 f"(status {response.status_code} within expected set) and no "

@@ -591,7 +591,12 @@ class HttpRunner:
             )
             return req, resp, raw, None
 
-        count = prepared.repeat
+        # `max_requests_per_test` is the operator's ceiling on fan-out. It was
+        # displayed and stored but never enforced; the mutation layer's own
+        # hard cap (50) is a safety net, not the configured limit.
+        count = max(1, min(prepared.repeat, self._settings.limits.max_requests_per_test))
+        if count < prepared.repeat:
+            log.append(f"multi-request probe capped at {count} (RUNNER_MAX_REQUESTS_PER_TEST)")
         results: list[tuple[CapturedRequest, CapturedResponse | None, str | None]] = []
 
         def _one(_i: int):
@@ -633,7 +638,17 @@ class HttpRunner:
             f"{succeeded} succeeded; throttled={throttled}; spread {status_counts}"
         )
         first_req, first_resp, first_raw = results[0]
-        return first_req, first_resp, first_raw, stats
+        # The first exchange is the stored evidence, but a leak that only shows
+        # up on attempt 2..N (a cache warming, a race that finally lands) must
+        # not be missed: leak detection scans every DISTINCT body, bounded so a
+        # 50-request burst cannot balloon the text searched.
+        scan = [first_raw or ""]
+        seen = {first_raw}
+        for _, _resp, raw in results[1:]:
+            if raw and raw not in seen and len(scan) < 10:
+                seen.add(raw)
+                scan.append(raw)
+        return first_req, first_resp, "\n".join(scan), stats
 
     def _send(
         self,

@@ -107,6 +107,11 @@ is no setting for it.
 | `AUTH_SESSION_TTL_S` | `43200` | Browser session lifetime (minimum 300). The API key itself is never stored in the cookie. |
 | `AUTH_COOKIE_SECURE` | off | Required when served over HTTPS; local HTTP cannot send a `Secure` cookie. A `PLATFORM_BASE_URL` starting with `https://` sets the flag on its own. With auth on, **Readiness** checks this and offers a one-click fix. |
 
+| `UI_ALLOWED_HOSTS` | *(loopback names only)* | Comma-separated `Host` names the UI answers to, beyond `localhost`/`127.0.0.1`/`::1`. Any other `Host` gets a 400, which is what stops a DNS-rebinding page from driving an unauthenticated local UI. `*` disables the check (only behind a proxy that already validates `Host`). |
+| `PERSONA_ENV_PREFIXES` | *(empty)* | Extra prefixes a persona header's `${VAR}` may reference. Built in: `PERSONA_`, `TARGET_`, `PENTEST_`. Anything else (e.g. `JIRA_MCP_TOKEN`) is refused, because persona headers are sent to the target. |
+
+Scope edits (`/config/scope`) need the **admin** role and are written to the audit log. Ports other than 80/443 must be listed under `scope.allowed_ports` unless the engagement is in lab mode (`allow_private_ranges`).
+
 ### Arbitrary-Python PoC runner
 
 Off by default, and all of these must line up before arbitrary code runs.

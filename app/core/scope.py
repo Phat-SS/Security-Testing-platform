@@ -58,7 +58,22 @@ _ALWAYS_BLOCK_NETS = [
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("fc00::/7"),  # unique local
     ipaddress.ip_network("0.0.0.0/8"),
+    # Ranges that are not public unicast but are not RFC1918 either. CGNAT is
+    # where some clouds put metadata (Alibaba 100.100.100.200) and carrier-grade
+    # NATs put internal services; the rest are never a legitimate target.
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT
+    ipaddress.ip_network("192.0.0.0/24"),  # IETF protocol assignments
+    ipaddress.ip_network("198.18.0.0/15"),  # benchmarking
+    ipaddress.ip_network("224.0.0.0/4"),  # multicast
+    ipaddress.ip_network("240.0.0.0/4"),  # reserved + broadcast
+    ipaddress.ip_network("ff00::/8"),  # IPv6 multicast
+    ipaddress.ip_network("2002::/16"),  # 6to4 (embeds an arbitrary IPv4)
+    ipaddress.ip_network("2001::/32"),  # Teredo (embeds an arbitrary IPv4)
 ]
+
+# Ports reachable without an explicit allowance. Any other port on an allowed
+# host could be SSH/Redis/Elasticsearch, so it must be named on purpose.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 @dataclass
@@ -69,17 +84,22 @@ class ScopePolicy:
     allow_private_ranges: escape hatch for local labs (e.g. a demo target on
         127.0.0.1). Off by default — turning it on is an explicit, logged
         decision, never the default.
+    allowed_ports: ports other than 80/443 the tester may reach. Lab mode
+        (allow_private_ranges) waives this, since a demo API on :8100 is the
+        whole point of it.
     """
 
     allowed_hosts: set[str] = field(default_factory=set)
     blocked_hosts: set[str] = field(default_factory=set)
     allow_private_ranges: bool = False
+    allowed_ports: set[int] = field(default_factory=set)
 
     def with_allowed(self, *hosts: str) -> "ScopePolicy":
         return ScopePolicy(
             allowed_hosts=self.allowed_hosts | set(hosts),
             blocked_hosts=self.blocked_hosts,
             allow_private_ranges=self.allow_private_ranges,
+            allowed_ports=self.allowed_ports,
         )
 
 
@@ -111,15 +131,19 @@ def _embedded_ipv4_addresses(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Ad
 Resolver = "callable(str) -> str"
 
 
-def _default_resolver(host: str) -> str:
-    """Resolve a hostname to a single IP string. Raises socket.gaierror.
+def _default_resolver(host: str) -> list[str]:
+    """Resolve a hostname to every distinct IP string. Raises socket.gaierror.
+
+    Every answer matters: a name with one public and one private A record would
+    pass if only the first were inspected, and the connection could land on
+    either. The validator checks all of them and pins a validated one.
 
     Uses getaddrinfo (not gethostbyname) so IPv6-only/AAAA-only hosts are
     resolved too, not silently treated as unresolvable — gethostbyname is
     IPv4-only and would let an operator believe an IPv6 host had no address
     at all rather than correctly evaluating it against the block-list."""
     infos = socket.getaddrinfo(host, None)
-    return infos[0][4][0]
+    return list(dict.fromkeys(info[4][0] for info in infos))
 
 
 class ScopeValidator:
@@ -136,10 +160,30 @@ class ScopeValidator:
         return self._policy
 
     def validate_url(self, url: str) -> ScopeResult:
-        parsed = urlparse(url)
-        host = parsed.hostname
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            return ScopeResult(False, url, None, f"Malformed URL: {exc}")
+        if parsed.scheme not in _DEFAULT_PORTS:
+            return ScopeResult(
+                False, host or url, None,
+                f"Scheme '{parsed.scheme}' is not allowed; only http and https are testable.",
+            )
         if not host:
             return ScopeResult(False, url, None, "URL has no host component.")
+        # Userinfo and backslashes are parser-differential bait: urlparse and the
+        # HTTP client can disagree about which host `http://ok.com\@evil` means.
+        if parsed.username is not None or parsed.password is not None or "\\" in url:
+            return ScopeResult(False, host, None, "URL must not contain credentials or backslashes.")
+        if port is not None and port != _DEFAULT_PORTS[parsed.scheme]:
+            if port not in self._policy.allowed_ports and not self._policy.allow_private_ranges:
+                return ScopeResult(
+                    False, host, None,
+                    f"Port {port} is not in the approved scope for '{host}' "
+                    "(only 80/443 unless the port is allowed explicitly).",
+                )
         return self.validate_host(host)
 
     def validate_host(self, host: str) -> ScopeResult:
@@ -158,44 +202,53 @@ class ScopeValidator:
                 f"Host '{host}' is not in the approved testing scope.",
             )
 
-        # 3. Resolve and inspect the actual IP (defeats DNS-based SSRF).
+        # 3. Resolve and inspect EVERY answer (defeats DNS-based SSRF, including
+        # a mixed public/private record set).
         try:
-            ip_str = self._resolve(host)
+            answers = self._resolve(host)
         except OSError as exc:  # socket.gaierror is an OSError subclass
             return ScopeResult(False, host, None, f"DNS resolution failed for '{host}': {exc}")
+        if isinstance(answers, str):
+            answers = [answers]
+        if not answers:
+            return ScopeResult(False, host, None, f"DNS resolution returned no address for '{host}'.")
 
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return ScopeResult(False, host, ip_str, f"Resolver returned invalid IP '{ip_str}'.")
-
-        if not self._policy.allow_private_ranges:
-            # An IPv6 answer can *wrap* a blocked IPv4 address several ways —
-            # the exact same address underneath, just encoded so a
-            # version-matched-only check (ip.version == net.version) misses
-            # it entirely. Since switching the resolver to getaddrinfo added
-            # IPv6 support, this became reachable: a DNS answer of
-            # ::ffff:169.254.169.254 (IPv4-mapped), ::169.254.169.254
-            # (deprecated IPv4-compatible) or 64:ff9b::169.254.169.254
-            # (NAT64 well-known prefix, RFC 6052) all carry the metadata
-            # address in their low 32 bits and would otherwise sail past
-            # every IPv4 block-list entry. Check the address as resolved AND
-            # every IPv4 address it embeds.
-            candidates = [ip]
-            for embedded in _embedded_ipv4_addresses(ip):
-                candidates.append(embedded)
-            for candidate in candidates:
-                for net in _ALWAYS_BLOCK_NETS:
-                    if candidate.version == net.version and candidate in net:
-                        return ScopeResult(
-                            False,
-                            host,
-                            ip_str,
-                            f"Host '{host}' resolves to blocked range {net} "
-                            f"({candidate}, from resolved address {ip_str}). "
-                            "Possible SSRF/metadata target.",
-                        )
+        ip_str = None
+        for candidate_str in answers:
+            blocked = self._check_address(host, candidate_str)
+            if blocked is not None:
+                return blocked
+            if ip_str is None:
+                ip_str = candidate_str
 
         # Allowed. resolved_ip is returned so the runner can PIN the connection
         # to this exact IP — no second, unvalidated DNS lookup.
         return ScopeResult(True, host, ip_str, "Target is within approved scope.")
+
+    def _check_address(self, host: str, ip_str: str) -> "ScopeResult | None":
+        """A refusal for one resolved address, or None when it is acceptable."""
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return ScopeResult(False, host, ip_str, f"Resolver returned invalid IP '{ip_str}'.")
+        if self._policy.allow_private_ranges:
+            return None
+        # An IPv6 answer can *wrap* a blocked IPv4 address several ways — the
+        # exact same address underneath, just encoded so a version-matched-only
+        # check misses it: ::ffff:169.254.169.254 (IPv4-mapped),
+        # ::169.254.169.254 (deprecated IPv4-compatible) or
+        # 64:ff9b::169.254.169.254 (NAT64). Check the address as resolved AND
+        # every IPv4 address it embeds.
+        candidates = [ip, *_embedded_ipv4_addresses(ip)]
+        for candidate in candidates:
+            for net in _ALWAYS_BLOCK_NETS:
+                if candidate.version == net.version and candidate in net:
+                    return ScopeResult(
+                        False,
+                        host,
+                        ip_str,
+                        f"Host '{host}' resolves to blocked range {net} "
+                        f"({candidate}, from resolved address {ip_str}). "
+                        "Possible SSRF/metadata target.",
+                    )
+        return None

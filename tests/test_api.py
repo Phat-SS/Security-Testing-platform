@@ -182,3 +182,39 @@ def test_full_ui_flow_without_execution(client):
     assert r.status_code == 200
     assert r.headers["content-disposition"] == f"attachment; filename={aid}.html"
     assert "CRM-1234" in r.text
+
+
+def test_rebound_host_header_is_refused(client):
+    # DNS rebinding: the browser thinks attacker.example is same-origin, but the
+    # Host header still names it. The UI must not answer.
+    r = client.get("/", headers={"Host": "attacker.example"})
+    assert r.status_code == 400
+    r = client.post("/import", data={"issue_key": "CRM-1234"},
+                    headers={"Host": "attacker.example:8100", "Sec-Fetch-Site": "same-origin"},
+                    follow_redirects=False)
+    assert r.status_code == 400
+
+
+def test_ui_allowed_hosts_extends_the_allowlist(client, monkeypatch):
+    monkeypatch.setenv("UI_ALLOWED_HOSTS", "sectest.internal")
+    assert client.get("/", headers={"Host": "sectest.internal:8100"}).status_code == 200
+    assert client.get("/", headers={"Host": "127.0.0.1:8100"}).status_code == 200
+
+
+def test_security_headers_are_present(client):
+    r = client.get("/")
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    # also on a refused request
+    assert "content-security-policy" in client.get("/", headers={"Host": "evil.test"}).headers
+
+
+def test_oversized_openapi_upload_is_refused(client):
+    r = client.post("/import", data={"issue_key": "CRM-1234"}, follow_redirects=False)
+    aid = r.headers["location"].split("/assessment/")[1].split("/")[0].split("?")[0]
+    big = "x" * (5 * 1024 * 1024 + 10)
+    r = client.post(f"/assessment/{aid}/openapi", files={"spec_file": ("spec.yaml", big.encode())},
+                    follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert "larger" in r.headers["location"].replace("+", " ")

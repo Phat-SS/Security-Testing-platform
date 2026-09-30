@@ -94,6 +94,10 @@ def build_client(*, timeout, user_agent: str, verify: bool = True) -> httpx.Clie
     return httpx.Client(
         transport=PinnedTransport(httpx.HTTPTransport(verify=verify)),
         follow_redirects=False,
+        # Never honour HTTP(S)_PROXY/ALL_PROXY from the environment: a proxy
+        # mount would carry the request past the pinned transport, and with it
+        # past the validated IP.
+        trust_env=False,
         timeout=timeout,
         headers={"User-Agent": user_agent},
     )

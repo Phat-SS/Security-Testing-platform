@@ -196,3 +196,65 @@ def test_an_ordinary_flow_gets_no_one_shot_chain():
 
     assert not [t for t in tests
                 if t.owasp_category.value.startswith("API6") and t.verification]
+
+
+def test_coverage_reports_technique_depth_beside_the_covered_state():
+    """One drop_auth test makes API2 'COVERED', but that is one technique of
+    several. The depth number is the honest companion."""
+    from app.analysis import HeuristicAnalyzer, TestDesigner
+    from app.mcp.jira import NormalizedIssue
+    from app.owasp.coverage import compute_coverage, coverage_summary
+
+    issue = NormalizedIssue(issue_key="C-1", project_key="C",
+                            summary="GET /customers/{customerId}. Bearer JWT auth.")
+    analysis = HeuristicAnalyzer().analyze(issue)
+    tests = TestDesigner().design(analysis)
+    rows = compute_coverage(analysis, [], tests)
+    applicable = [r for r in rows if r.applicable]
+    assert applicable
+    assert all(0 <= r.depth_pct <= 100 for r in applicable)
+    assert any(r.techniques_missing for r in applicable)  # never claims total depth
+    assert 0 <= coverage_summary(rows)["depth_pct"] <= 100
+
+
+# -- Phase 2: BOLA/BFLA depth additions ---------------------------------------
+
+
+def test_aggressive_bola_adds_body_id_and_format_variants():
+    ep = Endpoint(method="POST", path="/orders/{orderId}", object_id_params=["orderId"],
+                  writes_properties=True)
+    kinds = _kinds(_plan([ep], aggressive=True))
+    assert "swap_id_in_body" in kinds
+    assert "mutate_id_format" in kinds
+
+
+def test_standard_depth_does_not_add_bola_format_variants():
+    ep = Endpoint(method="GET", path="/orders/{orderId}", object_id_params=["orderId"])
+    kinds = _kinds(_plan([ep], aggressive=False))
+    assert "mutate_id_format" not in kinds
+    assert "swap_object_id" in kinds
+
+
+def test_aggressive_bfla_adds_verb_and_path_spelling_variants():
+    ep = Endpoint(method="DELETE", path="/admin/users/{userId}", object_id_params=["userId"])
+    kinds = _kinds(_plan([ep], aggressive=True))
+    assert "method_switch" in kinds
+    assert "path_normalization_bypass" in kinds
+
+
+def test_method_switch_bfla_test_is_not_marked_destructive_for_a_safe_probe():
+    # OPTIONS is the default verb for the BFLA method_switch probe. The
+    # endpoint itself is a GET (not one of the destructive methods), so this
+    # isolates the mutation-based check: switching to a non-destructive verb
+    # must not require destructive-action confirmation to run.
+    ep = Endpoint(method="GET", path="/admin/users/{userId}", object_id_params=["userId"])
+    tests = _plan([ep], aggressive=True)
+    method_switch_tests = [t for t in tests if t.attack_mutation.kind == "method_switch"]
+    assert method_switch_tests and all(not t.is_destructive for t in method_switch_tests)
+
+
+def test_method_switch_to_a_destructive_verb_is_marked_destructive():
+    from app.schemas.testcase import is_destructive_mutation
+    assert is_destructive_mutation("method_switch", {"method": "DELETE"}) is True
+    assert is_destructive_mutation("method_switch", {"method": "GET"}) is False
+    assert is_destructive_mutation("method_override", {"method": "DELETE"}) is True
