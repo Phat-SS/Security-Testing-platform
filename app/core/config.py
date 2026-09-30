@@ -22,6 +22,12 @@ class RunnerLimits:
     # (see Orchestrator.execute).
     max_concurrent_tests: int = 1
     user_agent: str = "SecTestPlatform/0.1 (+authorized-testing)"
+    # A dropped connection or a read timeout is noise, not a finding — but only
+    # for a request nothing about resending is unsafe to repeat. Retrying is
+    # gated to GET/HEAD/OPTIONS in the runner regardless of this count, so a
+    # flaky target can't turn a retry into an extra POST/DELETE.
+    retry_max_attempts: int = 2  # 1 = no retry; 2 = one retry
+    retry_backoff_ms: int = 200
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,8 @@ class Settings:
                 max_response_bytes=int(os.getenv("RUNNER_MAX_RESPONSE_BYTES", "2000000")),
                 max_requests_per_test=int(os.getenv("RUNNER_MAX_REQUESTS_PER_TEST", "25")),
                 max_concurrent_tests=int(os.getenv("RUNNER_MAX_CONCURRENT_TESTS", "1")),
+                retry_max_attempts=int(os.getenv("RUNNER_RETRY_MAX_ATTEMPTS", "2")),
+                retry_backoff_ms=int(os.getenv("RUNNER_RETRY_BACKOFF_MS", "200")),
             ),
         )
 
@@ -66,6 +74,8 @@ def settings_with_overrides(overrides: dict) -> Settings:
         "max_response_bytes": int,
         "max_requests_per_test": int,
         "max_concurrent_tests": int,
+        "retry_max_attempts": int,
+        "retry_backoff_ms": int,
     }
     applied = {}
     for key, cast in fields.items():

@@ -220,6 +220,13 @@ class TestCase(BaseModel):
     auth_context: AuthContext
     preconditions: list[str] = Field(default_factory=list)
     setup: list[SetupStep] = Field(default_factory=list)
+    # Best-effort cleanup for whatever `setup` created, run after the test
+    # completes regardless of its outcome. A setup step that creates a
+    # disposable object (so a destructive attack never touches real data)
+    # otherwise leaks that object into the target for every run, forever.
+    # Never affects the verdict or the execution's recorded outcome — a
+    # teardown failure is logged, not raised.
+    teardown: list[SetupStep] = Field(default_factory=list)
     # Positive control, run BEFORE the attack. Establishes that the thing being
     # protected is actually reachable by someone entitled to it, so a rejection
     # of the attack means "the control worked" rather than "nothing was there".

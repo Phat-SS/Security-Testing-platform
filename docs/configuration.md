@@ -70,6 +70,8 @@ Two settings look like they could be env vars and deliberately are not:
 | `RUNNER_TIMEOUT_S` | `15` | Per-request timeout. Raise for a slow staging host. |
 | `RUNNER_MAX_RESPONSE_BYTES` | `2000000` | Body larger than this is truncated before storage. |
 | `RUNNER_MAX_REQUESTS_PER_TEST` | `25` | Caps one test's fan-out, race windows included. |
+| `RUNNER_RETRY_MAX_ATTEMPTS` | `2` | Attempts for a GET/HEAD/OPTIONS request that hit a transient connect/read error (`1` = no retry). A POST/PUT/PATCH/DELETE is never retried, since the runner cannot tell "never reached the server" from "reached it and the reply was lost" — retrying the latter would be an unrequested second write. |
+| `RUNNER_RETRY_BACKOFF_MS` | `200` | Delay before a retry, multiplied by the attempt number. |
 
 The runner never follows redirects — a 302 to an internal host is the same SSRF
 wearing a hat, and chasing it would re-resolve DNS outside the scope gate. There

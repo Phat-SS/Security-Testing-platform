@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# A push landing mid-run should cancel the stale run rather than queue behind
+# it — nobody needs results for a commit that is no longer HEAD.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default-deny: nothing in this workflow needs to write to the repo, open a
+# PR comment, or touch packages. Each job that needs more asks for it locally.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint & test (py${{ matrix.python-version }})
@@ -36,8 +47,40 @@ jobs:
       - name: Lint (ruff)
         run: ruff check app tests demo
 
-      - name: Test (pytest)
-        run: pytest -q
+      # A migration that doesn't apply cleanly is a bug nothing else in this
+      # workflow would catch — the test suite talks to a database `init_db`
+      # already built, never to one migrated from empty by this exact path.
+      # Goes through `init_db` itself (create_all + bootstrap_alembic), not a
+      # bare `alembic upgrade head`: a brand-new database here is stamped at
+      # head by design (see `bootstrap_alembic`'s docstring), so calling
+      # Alembic directly would try to replay a history this database never
+      # needed and fail on the first migration that adds a table create_all
+      # already created.
+      - name: Migration check (init_db from empty, then compare to head)
+        run: |
+          python -c "
+          from sqlalchemy import create_engine
+          from app.database.models import init_db
+          from app.database.migrate import head_revision, current_revision
+          engine = create_engine('sqlite:///./ci-migration-check.db')
+          init_db(engine)
+          assert current_revision(engine) == head_revision(), (
+              current_revision(engine), head_revision())
+          print('migrations OK, at', head_revision())
+          "
+          rm -f ci-migration-check.db
+
+      - name: Test (pytest, with coverage)
+        run: |
+          pip install pytest-cov
+          pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: coverage.xml
+          retention-days: 14
 
   pip-check:
     name: requirements.txt / lock consistency
@@ -52,3 +95,83 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip check
+
+  # -- Advisory jobs -----------------------------------------------------------
+  #
+  # Each of these surfaces something worth a human's attention on a security
+  # testing tool specifically (a known-vulnerable dependency, a risky code
+  # pattern, a leaked credential) without being wired to block a merge yet —
+  # the existing findings on a codebase this size need triage once before a
+  # gate can be trusted not to cry wolf. Promote a job to `test`/required
+  # once it is quiet, rather than turning it on hard and getting used to
+  # ignoring a red X.
+
+  dependency-audit:
+    name: Dependency audit (pip-audit, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+          pip install pip-audit
+          pip-audit -r requirements-lock.txt --desc
+
+  bandit:
+    name: Static security scan (bandit, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install bandit
+          # app/ only: tests carry synthetic secrets/payloads by design.
+          bandit -r app -ll
+
+  types:
+    name: Type check (mypy, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+          pip install mypy
+          mypy app --ignore-missing-imports --no-error-summary || true
+
+  secret-scan:
+    name: Secret scan (gitleaks, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-lint:
+    name: Dockerfile lint (hadolint, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: docker/Dockerfile
+      - uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: docker/Dockerfile.sandbox

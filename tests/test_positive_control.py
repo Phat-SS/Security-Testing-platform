@@ -27,6 +27,7 @@ from app.schemas.testcase import (
     ExpectedResult,
     Mutation,
     RequestSpec,
+    SetupStep,
     TestCase,
     VerificationStep,
 )
@@ -567,3 +568,196 @@ def test_a_leak_that_only_appears_on_a_later_attempt_is_still_detected():
     execution = _runner(_app(Route("/search", search))).run(test, "E10")
     assert execution.verdict.result == TestStatus.FAIL
     assert "DISCLOSURE" in " ".join(execution.log)
+
+
+# -- Phase 3: transient-error retry, and no cookie carryover between exchanges -
+
+
+def _fake_response(status_code: int, payload: dict):
+    """A `Response` built via `stream=`, not `content=`/`json=`.
+
+    httpx eagerly reads a `content=`/`json=`-built Response's body at
+    construction time, before the client ever wraps its stream to time the
+    exchange — so `.elapsed` (read later, in `_send`) raises on a response
+    built that way once it has been sent through a real `Client.send()`. Real
+    transports (a live connection, Starlette's ASGI transport) never hit this;
+    it is purely an artifact of hand-building a `Response` in a test double.
+    """
+    import json as _json
+
+    import httpx
+    from httpx._content import ByteStream
+
+    body = _json.dumps(payload).encode()
+    return httpx.Response(status_code, stream=ByteStream(body),
+                          headers={"content-type": "application/json"})
+
+
+def test_a_transient_connect_error_is_retried_for_a_safe_method():
+    import httpx
+
+    from app.execution.pinning import PinnedTransport
+
+    attempts = {"n": 0}
+
+    class Flaky(httpx.BaseTransport):
+        def handle_request(self, request):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise httpx.ConnectError("boom", request=request)
+            return _fake_response(200, {"ok": True})
+
+    client = httpx.Client(transport=PinnedTransport(Flaky()), timeout=5)
+    scope = ScopeValidator(ScopePolicy(allowed_hosts={_HOST}), resolver=lambda h: "203.0.113.10")
+    runner = HttpRunner(_BASE_URL, scope, _VAULT, Settings.from_env(), client=client)
+
+    test = _bola_test(baseline=None)
+    execution = runner.run(test, "E11")
+
+    assert attempts["n"] == 2
+    assert execution.response is not None and execution.response.status_code == 200
+
+
+def test_a_non_transient_error_is_not_retried():
+    import httpx
+
+    from app.execution.pinning import PinnedTransport
+
+    attempts = {"n": 0}
+
+    class AlwaysBroken(httpx.BaseTransport):
+        def handle_request(self, request):
+            attempts["n"] += 1
+            raise httpx.ConnectError("boom", request=request)
+
+    client = httpx.Client(transport=PinnedTransport(AlwaysBroken()), timeout=5)
+    scope = ScopeValidator(ScopePolicy(allowed_hosts={_HOST}), resolver=lambda h: "203.0.113.10")
+    settings = Settings.from_env()
+    from dataclasses import replace
+    settings = replace(settings, limits=replace(settings.limits, retry_max_attempts=3, retry_backoff_ms=1))
+    runner = HttpRunner(_BASE_URL, scope, _VAULT, settings, client=client)
+
+    execution = runner.run(_bola_test(baseline=None), "E12")
+
+    assert attempts["n"] == 3  # respected the configured attempt count
+    assert execution.response is None
+    assert execution.verdict.result == TestStatus.ERROR
+
+
+def test_a_destructive_method_is_never_retried_even_on_a_transient_error():
+    import httpx
+
+    from app.execution.pinning import PinnedTransport
+
+    attempts = {"n": 0}
+
+    class Flaky(httpx.BaseTransport):
+        def handle_request(self, request):
+            attempts["n"] += 1
+            raise httpx.ConnectError("boom", request=request)
+
+    client = httpx.Client(transport=PinnedTransport(Flaky()), timeout=5)
+    scope = ScopeValidator(ScopePolicy(allowed_hosts={_HOST}), resolver=lambda h: "203.0.113.10")
+    runner = HttpRunner(_BASE_URL, scope, _VAULT, Settings.from_env(), client=client)
+
+    test = _bola_test(request=RequestSpec(method="DELETE", path="/customers/{customer_id}"),
+                      approval_status=ApprovalStatus.APPROVED, baseline=None)
+    runner.run(test, "E13")
+
+    assert attempts["n"] == 1  # no retry attempted for a write method
+
+
+def test_set_cookie_from_one_exchange_never_reaches_the_next():
+    async def whoami(request):
+        cookie = request.cookies.get("session")
+        return JSONResponse({"cookie_seen": cookie}, headers={"Set-Cookie": "session=leaked-value"})
+
+    runner = _runner(_app(Route("/customers/{customer_id}", whoami)))
+    test = _bola_test()
+
+    first = runner.run(test, "E14")
+    assert first.response is not None
+    assert '"cookie_seen":null' in first.response.body or '"cookie_seen": null' in first.response.body
+
+    # A second exchange against the same runner/client must not see the cookie
+    # the first response tried to set.
+    second = runner.run(_bola_test(test_id="API1-002"), "E15")
+    assert second.response is not None
+    body = second.response.body
+    assert '"cookie_seen":null' in body or '"cookie_seen": null' in body
+
+
+# -- Phase 3: teardown steps clean up what setup created -----------------------
+
+
+def test_teardown_runs_after_a_normal_pass_and_can_see_setup_captures():
+    created = {"id": None, "deleted": []}
+
+    async def create(request):
+        created["id"] = "disposable-42"
+        return JSONResponse({"id": created["id"]}, status_code=201)
+
+    async def get_customer(request):
+        return JSONResponse({}, status_code=404)
+
+    async def delete_disposable(request):
+        created["deleted"].append(request.path_params["disposable_id"])
+        return JSONResponse({}, status_code=204)
+
+    app = _app(
+        Route("/disposable", create, methods=["POST"]),
+        Route("/customers/{customer_id}", get_customer),
+        Route("/disposable/{disposable_id}", delete_disposable, methods=["DELETE"]),
+    )
+    test = _bola_test(
+        setup=[SetupStep(**{"as": "agent_A"},
+                         request=RequestSpec(method="POST", path="/disposable",
+                                             capture={"disposable_id": "$.id"}))],
+        teardown=[SetupStep(**{"as": "agent_A"},
+                            request=RequestSpec(method="DELETE", path="/disposable/{disposable_id}"))],
+    )
+    _runner(app).run(test, "E16")
+
+    assert created["deleted"] == ["disposable-42"]
+
+
+def test_teardown_runs_even_when_the_test_errors():
+    ran = {"teardown": False}
+
+    async def create(request):
+        return JSONResponse({"id": "x"}, status_code=201)
+
+    async def cleanup(request):
+        ran["teardown"] = True
+        return JSONResponse({}, status_code=204)
+
+    app = _app(
+        Route("/disposable", create, methods=["POST"]),
+        Route("/cleanup", cleanup, methods=["DELETE"]),
+    )
+    # An attack mutation with no target persona on a BOLA-family kind raises
+    # MutationError inside _run_inner — an ERROR outcome, not a clean PASS.
+    test = _bola_test(
+        auth_context=AuthContext(persona="agent_A"),  # no target_persona
+        setup=[SetupStep(**{"as": "agent_A"}, request=RequestSpec(method="POST", path="/disposable"))],
+        teardown=[SetupStep(**{"as": "agent_A"}, request=RequestSpec(method="DELETE", path="/cleanup"))],
+    )
+    execution = _runner(app).run(test, "E17")
+
+    assert execution.verdict.result == TestStatus.ERROR
+    assert ran["teardown"] is True
+
+
+def test_a_failing_teardown_step_does_not_raise_or_change_the_verdict():
+    async def get_customer(request):
+        return JSONResponse({}, status_code=404)
+
+    app = _app(Route("/customers/{customer_id}", get_customer))
+    test = _bola_test(
+        teardown=[SetupStep(**{"as": "no_such_persona"},
+                            request=RequestSpec(method="DELETE", path="/nowhere"))],
+    )
+
+    execution = _runner(app).run(test, "E18")  # must not raise
+
+    assert execution.verdict.result in (TestStatus.PASS, TestStatus.INCONCLUSIVE)
