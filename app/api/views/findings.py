@@ -92,10 +92,11 @@ def findings_page(
     for _aid, _key, finding in searched:
         counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
 
+    current = ' aria-current="page"'
     chips = "".join(
         f'<a class="seg-b{" none" if not counts.get(name) else ""}" '
         f'href="{_findings_url(q, "" if sev == name else name, show_fp)}"'
-        f'{" aria-current=\"page\"" if sev == name else ""}>'
+        f'{current if sev == name else ""}>'
         f"{e(_t(name.title()))} <b>{counts.get(name, 0)}</b></a>"
         for name in _SEV_ORDER
     )
@@ -103,7 +104,7 @@ def findings_page(
     fp_toggle = (
         f'<a class="seg-b{" none" if not fp_total else ""}" '
         f'href="{_findings_url(q, sev, not show_fp)}"'
-        f'{" aria-current=\"page\"" if show_fp else ""}>'
+        f'{current if show_fp else ""}>'
         f"{e(_t('Show False Positives'))} <b>{fp_total}</b></a>"
     )
 

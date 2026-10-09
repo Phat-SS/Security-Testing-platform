@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -113,15 +114,21 @@ async def mcp_jira_refresh_token_route(user: User = Depends(require("tester"))):
 
     started_at = time.time()
     mcp_auth_dir = Path.home() / ".mcp-auth"
+    # No shell: an argv list reaches npx with the URL as one argument, so a
+    # quote or metacharacter in JIRA_MCP_URL cannot become a second command.
+    # On Windows the .cmd shim still runs (CreateProcess hands it to cmd), and
+    # cmd would still interpret metacharacters inside an argument, so the URL
+    # is held to plain https URL characters first.
+    if not re.fullmatch(r"https://[A-Za-z0-9._~:/?#\[\]@=+-]+", mcp_url):
+        return RedirectResponse(
+            "/config?tab=advanced&error=" + quote(
+                "JIRA_MCP_URL must be a plain https:// URL.", safe=""),
+            status_code=303,
+        )
     try:
-        # shell=True is deliberate here, not a shortcut: Windows cannot exec a
-        # .cmd shim (npx) via CreateProcess without going through the shell,
-        # and both interpolated values are the operator's own server-side
-        # config (JIRA_MCP_URL from .env, npx resolved from PATH) — never
-        # request-supplied — so there is nothing here for a caller to inject.
         proc = subprocess.Popen(
-            f'"{npx}" -y mcp-remote "{mcp_url}"',
-            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            [npx, "-y", "mcp-remote", mcp_url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
         return RedirectResponse(

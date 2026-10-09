@@ -429,7 +429,13 @@ def update_dotenv_values(
 
     # Anchored per line, and the '=' is required: a `#  KEY  some prose`
     # comment describing the key is documentation, not a line to overwrite.
-    text = Path(path).read_text(encoding="utf-8") if os.path.exists(path) else ""
+    # newline="" on both ends: a universal-newline read turns CRLF into LF, so
+    # the CRLF check below never matched and only Windows' write-side
+    # translation happened to put it back.
+    text = ""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8", newline="") as fh:
+            text = fh.read()
     newline = "\r\n" if "\r\n" in text else "\n"
     out: list[str] = []
     written: set[str] = set()
@@ -453,7 +459,7 @@ def update_dotenv_values(
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
-    temporary.write_text(newline.join(out) + newline, encoding="utf-8")
+    temporary.write_text(newline.join(out) + newline, encoding="utf-8", newline="")
     try:
         os.chmod(temporary, 0o600)  # holds tokens; no-op on Windows ACLs
     except OSError:
