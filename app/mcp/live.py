@@ -163,7 +163,7 @@ class LiveJiraMCPClient:
         "Server returned an error response" — the status code, the only part an
         operator can act on, never reaches us. An expired token and an
         unreachable server therefore read identically, and the banner sends
-        people to press "Refresh token" over and over for what may not be a
+        people to press "Refresh Token" over and over for what may not be a
         token problem at all. One extra request on the failure path buys the
         real answer.
         """
@@ -172,7 +172,7 @@ class LiveJiraMCPClient:
             return exc
         hint = {
             401: "JIRA_MCP_TOKEN is expired or rejected — Atlassian's MCP tokens "
-                 "last about an hour; press \"Refresh token\" on Config → MCP",
+                 "last about an hour; press \"Refresh Token\" in Settings → Jira Connector",
             403: "the token authenticates but is not allowed here — check its "
                  "scopes (read:jira-work / write:jira-work) and site access",
             404: f"no MCP endpoint at {self._url} — check JIRA_MCP_URL",

@@ -56,10 +56,12 @@ async def execute(aid: str, environment: str = Form(""), include_destructive: bo
         return RedirectResponse(f"/assessment/{aid}?flash=Execution+disabled:+no+engagement+configured",
                                 status_code=303)
     # Adaptive follow-ups are generated and run without a human reading them,
-    # so the destructive exclusion is inherited from this run's setting rather
-    # than being independently switchable: a tester who kept write probes out
-    # of a reviewed plan did not thereby consent to unreviewed ones.
-    budget = AdaptiveBudget(allow_destructive=include_destructive) if adaptive else None
+    # and the planner that writes them has just read the target's own response
+    # body — attacker-controlled text. So an unattended follow-up is never a
+    # write, whatever this run allows: approving destructive tests a human READ
+    # is not consent to destructive tests nobody read, and a hostile response
+    # must not be able to steer the loop into one.
+    budget = AdaptiveBudget(allow_destructive=False) if adaptive else None
     job, created = create_operation_job(aid, "execute", idempotency_key)
     if not created:
         # The same Idempotency-Key twice is a resubmit, not a second run. Send

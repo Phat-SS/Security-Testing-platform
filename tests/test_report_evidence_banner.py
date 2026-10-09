@@ -30,7 +30,7 @@ def _report(chain_ok) -> str:
 
 def test_verified_chain_shows_positive_banner():
     html = _report(True)
-    assert "Evidence chain verified" in html
+    assert "Evidence Chain Verified" in html
     assert "FAILED" not in html
 
 
@@ -43,7 +43,7 @@ def test_unchecked_chain_shows_no_banner_at_all():
     # None means "not checked", not "checked and failed" — must not print
     # either the verified or the failed banner.
     html = _report(None)
-    assert "Evidence chain verified" not in html
+    assert "Evidence Chain Verified" not in html
     assert "FAILED" not in html
 
 
@@ -51,4 +51,4 @@ def test_no_executions_shows_no_banner_regardless_of_flag():
     html = render_report(title="t", target="http://x", tests={}, executions=[], findings=[],
                          evidence_chain_ok=False)
     assert "FAILED" not in html
-    assert "Evidence chain verified" not in html
+    assert "Evidence Chain Verified" not in html

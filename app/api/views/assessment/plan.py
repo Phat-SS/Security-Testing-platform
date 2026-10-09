@@ -93,9 +93,9 @@ def _design_section(aid: str, detected_poc: str, has_tests: bool, opened: bool,
         "Aggressive generates several times more tests. Nothing runs until you approve "
         "it, so the cost is review time, not risk."
     )
-    generate_label = _t("Regenerate test plan") if has_tests else _t("Generate test plan")
+    generate_label = _t("Regenerate Test Plan") if has_tests else _t("Generate Test Plan")
     return ui.section(
-        "s-design", "", _t("Design test plan"), f"""
+        "s-design", "", _t("Design Test Plan"), f"""
 <div class="tabbar" role="tablist" aria-label="Proof-of-concept format">
 <button class="active" role="tab" aria-selected="true" data-tab="t-py-{attr(aid)}">{_t("Python PoC")}</button>
 <button role="tab" aria-selected="false" data-tab="t-pm-{attr(aid)}">Postman</button>
@@ -112,28 +112,28 @@ def _design_section(aid: str, detected_poc: str, has_tests: bool, opened: bool,
  placeholder="import requests&#10;requests.get(BASE + '/customers/2002', ...)">{e(detected_poc)}</textarea></label>
 </div>
 <div class="tabpane" id="t-pm-{attr(aid)}">
-<label class="field"><span>{_t("Postman collection (v2.1) JSON")}</span>
+<label class="field"><span>{_t("Postman Collection (v2.1) JSON")}</span>
 <textarea name="poc_postman" rows="5" class="mono" placeholder="Paste exported collection JSON"></textarea></label>
 </div>
 <div class="tabpane" id="t-burp-{attr(aid)}">
-<label class="field"><span>{_t("Burp Suite XML export")}</span>
+<label class="field"><span>{_t("Burp Suite XML Export")}</span>
 <textarea name="burp_xml" rows="5" class="mono" placeholder="Paste raw-HTTP XML export"></textarea></label>
 </div>
 <div class="tabpane" id="t-jm-{attr(aid)}">
-<label class="field"><span>{_t("JMeter .jmx test plan")}</span>
+<label class="field"><span>{_t("JMeter .jmx Test Plan")}</span>
 <textarea name="jmeter_xml" rows="5" class="mono" placeholder="Paste .jmx XML"></textarea></label>
 </div>
-<label class="field" style="margin-top:12px;max-width:520px"><span>{_t("Test depth")}</span>
+<label class="field" style="margin-top:12px;max-width:520px"><span>{_t("Test Depth")}</span>
 <select name="depth">
-<option value="standard" selected>{_t("Standard — the highest-value probe per applicable category")}</option>
-<option value="aggressive">{_t("Aggressive — full variant matrix (every id placement, whole JWT suite, race windows)")}</option>
+<option value="standard" selected>{_t("Standard — Highest-Value Probe per Category")}</option>
+<option value="aggressive">{_t("Aggressive — Full Variant Matrix (Every ID Placement, JWT Suite, Race Windows, Injection)")}</option>
 </select></label>
 <p class="muted" style="margin:6px 0 0">{depth_note}</p>
 <div style="margin-top:12px"><button class="btn">
 {generate_label}</button></div>
 </form>
 </div>""",
-        summary=_t("PoC import + depth"),
+        summary=_t("PoC Import + Depth"),
         open=opened,
         tip=_t(
             "A PoC is transpiled into declarative test cases — the code itself is never "
@@ -145,7 +145,7 @@ def _design_section(aid: str, detected_poc: str, has_tests: bool, opened: bool,
 # -- 3. coverage ------------------------------------------------------------
 
 
-_REVIEW_TONE = {"APPROVE": "low", "REVISE": "med", "INSUFFICIENT": "crit"}
+_REVIEW_TONE = {"APPROVE": "ok", "REVISE": "med", "INSUFFICIENT": "crit"}
 
 
 def _review_panel(aid: str, review, has_tests: bool) -> str:
@@ -171,7 +171,7 @@ def _review_panel(aid: str, review, has_tests: bool) -> str:
             f"<span class='muted'>{not_reviewed_note}</span></p>"
             f"<form method='post' action='/assessment/{attr(aid)}/agent-plan' "
             "class='js-busy' style='margin:0'>"
-            f"<button class='btn sec'>{_t('Review this plan')}</button></form></div>"
+            f"<button class='btn sec'>{_t('Review This Plan')}</button></form></div>"
         )
 
     tone = _REVIEW_TONE.get(review.verdict, "info")
@@ -180,7 +180,7 @@ def _review_panel(aid: str, review, has_tests: bool) -> str:
         f"<li><b>{_t(g.severity)}</b> &mdash; {e(g.label())}</li>" for g in unresolved
     )
     gaps_html = (
-        f"<div class='glabel' style='margin-top:10px'>{_t('Still not covered')}"
+        f"<div class='glabel' style='margin-top:10px'>{_t('Still Not Covered')}"
         f"{info(TIP['gap'], _t('Gaps'))}</div>"
         f"<ul style='margin:4px 0 0;padding-left:18px' class='muted'>{gap_items}</ul>"
         if gap_items else ""
@@ -198,7 +198,7 @@ def _review_panel(aid: str, review, has_tests: bool) -> str:
         f"<p class='muted' style='margin:6px 0 0'>&#9888; {e(review.degraded_reason)}</p>"
         if review.degraded_reason else ""
     )
-    who = _t("AI reviewer") if review.reviewer == "ai" else _t("structural review (no AI)")
+    who = _t("AI Reviewer") if review.reviewer == "ai" else _t("structural review (no AI)")
     review_meta = _t(
         "Coverage {cov}% · decidable {qual}% · reviewed by {who} · {n} test(s) reviewed"
     ).format(cov=review.coverage_score, qual=review.quality_score, who=e(who),
@@ -210,7 +210,7 @@ def _review_panel(aid: str, review, has_tests: bool) -> str:
         for d in digest
     )
     digest_html = (
-        f"<div class='glabel' style='margin-top:10px'>{_t('What the ticket requires')}"
+        f"<div class='glabel' style='margin-top:10px'>{_t('What the Ticket Requires')}"
         f"{info(TIP['req_digest'], _t('Requirements'))}</div>"
         f"<ul style='margin:4px 0 0;padding-left:18px'>{digest_items}</ul>"
         if digest_items else ""
@@ -225,9 +225,15 @@ def _review_panel(aid: str, review, has_tests: bool) -> str:
         f"{added}{degraded}{gaps_html}"
         f"<form method='post' action='/assessment/{attr(aid)}/agent-plan' class='js-busy' "
         f"style='margin:10px 0 0'>"
-        f"<button class='btn ghost'>&#8635; {_t('Review again')}</button></form>"
+        f"<button class='btn ghost'>&#8635; {_t('Review Again')}</button></form>"
         f"</div>"
     )
+
+
+VI.update({
+    "Edit Request": "Sửa Request", "Approve": "Duyệt", "Reject": "Từ Chối",
+    "Reset to Pending": "Đưa Về Chờ Duyệt",
+})
 
 
 VI.update({
@@ -249,33 +255,32 @@ VI.update({
     "it, so the cost is review time, not risk.":
         "Nâng cao tạo ra nhiều test hơn hẳn. Không có gì chạy cho tới khi bạn duyệt, "
         "nên cái giá phải trả là thời gian xem lại, không phải rủi ro.",
-    "Regenerate test plan": "Tạo lại kế hoạch test", "Generate test plan": "Tạo kế hoạch test",
-    "Design test plan": "Thiết kế kế hoạch test",
+    "Regenerate Test Plan": "Tạo Lại Kế Hoạch Test", "Generate Test Plan": "Tạo Kế Hoạch Test",
+    "Design Test Plan": "Thiết Kế Kế Hoạch Test",
     "Python PoC": "Python PoC",
-    "Postman collection (v2.1) JSON": "Postman collection (v2.1) JSON",
-    "Burp Suite XML export": "Burp Suite XML export",
-    "JMeter .jmx test plan": "JMeter .jmx test plan",
-    "Test depth": "Độ sâu test",
-    "Standard — the highest-value probe per applicable category":
-        "Tiêu chuẩn — phép thử giá trị cao nhất cho mỗi danh mục áp dụng được",
-    "Aggressive — full variant matrix (every id placement, whole JWT suite, race windows)":
-        "Nâng cao — ma trận biến thể đầy đủ (mọi vị trí id, toàn bộ JWT suite, race window)",
-    "PoC import + depth": "Nhập PoC + độ sâu",
+    "Postman Collection (v2.1) JSON": "Postman Collection (v2.1) JSON",
+    "Burp Suite XML Export": "Burp Suite XML Export",
+    "JMeter .jmx Test Plan": "JMeter .jmx Test Plan",
+    "Test Depth": "Độ Sâu Test",
+    "Standard — Highest-Value Probe per Category":
+        "Tiêu Chuẩn — Phép Thử Giá Trị Cao Nhất Cho Mỗi Danh Mục Áp Dụng Được",
+    "Aggressive — Full Variant Matrix (Every ID Placement, JWT Suite, Race Windows, Injection)":
+        "Nâng Cao — Ma Trận Biến Thể Đầy Đủ (Mọi Vị Trí ID, Toàn Bộ JWT Suite, Race Window)",
+    "PoC Import + Depth": "Nhập PoC + Độ Sâu",
     "A PoC is transpiled into declarative test cases — the code itself is never "
     "run. Leave every box empty to generate from the rules alone.":
         "Một PoC được chuyển đổi thành các test case khai báo — bản thân code không "
         "bao giờ được chạy. Để trống mọi ô để tạo chỉ từ rule engine.",
-    "{n} test(s) →": "{n} test →",
+    "{n} Test(s) →": "{n} Test →",
     "{pct}% of this category comes from the imported PoC":
-        "{pct}% của danh mục này đến từ PoC đã nhập",
-    "{existing} PoC · {generated} gen": "{existing} PoC · {generated} gen",
-    "Category": "Danh mục", "From PoC": "Từ PoC",
+        "{pct}% Của Danh Mục Này Đến Từ PoC Đã Nhập",
+    "{existing} PoC · {generated} gen": "{existing} PoC · {generated} Gen",
+    "Category": "Danh Mục", "From PoC": "Từ PoC",
     "Generate a plan to compute coverage.": "Tạo kế hoạch để tính độ phủ.",
-    "Show {n} category(ies) the analyzer judged not applicable":
-        "Hiện {n} danh mục mà bộ phân tích cho là không áp dụng",
-    "{n} applicable · {c} covered": "{n} áp dụng được · {c} đã phủ",
+    "Show {n} Not-Applicable Category(ies)": "Hiện {n} Danh Mục Mà Bộ Phân Tích Cho Là Không Áp Dụng",
+    "{n} Applicable · {c} Covered": "{n} Áp Dụng Được · {c} Đã Phủ",
     "not computed yet": "chưa tính",
-    "OWASP Coverage": "Độ phủ OWASP",
+    "OWASP Coverage": "Độ Phủ OWASP",
     "What this ticket needs tested, versus what the plan actually tests. The "
     "point of the tool is the gap between those two.":
         "Những gì ticket này cần được test, so với những gì kế hoạch thực sự test. "
@@ -287,18 +292,18 @@ VI.update({
         "Agent đánh giá đọc yêu cầu của ticket đối chiếu với kế hoạch và nêu ra những "
         "gì còn thiếu, sau đó yêu cầu planner lấp các lỗ hổng. Nó thêm test; không bao "
         "giờ tự duyệt test nào.",
-    "Review this plan": "Đánh giá kế hoạch này",
-    "Still not covered": "Vẫn chưa phủ", "Gaps": "Lỗ hổng",
-    "What the ticket requires": "Yêu cầu của ticket", "Expect": "Kỳ vọng",
+    "Review This Plan": "Đánh Giá Kế Hoạch Này",
+    "Still Not Covered": "Vẫn Chưa Phủ", "Gaps": "Lỗ Hổng",
+    "What the Ticket Requires": "Yêu Cầu Của Ticket", "Expect": "Kỳ Vọng",
     "{n} test(s) were added to close gaps found at review time, over {rounds} "
     "revision round(s). They are PENDING like every other test.":
         "{n} test đã được thêm để lấp các lỗ hổng phát hiện lúc đánh giá, qua {rounds} "
         "vòng chỉnh sửa. Chúng ở trạng thái PENDING như mọi test khác.",
-    "AI reviewer": "AI reviewer", "structural review (no AI)": "đánh giá cấu trúc (không AI)",
+    "AI Reviewer": "AI Reviewer", "structural review (no AI)": "đánh giá cấu trúc (không AI)",
     "Coverage {cov}% · decidable {qual}% · reviewed by {who} · {n} test(s) reviewed":
         "Độ phủ {cov}% · có thể quyết {qual}% · người đánh giá {who} · đã xem {n} test",
-    "Review again": "Đánh giá lại",
-    "Test plan & approval": "Kế hoạch test & duyệt",
+    "Review Again": "Đánh Giá Lại",
+    "Test Plan & Approval": "Kế Hoạch Test & Duyệt",
     "No tests yet. Generate a plan above — or add the endpoint it should be built "
     "against under Scope first.":
         "Chưa có test nào. Tạo kế hoạch ở trên — hoặc thêm endpoint cần dựng test "
@@ -325,7 +330,7 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
             "against under Scope first."
         )
         return ui.section(
-            "s-plan", "", _t("Test plan & approval"),
+            "s-plan", "", _t("Test Plan & Approval"),
             f"<p class='muted' style='margin:0'>{no_tests_note}</p>",
             summary=_t("nothing to approve"), open=opened,
         )
@@ -351,8 +356,12 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
             f'<td class="mono muted"><span class="trunc" data-tip="{attr(endpoint)}">'
             f'{e(endpoint)}</span></td>'
             f'<td class="mono muted">{e(t.attack_mutation.kind)}</td>'
-            f'<td class="rowact"><a class="btn sec" style="padding:4px 10px" '
-            f'href="/assessment/{attr(aid)}/test/{attr(t.test_id)}">{_t("Edit")}</a></td></tr>'
+            f'<td class="rowact">' + ui.action_menu([
+                ui.Item(_t("Edit Request"), href=f"/assessment/{aid}/test/{t.test_id}"),
+                ui.Item(_t("Approve"), form_ref=f"ra-approve-{t.test_id}"),
+                ui.Item(_t("Reject"), form_ref=f"ra-reject-{t.test_id}"),
+                ui.Item(_t("Reset to Pending"), form_ref=f"ra-reset-{t.test_id}"),
+            ], _t("Actions for {name}").format(name=t.test_id)) + '</td></tr>'
             # The expanded row answers "what does this test actually do?" without
             # a round-trip to the detail page and back for every row reviewed.
             f'<tr class="tdet" id="{attr(detail_id)}" hidden><td></td><td colspan="7">'
@@ -362,7 +371,7 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
             f'<span class="mono">{e(t.auth_context.persona)}'
             f'{" &rarr; " + e(t.auth_context.target_persona) if t.auth_context.target_persona else ""}'
             f'</span></div>'
-            f'<div><div class="glabel" style="margin:0">{_t("Expected status")}</div>'
+            f'<div><div class="glabel" style="margin:0">{_t("Expected Status")}</div>'
             f'<span class="mono">{e(", ".join(str(s) for s in t.expected.status_in))}</span></div>'
             f'<div><div class="glabel" style="margin:0">{_t("Source")}</div>'
             f'<span class="mono">{e(t.source.value)}'
@@ -386,6 +395,15 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
         cls="compact",
     )
 
+    # One tiny form per row action, OUTSIDE the bulk form, that the row's menu
+    # buttons submit through `form=`. Nesting them inside #plan-form would make
+    # the browser drop the inner form and submit every checked row instead.
+    row_forms = "".join(
+        f'<form method="post" action="/assessment/{attr(aid)}/plan" id="ra-{act}-{attr(t.test_id)}" hidden>'
+        f'<input type="hidden" name="action" value="{act}">'
+        f'<input type="hidden" name="test_ids" value="{attr(t.test_id)}"></form>'
+        for t in tests for act in ("approve", "reject", "reset")
+    )
     body = f"""{_review_panel(aid, review, True)}
 {_plan_toolbar(aid, filters, facets, total, unfiltered, page, pages)}
 <form method="post" action="/assessment/{attr(aid)}/plan" id="plan-form">
@@ -394,13 +412,14 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
 {table}
 {_pager(aid, filters, page, pages, per, total)}
 </form>
+{row_forms}
 {_PLAN_JS}"""
 
     approved = int(meta.get("approved", 0))
     pending = int(meta.get("pending", 0))
-    summary = _t("{approved} of {total} approved").format(approved=approved, total=unfiltered)
+    summary = _t("{approved} of {total} Approved").format(approved=approved, total=unfiltered)
     if review is not None:
-        summary = _t("review: {verdict} · ").format(verdict=review.verdict) + summary
+        summary = _t("Review: {verdict} · ").format(verdict=review.verdict) + summary
     if pending:
         summary += " · " + _t("{n} pending").format(n=pending)
     if filtered:
@@ -411,7 +430,7 @@ def _plan_section(aid: str, plan: dict, filters: dict, opened: bool, review=None
         # endpoint list is a number that means less than it looks like.
         summary += " · " + _t("plan is stale")
     return ui.section(
-        "s-plan", "", _t("Test plan & approval"), body,
+        "s-plan", "", _t("Test Plan & Approval"), body,
         summary=summary,
         open=opened,
         tip=_t(
@@ -441,18 +460,18 @@ def _facet_options(facet: dict, blank: str, pretty=None) -> list[tuple[str, str]
     option that matches nothing is a dead end the tester has to discover."""
     out = [("", blank)]
     for value in sorted(facet):
-        text = pretty(value) if pretty else value
+        text = pretty(value) if pretty else ui.titleize(value)
         out.append((value, f"{text} ({facet[value]})"))
     return out
 
 
 def _plan_toolbar(aid: str, filters: dict, facets: dict, total: int, unfiltered: int,
                   page: int, pages: int) -> str:
-    cat = _facet_options(facets.get("cat") or {}, _t("All categories"),
+    cat = _facet_options(facets.get("cat") or {}, _t("All Categories"),
                          lambda v: v.split(":")[0])
-    sev = _facet_options(facets.get("sev") or {}, _t("Any severity"))
-    appr = _facet_options(facets.get("appr") or {}, _t("Any approval"))
-    src = _facet_options(facets.get("src") or {}, _t("Any source"))
+    sev = _facet_options(facets.get("sev") or {}, _t("Any Severity"))
+    appr = _facet_options(facets.get("appr") or {}, _t("Any Approval"))
+    src = _facet_options(facets.get("src") or {}, _t("Any Source"))
     count = (_t("{n} of {total} tests").format(n=total, total=unfiltered)
              if total != unfiltered else _t("{n} tests").format(n=unfiltered))
     if pages > 1:
@@ -464,13 +483,13 @@ def _plan_toolbar(aid: str, filters: dict, facets: dict, total: int, unfiltered:
 {_select("cat", filters.get("cat", ""), cat, "OWASP")}
 {_select("sev", filters.get("sev", ""), sev, _t("Severity"))}
 {_select("appr", filters.get("appr", ""), appr, _t("Approval"))}
-{_select("dest", filters.get("dest", ""), [("", _t("All")), ("yes", _t("Write only")), ("no", _t("Read only"))],
+{_select("dest", filters.get("dest", ""), [("", _t("All")), ("yes", _t("Write Only")), ("no", _t("Read Only"))],
          _t("Destructive"))}
 {_select("src", filters.get("src", ""), src, _t("Source"))}
 {_select("sort", filters.get("sort", "id") or "id",
-         [("id", _t("Generation order")), ("sev", _t("Severity")), ("cat", _t("Category")),
+         [("id", _t("Generation Order")), ("sev", _t("Severity")), ("cat", _t("Category")),
           ("appr", _t("Approval")), ("endpoint", _t("Endpoint"))], _t("Sort"))}
-{_select("per", str(filters.get("per", 25)), [(str(n), str(n)) for n in _PER_CHOICES], _t("Per page"))}
+{_select("per", str(filters.get("per", 25)), [(str(n), str(n)) for n in _PER_CHOICES], _t("Per Page"))}
 <div class="row" style="gap:6px;align-items:flex-end">
 <button class="btn sec">{_t("Apply")}</button>
 <a class="btn ghost" href="/assessment/{attr(aid)}?phase=plan">{_t("Clear")}</a>
@@ -490,12 +509,12 @@ def _plan_hidden_filters(filters: dict, page: int) -> str:
 
 
 def _plan_selbar(total: int, filtered: bool) -> str:
-    scope = _t("matching this filter") if filtered else _t("in the plan")
+    scope = _t("Matching This Filter") if filtered else _t("in the Plan")
     reset_tip = _t(
         "Back to PENDING. Withdrawing an approval is a thing you can do; unchecking a "
         "box never was — the handler only ever read the boxes that were ticked."
     )
-    apply_label = _t("apply to all {n} {scope}, not just the page").format(n=total, scope=e(scope))
+    apply_label = _t("Apply to All {n} {scope}, Not Just the Page").format(n=total, scope=e(scope))
     return f"""<div class="selbar off" id="selbar" aria-live="polite">
 <b><span id="selcount">0</span> {_t("selected")}</b>
 <button class="btn" name="action" value="approve" style="padding:5px 12px">{_t("Approve")}</button>
@@ -539,7 +558,7 @@ def _pager(aid: str, filters: dict, page: int, pages: int, per: int, total: int)
     if page < pages:
         out.append(link(page + 1, "›"))
     return (f'<div class="pager">{"".join(out)}'
-            f'<span class="count" style="margin-left:10px">{_t("{n} test(s)").format(n=total)}</span></div>')
+            f'<span class="count" style="margin-left:10px">{_t("{n} Test(s)").format(n=total)}</span></div>')
 
 
 _PLAN_JS = """

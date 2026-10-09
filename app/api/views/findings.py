@@ -19,9 +19,9 @@ from .shell import _SEV_CLASS, appbar, page
 _SEV_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 
 _DECISION_SOURCE_LABEL = {
-    "sealed_runner": ("runner-sealed", "low"),
-    "measured": ("measured", "low"),
-    "ai_consensus": ("AI-adjudicated", "med"),
+    "sealed_runner": ("Runner-Sealed", "ok"),
+    "measured": ("measured", "ok"),
+    "ai_consensus": ("AI-Adjudicated", "med"),
 }
 
 
@@ -45,7 +45,7 @@ def _row(assessment_id: str, issue_key: str, finding, triage: dict | None) -> st
     severity = finding.severity.value
     endpoint = getattr(finding, "endpoint", "") or ""
     is_fp = bool(triage) and triage.get("status") == "false_positive"
-    fp_badge = f" {ui.pill(_t('False positive'), 'med')}" if is_fp else ""
+    fp_badge = f" {ui.pill(_t('False Positive'), 'med')}" if is_fp else ""
     row_style = ' style="opacity:.55"' if is_fp else ""
     return (
         f"<tr{row_style}><td><span class='pill {_SEV_CLASS.get(severity, 'info')}'>{e(severity)}</span></td>"
@@ -104,7 +104,7 @@ def findings_page(
         f'<a class="seg-b{" none" if not fp_total else ""}" '
         f'href="{_findings_url(q, sev, not show_fp)}"'
         f'{" aria-current=\"page\"" if show_fp else ""}>'
-        f"{e(_t('Show false positives'))} <b>{fp_total}</b></a>"
+        f"{e(_t('Show False Positives'))} <b>{fp_total}</b></a>"
     )
 
     # Severity first, then the order they came back in — which is newest
@@ -122,17 +122,27 @@ def findings_page(
         empty=_t("No confirmed findings on this engagement yet.")
         if not rows else _t("No findings match this filter."),
     )
-    search_box = f"""<form method="get" action="/findings" role="search"
- aria-label="{attr(_t('Search findings'))}" style="margin-bottom:10px">
+    # The same search + facet bar the assessment list uses, so the two lists
+    # read as one product. The facets were rendered without their `.seg`
+    # wrapper before, which is why they showed as bare links.
+    reset = (f'<a class="f-x" href="{_findings_url("", sev, show_fp)}" '
+             f'aria-label="{attr(_t("Clear Search"))}">{ui.icon("x", 14)}</a>' if q else "")
+    toolbar = f"""<form method="get" action="/findings" class="filters" role="search"
+ aria-label="{attr(_t('Search Findings'))}">
 {f'<input type="hidden" name="sev" value="{attr(sev)}">' if sev else ''}
 {'<input type="hidden" name="fp" value="1">' if show_fp else ''}
-<input type="text" name="q" value="{attr(q)}"
- placeholder="{attr(_t('Search title or endpoint…'))}" style="width:260px">
+<div class="f-top">
+<div class="f-search">{ui.icon("search", 16)}
+<input type="text" name="q" value="{attr(q)}" autocomplete="off"
+ placeholder="{attr(_t('Search title or endpoint…'))}">{reset}</div>
 <button class="btn sec">{_t('Search')}</button>
-{f'<a class="btn sec" href="{_findings_url("", sev, show_fp)}">{_t("Clear")}</a>' if q else ''}
+</div>
+<div class="f-bot">
+<div class="seg" role="group" aria-label="{attr(_t('Severity'))}">{chips}</div>
+<span class="f-spacer"></span>
+<div class="seg" role="group" aria-label="{attr(_t('Show False Positives'))}">{fp_toggle}</div>
+</div>
 </form>"""
-    toolbar = f"""{search_box}
-<div class="segrow" style="margin-bottom:14px">{chips}<span style="margin-left:10px">{fp_toggle}</span></div>"""
 
     note = (f"{_t('Engagement')}: <b>{e(engagement)}</b>" if engagement else "")
     return page(_t("Findings"), f"{toolbar}{body}",
@@ -141,17 +151,17 @@ def findings_page(
 
 
 VI.update({
-    "Findings": "Phát hiện", "Severity": "Mức độ", "Finding": "Phát hiện",
+    "Findings": "Phát Hiện", "Severity": "Mức Độ", "Finding": "Phát Hiện",
     "Assessment": "Assessment", "Engagement": "Engagement", "Source": "Nguồn",
     "Nothing confirmed yet.": "Chưa có phát hiện nào được xác nhận.",
     "No confirmed findings on this engagement yet.":
         "Engagement này chưa có phát hiện nào được xác nhận.",
     "No findings match this filter.": "Không có phát hiện nào khớp bộ lọc này.",
-    "Critical": "Nghiêm trọng", "High": "Cao", "Medium": "Trung bình",
-    "Low": "Thấp", "Info": "Thông tin",
-    "runner-sealed": "runner niêm phong", "measured": "đo lường",
-    "AI-adjudicated": "AI phân xử", "False positive": "Dương tính giả",
-    "Show false positives": "Hiện dương tính giả",
-    "Search findings": "Tìm phát hiện", "Search title or endpoint…": "Tìm tiêu đề hoặc endpoint…",
-    "Search": "Tìm", "Clear": "Xoá bộ lọc",
+    "Critical": "Nghiêm Trọng", "High": "Cao", "Medium": "Trung Bình",
+    "Low": "Thấp", "Info": "Thông Tin",
+    "Runner-Sealed": "Runner Niêm Phong", "measured": "đo lường",
+    "AI-Adjudicated": "AI Phân Xử", "False Positive": "Dương Tính Giả",
+    "Show False Positives": "Hiện Dương Tính Giả",
+    "Search Findings": "Tìm Phát Hiện", "Search title or endpoint…": "Tìm Tiêu Đề Hoặc Endpoint…",
+    "Search": "Tìm", "Clear": "Xoá Bộ Lọc",
 })

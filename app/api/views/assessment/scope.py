@@ -49,18 +49,18 @@ def _endpoint_form_cells(ep: dict, form_id: str) -> str:
         f'aria-label="Auth required" style="width:auto"'
         f'{" checked" if ep.get("auth_required") else ""}></td>'
         f'<td><input type="checkbox" name="expected_public" value="true" form="{attr(form_id)}" '
-        f'aria-label="Expected public" style="width:auto"'
+        f'aria-label="Expected Public" style="width:auto"'
         f'{" checked" if ep.get("expected_public") else ""}></td>'
         f'<td><input type="checkbox" name="writes_properties" value="true" form="{attr(form_id)}" '
         f'aria-label="Writes properties" style="width:auto"'
         f'{" checked" if ep.get("writes_properties") else ""}></td>'
         f'<td><input name="url_fields" form="{attr(form_id)}" class="mono" '
-        f'aria-label="URL fields" value="{attr(urls)}" placeholder="callbackUrl"></td>'
+        f'aria-label="URL Fields" value="{attr(urls)}" placeholder="callbackUrl"></td>'
     )
 
 
 _REQ_STATE_CLASS = {
-    "COVERED_PASS": "low", "COVERED_FAIL": "crit", "PARTIAL": "med",
+    "COVERED_PASS": "ok", "COVERED_FAIL": "crit", "PARTIAL": "med",
     "NOT_COVERED": "med", "NOT_TESTED": "info",
 }
 
@@ -99,7 +99,7 @@ def _requirements_panel(requirements: list[dict], coverage_items: list) -> str:
             f'<td class="muted">{note}</td></tr>'
         )
     heading = (
-        f'<div class="glabel" style="margin-bottom:4px">{_t("Requirements read from the ticket")}'
+        f'<div class="glabel" style="margin-bottom:4px">{_t("Requirements Read from the Ticket")}'
         f'{info(TIP["requirement"], _t("Requirements"))}</div>'
     )
     return heading + ui.table(
@@ -159,29 +159,24 @@ def _spec_import(aid: str) -> str:
     until now cannot see an endpoint written in a table, cannot tell whether a
     route is public, and only finds object ids that appear in a path.
     """
-    tip = _t(
-        "Parsed as data and never fetched: a URL inside a spec names a host "
-        "somebody else chose, and nothing is sent anywhere the engagement did "
-        "not authorize. Importing is additive — hand-entered rows are kept, and "
-        "what the spec overrides is only what was previously guessed: whether a "
-        "route needs a credential, and which parameters are object ids."
-    )
+    tip = _t("Parsed, never fetched or replayed. Additive: hand-entered rows are kept. "
+             "From a HAR only names are kept, never header values or bodies.")
     return (
         f'<details class="sect" id="s-spec" data-sect="s-spec">'
         f'<summary class="s-head"><span class="s-chev" aria-hidden="true"></span>'
-        f'<span class="s-title">{_t("Import an API specification")}</span>'
-        f'{info(tip, _t("Import an API specification"))}'
-        f'<span class="s-sum">{_t("OpenAPI 3 or Swagger 2 · JSON or YAML")}</span></summary>'
+        f'<span class="s-title">{_t("Import Endpoints")}</span>'
+        f'{info(tip, _t("Import Endpoints"))}'
+        f'<span class="s-sum">{_t("OpenAPI · Swagger · HAR Capture")}</span></summary>'
         f'<div class="s-body">'
         f'<form method="post" action="/assessment/{attr(aid)}/openapi" '
         f'enctype="multipart/form-data" class="js-busy">'
-        f'<label class="field"><span>{_t("Paste the specification")}</span>'
+        f'<label class="field"><span>{_t("Paste a Spec or HAR")}</span>'
         '<textarea name="spec" rows="6" '
         'placeholder="openapi: 3.0.3&#10;paths: ..."></textarea></label>'
         f'<div class="row" style="margin-top:10px">'
-        f'<input type="file" name="spec_file" accept=".json,.yaml,.yml,application/json,text/yaml"'
+        f'<input type="file" name="spec_file" accept=".json,.yaml,.yml,.har,application/json,text/yaml"'
         f' style="max-width:320px">'
-        f'<button class="btn">{_t("Import endpoints")}</button>'
+        f'<button class="btn">{_t("Import Endpoints")}</button>'
         f'</div></form></div></details>'
     )
 
@@ -210,12 +205,12 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
             f'<td>{_t("yes") if ep.get("expected_public") else "&mdash;"}</td>'
             f'<td>{_t("yes") if ep.get("writes_properties") else "&mdash;"}</td>'
             f'<td>{urls or "<span class=muted>&mdash;</span>"}</td>'
-            f'<td class="rowact">'
-            f'<button type="button" class="btn ghost ep-edit" data-ep="{i}">{_t("Edit")}</button>'
-            f'<form method="post" action="/assessment/{attr(aid)}/endpoints/delete" '
-            f'style="margin:0" class="confirm-ep" data-what="{attr(sig)}">'
-            f'<input type="hidden" name="signature" value="{attr(sig)}">'
-            f'<button class="btn ghost danger">{_t("Delete")}</button></form></td></tr>'
+            f'<td class="rowact">' + ui.action_menu([
+                ui.Item(_t("Edit"), button_class="ep-edit", button_data={"ep": i}),
+                ui.Item(_t("Delete"), action=f"/assessment/{aid}/endpoints/delete",
+                        fields={"signature": sig}, form_class="confirm-ep",
+                        form_data={"what": sig}, danger=True),
+            ], _t("Actions for {name}").format(name=sig)) + '</td></tr>'
             f'<tr class="ep-edit-row editing" data-ep="{i}" hidden>'
             f'{_endpoint_form_cells(ep, form_id)}'
             f'<td class="rowact">'
@@ -242,9 +237,9 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
             _t("Endpoint"),
             _t("Object IDs") + info(TIP["object_ids"], _t("Object IDs")),
             _t("Auth") + info(TIP["auth"], _t("Auth")),
-            _t("Expected public") + info(TIP["expected_public"], _t("Expected public")),
+            _t("Expected Public") + info(TIP["expected_public"], _t("Expected Public")),
             _t("Writes") + info(TIP["writes"], _t("Writes")),
-            _t("URL fields") + info(TIP["url_fields"], _t("URL fields")),
+            _t("URL Fields") + info(TIP["url_fields"], _t("URL Fields")),
             "",
         ],
         rows,
@@ -271,21 +266,21 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
     actions = (
         f'<form method="post" action="/assessment/{attr(aid)}/reanalyze" style="margin:0" '
         f'class="confirm-reanalyze">'
-        f'<button class="btn sec">&#8635; {_t("Re-analyze from ticket")}</button></form>'
+        f'<button class="btn sec">&#8635; {_t("Re-analyze from Ticket")}</button></form>'
         f'<span class="muted" style="font-size:12.5px;align-self:center">'
         f'{_t(reanalyze_note_text)}</span>'
     )
 
     n_manual = sum(1 for ep in endpoints if ep.get("manual"))
-    summary = _t("{n} endpoint(s)").format(n=len(endpoints))
+    summary = _t("{n} Endpoint(s)").format(n=len(endpoints))
     if requirements:
-        summary = _t("{n} requirement(s) · ").format(n=len(requirements)) + summary
+        summary = _t("{n} Requirement(s) · ").format(n=len(requirements)) + summary
     if n_manual:
         summary += _t(" · {n} hand-entered").format(n=n_manual)
     if stale:
         summary += " · " + _t("plan is stale")
     if uncovered_poc_endpoints:
-        summary += " · " + _t("{n} test(s) target an endpoint not listed").format(
+        summary += " · " + _t("{n} Test(s) Target an Unlisted Endpoint").format(
             n=len(uncovered_poc_endpoints))
 
     return ui.section(
@@ -293,7 +288,7 @@ def _endpoints_section(aid: str, endpoints: list[dict], stale: bool, opened: boo
         # holds both halves of "what is this plan derived from": what the ticket
         # asks for, and the surface those asks live on.
         "s-endpoints", "",
-        _t("Requirements & endpoints") if requirements else _t("Endpoints"),
+        _t("Requirements & Endpoints") if requirements else _t("Endpoints"),
         body + _spec_import(aid) + _ENDPOINTS_JS,
         summary=summary,
         actions=actions,
@@ -331,16 +326,14 @@ _ENDPOINTS_JS = """
   });
   document.querySelectorAll('form.confirm-ep').forEach(function (f) {
     f.addEventListener('submit', function (ev) {
-      if (!confirm('Remove ' + f.dataset.what + ' from the analysis?\\n\\n' +
-                   'Tests already generated for it stay in the plan until you ' +
-                   'regenerate it.')) ev.preventDefault();
+      stpConfirmSubmit(f, ev, 'Remove ' + f.dataset.what + ' from the analysis?\\n\\n' +
+                   'Its tests stay in the plan until you regenerate it.', { danger: true });
     });
   });
   document.querySelectorAll('form.confirm-reanalyze').forEach(function (f) {
     f.addEventListener('submit', function (ev) {
-      if (!confirm('Re-read the ticket and rebuild the endpoint list and OWASP ' +
-                   'mapping?\\n\\nHand-entered endpoints are kept. Edits you made to ' +
-                   'extracted rows are not.')) ev.preventDefault();
+      stpConfirmSubmit(f, ev, 'Re-read the ticket and rebuild the endpoint list?\\n\\n' +
+                   'Hand-entered endpoints are kept. Edits to extracted rows are not.');
     });
   });
 })();
@@ -348,23 +341,33 @@ _ENDPOINTS_JS = """
 """
 
 VI.update({
+    "Parsed, never fetched or replayed. Additive: hand-entered rows are kept. "
+    "From a HAR only names are kept, never header values or bodies.":
+        "Chỉ phân tích, không bao giờ gọi hay phát lại. Chỉ bổ sung: các dòng nhập tay "
+        "được giữ. Từ HAR chỉ giữ tên, không bao giờ giữ giá trị header hay body.",
+    "OpenAPI · Swagger · HAR Capture": "OpenAPI · Swagger · Bản Ghi HAR",
+    "Paste a Spec or HAR": "Dán Spec Hoặc HAR",
+})
+
+
+VI.update({
     "{n} setting(s) will block this run before any request is sent.":
         "{n} cấu hình sẽ chặn lượt chạy này trước khi có request nào được gửi.",
     "{n} setting(s) will make results less conclusive.":
         "{n} cấu hình sẽ khiến kết quả kém chắc chắn hơn.",
-    "Open configuration": "Mở cấu hình",
-    "Endpoints": "Endpoint", "Tests": "Test", "Approved": "Đã duyệt",
-    "Executed": "Đã chạy", "Findings": "Phát hiện", "Coverage": "Độ phủ",
+    "Open Configuration": "Mở Cấu Hình",
+    "Endpoints": "Endpoint", "Tests": "Test", "Approved": "Đã Duyệt",
+    "Executed": "Đã Chạy", "Findings": "Phát Hiện", "Coverage": "Độ Phủ",
     "none": "không có",
-    "Requirements read from the ticket": "Yêu cầu đọc được từ ticket",
-    "Requirements": "Yêu cầu", "Item": "Mục", "Requirement": "Yêu cầu",
-    "State": "Trạng thái", "Note": "Ghi chú",
+    "Requirements Read from the Ticket": "Yêu Cầu Đọc Được Từ Ticket",
+    "Requirements": "Yêu Cầu", "Item": "Mục", "Requirement": "Yêu Cầu",
+    "State": "Trạng Thái", "Note": "Ghi Chú",
     "No requirement items were extracted from this ticket.":
         "Không trích xuất được mục yêu cầu nào từ ticket này.",
     "yes": "có", "no": "không",
     "Edit": "Sửa", "Delete": "Xoá", "Save": "Lưu", "Cancel": "Huỷ", "Add": "Thêm",
-    "Object IDs": "Object ID", "Auth": "Auth", "Writes": "Ghi dữ liệu",
-    "URL fields": "Trường URL",
+    "Object IDs": "Object ID", "Auth": "Auth", "Writes": "Ghi Dữ Liệu",
+    "URL Fields": "Trường URL",
     "No endpoints were extracted from the ticket &mdash; the extractor reads prose, so "
     "an endpoint written in a table or an attachment is invisible to it. Add it in the "
     "row below; without one there is nothing for the designer to build tests against.":
@@ -379,21 +382,18 @@ VI.update({
         "Tạo lại ở phần Kế hoạch &mdash; nếu không kế hoạch bạn duyệt sẽ là kế hoạch dựng cho "
         "danh sách endpoint cũ, trong khi bạn đã thay đổi nó. Các duyệt trên test không "
         "đổi sẽ được giữ nguyên.",
-    "Go to Plan": "Đến phần Kế hoạch",
-    "Re-analyze from ticket": "Phân tích lại từ ticket",
-    "Import an API specification": "Nhập đặc tả API",
-    "OpenAPI 3 or Swagger 2 · JSON or YAML": "OpenAPI 3 hoặc Swagger 2 · JSON hoặc YAML",
-    "Paste the specification": "Dán đặc tả",
-    "Import endpoints": "Nhập endpoint",
+    "Go to Plan": "Đến Phần Kế Hoạch",
+    "Re-analyze from Ticket": "Phân Tích Lại Từ Ticket",
+    "Import Endpoints": "Nhập Endpoint",
     "Re-reads the Jira issue and rebuilds this list. Hand-entered rows are kept; the "
     "OWASP mapping is rebuilt from scratch, which is the only operation allowed to "
     "drop a category.":
         "Đọc lại issue Jira và dựng lại danh sách này. Các dòng nhập tay được giữ "
         "nguyên; ánh xạ OWASP được dựng lại từ đầu — đây là thao tác duy nhất được phép "
         "bỏ một danh mục.",
-    "{n} endpoint(s)": "{n} endpoint", "{n} requirement(s) · ": "{n} yêu cầu · ",
+    "{n} Endpoint(s)": "{n} Endpoint", "{n} Requirement(s) · ": "{n} Yêu Cầu · ",
     " · {n} hand-entered": " · {n} nhập tay", "plan is stale": "kế hoạch đã cũ",
-    "{n} test(s) target an endpoint not listed": "{n} test nhắm vào endpoint chưa có trong danh sách",
+    "{n} Test(s) Target an Unlisted Endpoint": "{n} Test Nhắm Vào Endpoint Chưa Có Trong Danh Sách",
     "The test plan targets an endpoint that is not in this list.":
         "Kế hoạch test đang nhắm vào một endpoint không có trong danh sách này.",
     "This is not a stale-plan problem: the endpoint list is read from ticket prose, "
@@ -404,7 +404,7 @@ VI.update({
         "trong khi request của PoC có thể được dựng từ một biến mà bộ trích xuất không "
         "bao giờ thấy. Thêm endpoint bên dưới nếu đó là bề mặt tấn công thật, hoặc bỏ qua "
         "nếu test đó là một control âm tính có chủ đích.",
-    "Requirements & endpoints": "Yêu cầu & endpoint",
+    "Requirements & Endpoints": "Yêu Cầu & Endpoint",
     "Everything downstream is derived from this list: the designer builds one "
     "test set per endpoint, and the OWASP mapping is computed from these "
     "parameters. A missed endpoint is a whole untested surface, and a missed "
@@ -433,7 +433,7 @@ def _coverage_section(aid: str, coverage: list[dict], opened: bool) -> str:
             title, control_tip = _control_meta(cat)
             existing = int(r.get("existing_tests", 0) or 0)
             generated = int(r.get("generated_tests", 0) or 0)
-            test_count_label = _t("{n} test(s) →").format(n=existing + generated)
+            test_count_label = _t("{n} Test(s) →").format(n=existing + generated)
             filter_link = (
                 f'<a class="btn ghost" style="padding:2px 8px" '
                 f'href="/assessment/{attr(aid)}?cat={attr(cat)}&phase=plan">'
@@ -468,14 +468,14 @@ def _coverage_section(aid: str, coverage: list[dict], opened: bool) -> str:
         cls="compact",
     )
     if other:
-        show_label = _t("Show {n} category(ies) the analyzer judged not applicable").format(n=len(other))
+        show_label = _t("Show {n} Not-Applicable Category(ies)").format(n=len(other))
         body += f"""<details style="margin-top:10px">
 <summary class="muted" style="cursor:pointer;font-size:12.5px">
 {show_label}</summary>
 <div style="margin-top:8px">{ui.table(headers, _rows(other), cls="compact")}</div>
 </details>"""
     covered = sum(1 for r in applicable if r.get("state") == "COVERED")
-    summary = (_t("{n} applicable · {c} covered").format(n=len(applicable), c=covered)
+    summary = (_t("{n} Applicable · {c} Covered").format(n=len(applicable), c=covered)
                if coverage else _t("not computed yet"))
     return ui.section(
         "s-coverage", "", _t("OWASP Coverage"), body,
@@ -502,4 +502,4 @@ def _control_meta(cat_value: str) -> tuple[str, str]:
 # -- placeholder sections replaced in later steps ---------------------------
 
 
-_REVIEW_TONE = {"APPROVE": "low", "REVISE": "med", "INSUFFICIENT": "crit"}
+_REVIEW_TONE = {"APPROVE": "ok", "REVISE": "med", "INSUFFICIENT": "crit"}

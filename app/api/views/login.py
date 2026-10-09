@@ -26,7 +26,7 @@ def login_page(flash: str = "") -> str:
 {flash_html}
 <div class="card pad" style="max-width:420px">
 <form method="post" action="/login">
-<label class="field" style="margin-bottom:12px"><span>{_t("API key")}</span>
+<label class="field" style="margin-bottom:12px"><span>{_t("API Key")}</span>
 <input type="password" name="api_key" required autofocus></label>
 <button class="btn">{_t("Log in")}</button>
 </form>

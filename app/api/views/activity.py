@@ -17,7 +17,7 @@ from .shell import appbar, page
 #: outside this process: packets sent, a decision recorded, data leaving.
 _TONE = {
     "execute": "crit",
-    "approve": "low",
+    "approve": "ok",
     "reject": "med",
     "export": "info",
     "engagement_snapshot": "info",
@@ -36,7 +36,8 @@ def _row(entry, issue_key: str) -> str:
     )
     return (
         f"<tr><td class='mono muted' style='white-space:nowrap'>{e(when)}</td>"
-        f"<td><span class='pill {tone}'>{e(entry.action)}</span></td>"
+        f"<td><span class='pill {tone}' title='{attr(entry.action)}'>"
+        f"{e(ui.titleize(entry.action))}</span></td>"
         f"<td>{where}</td>"
         f"<td class='mono'>{e(entry.actor)}</td>"
         f"<td class='muted'>{e(entry.detail)}</td></tr>"
@@ -52,13 +53,13 @@ def activity_page(rows: list[tuple], engagement: str = "") -> str:
         scroll=len(rows) > 25,
     )
     note = (f"{_t('Engagement')}: <b>{e(engagement)}</b>" if engagement else "")
-    return page(_t("Activity"), body, active="activity",
-                appbar_html=appbar(_t("Activity"), note=note))
+    return page(_t("Audit Log"), body, active="activity",
+                appbar_html=appbar(_t("Audit Log"), note=note))
 
 
 VI.update({
-    "Activity": "Hoạt động", "When": "Lúc", "Action": "Hành động",
-    "Who": "Ai", "Detail": "Chi tiết",
+    "When": "Lúc", "Action": "Hành Động",
+    "Who": "Ai", "Detail": "Chi Tiết",
     "Nothing has happened on this engagement yet.":
         "Engagement này chưa có hoạt động nào.",
 })

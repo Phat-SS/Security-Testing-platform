@@ -33,7 +33,7 @@ def test_health(client):
 def test_dashboard_loads(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert "API Security" in r.text  # the sidebar brand
+    assert "Sentinel" in r.text  # the sidebar brand
     # the importable keys are advertised from the client, not hardcoded in HTML
     assert "MOCK-345" in r.text
 
@@ -155,7 +155,7 @@ def test_full_ui_flow_without_execution(client):
                     data={"poc_python": "import requests\nrequests.get('https://x/customers/2002')"},
                     follow_redirects=True)
     # Designing redirects to the Plan phase; coverage is part of Scope.
-    assert "Test plan &amp; approval" in r.text  # designing lands on Plan
+    assert "Test Plan &amp; Approval" in r.text  # designing lands on Plan
     assert "OWASP Coverage" in client.get(f"/assessment/{aid}?phase=scope").text
     assert "API1:2023" in r.text
 

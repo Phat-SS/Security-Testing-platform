@@ -28,6 +28,7 @@ own failure mode, so the default stays reviewable.
 
 from __future__ import annotations
 
+from app.execution.mutations import SSTI_PRODUCT
 from app.schemas.analysis import Endpoint, IssueAnalysis
 from app.schemas.enums import (
     ApprovalStatus,
@@ -80,6 +81,27 @@ _DEBUG_FINGERPRINTS = [
     "org.springframework",
     "DEBUG = True",
 ]
+
+# A database error string in a response: the error-based SQL/NoSQL oracle.
+# Driver/ORM wording, not generic words — "error" alone is in every 400 body.
+_SQL_ERROR_FINGERPRINTS = [
+    # Every entry is >= 6 characters: `_leaked_markers` ignores shorter ones.
+    "SQL syntax", "SQLSTATE", "ORA-00933", "ORA-01756", "ORA-00907", "ORA-00936",
+    "PG::SyntaxError", "psycopg2.errors",
+    "sqlite3.OperationalError", "Unclosed quotation mark", "quoted string not properly terminated",
+    "SQLITE_ERROR", "System.Data.SqlClient", "Microsoft OLE DB", "mysql_fetch",
+    "You have an error in your SQL", "unterminated quoted string",
+]
+_NOSQL_ERROR_FINGERPRINTS = [
+    "MongoError", "MongoServerError", "CastError: Cast to", "BSONTypeError",
+    "unknown operator: $ne",
+]
+# Content only a real /etc/passwd read returns.
+_PASSWD_FINGERPRINTS = ["root:x:0:0:", "root:*:0:0:", "daemon:x:1:1:"]
+# Field names that are worth aiming a traversal at; anything else would
+# be noise against a field that is never a path.
+_PATHLIKE = ("file", "path", "dir", "folder", "template", "doc", "attachment",
+             "download", "page", "include", "view", "resource")
 
 # Serialisation-tolerant spellings of an escalated role. JSON encoders differ on
 # whitespace, so a single spelling would miss the very disclosure it looks for.
@@ -154,10 +176,107 @@ class TestDesigner:
         if representative is not None:
             if OwaspApiCategory.API8 in applicable:
                 tests += self._api8(representative, counters)
+                # Appended after the rest of API8 rather than inside it: test
+                # ids are a running per-category counter, and an id that moves
+                # on "Regenerate Test Plan" loses the approval a human gave it.
+                tests.append(self._cors_null_origin(representative, counters))
+                # Injection probes come after every other API8 test for the
+                # same reason: ids are a running counter, and appending keeps
+                # every existing id (and its approval) where it was.
+                if self.aggressive:
+                    for ep in analysis.endpoints:
+                        tests += self._injection(ep, counters)
             if OwaspApiCategory.API9 in applicable:
                 tests += self._api9(representative, counters)
 
         return tests
+
+    def _injection(self, ep: Endpoint, c) -> list[TestCase]:
+        """Detect-only injection probes, aggressive depth only.
+
+        Aimed at one field per location: the first query parameter and the
+        first body field. A traversal is aimed only at a field whose name says
+        it holds a path or file, and CR/LF only at a query parameter (that is
+        where a value gets copied into a redirect or a header).
+        """
+        targets: list[tuple[str, str]] = []
+        if ep.query_params:
+            targets.append(("query", ep.query_params[0]))
+        if ep.body_fields and ep.method in ("POST", "PUT", "PATCH"):
+            targets.append(("body", ep.body_fields[0]))
+        any_status = [200, 201, 204, *range(400, 500)]
+        out: list[TestCase] = []
+        for location, name in targets:
+            detail = {"field": name, "location": location}
+            out.append(self._mk(
+                OwaspApiCategory.API8, c, Severity.HIGH, ep,
+                title=f"SQL injection (error-based) via {location} '{name}'",
+                objective="Verify an unbalanced quote is rejected, not passed to a database "
+                          "whose error then reaches the response.",
+                auth=AuthContext(persona=self._attacker),
+                mutation=Mutation(kind="sqli_error_probe", detail=detail),
+                expected=ExpectedResult(status_in=any_status,
+                                        body_must_not_contain=list(_SQL_ERROR_FINGERPRINTS)),
+            ))
+            out.append(self._mk(
+                OwaspApiCategory.API8, c, Severity.HIGH, ep,
+                title=f"NoSQL operator injection via {location} '{name}'",
+                objective="Verify a $ne operator in place of a value is rejected rather "
+                          "than reaching a document-store filter.",
+                auth=AuthContext(persona=self._attacker),
+                mutation=Mutation(kind="nosqli_operator_probe", detail=detail),
+                expected=ExpectedResult(status_in=any_status,
+                                        body_must_not_contain=list(_NOSQL_ERROR_FINGERPRINTS)),
+            ))
+            out.append(self._mk(
+                OwaspApiCategory.API8, c, Severity.HIGH, ep,
+                title=f"Server-side template injection via {location} '{name}'",
+                objective="Verify template syntax in input is treated as text, never evaluated.",
+                auth=AuthContext(persona=self._attacker),
+                mutation=Mutation(kind="ssti_probe", detail=detail),
+                expected=ExpectedResult(status_in=any_status, body_must_not_contain=[SSTI_PRODUCT]),
+            ))
+            if any(word in name.lower() for word in _PATHLIKE):
+                out.append(self._mk(
+                    OwaspApiCategory.API8, c, Severity.HIGH, ep,
+                    title=f"Path traversal via {location} '{name}'",
+                    objective="Verify a ../ sequence cannot read a file outside the intended root.",
+                    auth=AuthContext(persona=self._attacker),
+                    mutation=Mutation(kind="path_traversal_probe", detail=detail),
+                    expected=ExpectedResult(status_in=any_status,
+                                            body_must_not_contain=list(_PASSWD_FINGERPRINTS)),
+                ))
+            if location == "query":
+                out.append(self._mk(
+                    OwaspApiCategory.API8, c, Severity.MEDIUM, ep,
+                    title=f"CRLF header injection via query '{name}'",
+                    objective="Verify CR/LF in a value cannot add a response header.",
+                    auth=AuthContext(persona=self._attacker),
+                    mutation=Mutation(kind="crlf_injection_probe", detail=detail),
+                    expected=ExpectedResult(
+                        status_in=[*any_status, 301, 302, 303, 307, 308],
+                        forbidden_response_headers={"x-sentinel-injected": ""},
+                    ),
+                ))
+        return out
+
+    def _cors_null_origin(self, ep: Endpoint, c) -> TestCase:
+        """`null` is the Origin a sandboxed iframe or a file:// page sends, so
+        any site can produce it. A policy that echoes it back is as open as one
+        that echoes evil.example, and it is the case a hand-written "reflect
+        unless obviously bad" allowlist usually misses."""
+        return self._mk(
+            OwaspApiCategory.API8, c, Severity.MEDIUM, ep,
+            title="CORS policy trusts the null origin",
+            objective="Verify the API does not allow the 'null' Origin, which any "
+                      "sandboxed iframe can send.",
+            auth=AuthContext(persona=self._attacker),
+            mutation=Mutation(kind="cors_probe", detail={"origin": "null"}),
+            expected=ExpectedResult(
+                status_in=[200, 201, 204, 400, 401, 403, 404],
+                forbidden_response_headers={"access-control-allow-origin": "null"},
+            ),
+        )
 
     # -- API1: object level authorization -----------------------------------
 

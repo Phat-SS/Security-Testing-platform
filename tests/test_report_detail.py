@@ -105,10 +105,10 @@ def _render(**kwargs):
 
 def test_the_report_carries_the_attack_and_its_parameters():
     html = _render()
-    assert "Attack performed" in html
+    assert "Attack Performed" in html
     assert "swap_object_id" in html
     assert "targeted object id 2002 owned by another identity" in html
-    assert "Attack parameters" in html
+    assert "Attack Parameters" in html
     assert "id_field" in html
 
 
@@ -154,7 +154,7 @@ def test_the_report_carries_the_supporting_exchanges():
                          throttled=False, concurrent=True)
     html = _render(test=test,
                    executions=[_execution(test, supporting=supporting, repeat=repeat)])
-    assert "Positive control" in html
+    assert "Positive Control" in html
     assert "the target is reachable" in html
     assert "Multi-request probe" in html
 
@@ -166,7 +166,7 @@ def test_a_blocked_test_still_explains_what_the_attack_would_have_done():
     execution = _execution(test, result=TestStatus.BLOCKED)
     execution.attack_note = ""
     html = _render(test=test, executions=[execution])
-    assert "Attack performed" in html
+    assert "Attack Performed" in html
     assert "swap_object_id" in html
 
 
@@ -195,7 +195,7 @@ def _run(**kwargs):
 
 def test_the_run_assessment_shows_pass_fail_and_coverage_with_its_workings():
     html = _render(run_assessment=_run())
-    assert "Assessment of this run" in html
+    assert "Assessment of This Run" in html
     assert "FAILED" in html
     assert "67%" in html
     # The percentage is decomposable: every item and what the run proved about it.
@@ -213,7 +213,7 @@ def test_the_run_assessment_says_a_reviewed_result_is_advisory():
 
 def test_a_report_without_an_assessment_omits_the_section():
     html = _render()
-    assert "Assessment of this run" not in html
+    assert "Assessment of This Run" not in html
 
 
 # -- adjudications -------------------------------------------------------------
@@ -250,7 +250,7 @@ def test_an_adjudication_always_names_who_produced_it_and_that_it_is_advisory():
     execution = _execution(test, result=TestStatus.INCONCLUSIVE)
     html = _render(test=test, executions=[execution],
                    run_assessment=_run(adjudications=[_adjudication()]))
-    assert "AI reviewer" in html
+    assert "AI Reviewer" in html
     assert "does not change the sealed verdict or create a finding" in html
     # And the sealed verdict is still the one in the Result column.
     assert "INCONCLUSIVE" in html
@@ -263,7 +263,7 @@ def test_a_deterministic_adjudication_says_so_rather_than_claiming_a_reviewer():
                    run_assessment=_run(adjudications=[
                        _adjudication(adjudicator="deterministic")]))
     assert "deterministic triage" in html
-    assert "AI reviewer" not in html
+    assert "AI Reviewer" not in html
 
 
 def test_a_result_needing_a_person_says_that_instead_of_a_verdict():
@@ -274,7 +274,7 @@ def test_a_result_needing_a_person_says_that_instead_of_a_verdict():
                        needs_manual_review=True, assessed_result="INCONCLUSIVE",
                        triage_reason="The positive control failed.",
                    )]))
-    assert "Needs manual review" in html
+    assert "Needs Manual Review" in html
     assert "The positive control failed." in html
     assert "Reviewed as" not in html
 
@@ -302,11 +302,11 @@ def test_the_plan_review_is_part_of_the_report():
     """It is part of why this run tested what it tested — the honest answer to
     "why is there no BFLA result here" six months later."""
     html = _render(plan_review=_review())
-    assert "Plan review" in html
+    assert "Plan Review" in html
     assert "REVISE" in html
     assert "No test for admin re-assignment." in html
     assert "AIR1-API5-001" not in html  # ids are not the point; the count is
-    assert "Added after review" in html
+    assert "Added After Review" in html
 
 
 def test_unresolved_gaps_are_shown_separately_from_gaps_that_were_closed():
@@ -315,7 +315,7 @@ def test_unresolved_gaps_are_shown_separately_from_gaps_that_were_closed():
         unresolved_gaps=[PlanReviewGap(description="Still nothing tests rate limiting.",
                                        severity="blocking")],
     ))
-    assert "Still unresolved" in html
+    assert "Still Unresolved" in html
     assert "Still nothing tests rate limiting." in html
 
 
@@ -326,7 +326,7 @@ def test_a_structural_only_review_does_not_claim_an_ai_read_the_plan():
 
 def test_a_report_without_a_review_omits_the_section():
     html = _render()
-    assert "Plan review" not in html
+    assert "Plan Review" not in html
 
 
 def test_a_row_awaiting_a_re_run_is_not_described_as_having_been_reviewed():

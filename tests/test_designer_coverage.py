@@ -270,3 +270,28 @@ def test_standard_depth_does_not_add_type_confusion_probes():
     ep = Endpoint(method="GET", path="/search", query_params=["term"])
     kinds = _kinds(_plan([ep], aggressive=False))
     assert "type_confusion_probe" not in kinds
+
+
+def test_cors_is_probed_with_the_null_origin_as_well_as_a_foreign_one():
+    """`null` is what any sandboxed iframe sends, so a policy that echoes it is
+    as open as one that echoes an attacker's domain — and it is the case a
+    hand-written allowlist most often forgets."""
+    tests = [t for t in _plan([Endpoint(method="GET", path="/customers/{id}")])
+             if t.attack_mutation.kind == "cors_probe"]
+
+    origins = {t.attack_mutation.detail.get("origin") for t in tests}
+    assert {"https://evil.example", "null"} <= origins
+    null_probe = next(t for t in tests if t.attack_mutation.detail.get("origin") == "null")
+    assert null_probe.expected.forbidden_response_headers == {
+        "access-control-allow-origin": "null"}
+
+
+def test_the_null_origin_probe_is_numbered_after_every_existing_api8_test():
+    """Test ids are a running per-category counter, and approvals survive a
+    plan regeneration by id. Adding a probe in the middle of API8 renumbered
+    every test after it, so their approvals silently reset to PENDING."""
+    api8 = [t for t in _plan([Endpoint(method="GET", path="/customers/{id}")], aggressive=True)
+            if t.owasp_category.value.startswith("API8")]
+
+    assert api8[-1].attack_mutation.detail.get("origin") == "null"
+    assert api8[-1].test_id == max(t.test_id for t in api8)

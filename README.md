@@ -64,7 +64,7 @@ identity values are not stored). OAST-backed SSRF/redirect tests use the
 provider-neutral `OAST_PUBLIC_URL`/`OAST_POLL_URL` contract. Reports include a
 manifest signed with `REPORT_SIGNING_KEY` (32+ characters). See
 [docs/configuration.md](docs/configuration.md).
-These settings can also be managed under **Configuration → Advanced**;
+These settings can also be managed under **System → Settings** in the sidebar;
 stored secret values are never sent back to the browser, and saving requires
 the admin role when authentication is enabled.
 
@@ -121,7 +121,7 @@ the plan, approve the tests you want, **Run approved tests**, then open the
 report or preview the Jira comment. Destructive (write-method) tests are
 excluded from execution by default and gated behind a separate confirmation.
 
-Start at the **Configuration** tab. Its **Readiness** pane runs every base URL
+Start at **Engagement → Readiness** in the sidebar. It runs every base URL
 through the same `ScopeValidator` the runner calls and lists, ahead of a run,
 each setting that would stop one — with the fix inline (one click to authorize
 a host) rather than a filename to go and edit. A whole run coming back
@@ -153,10 +153,14 @@ the plan was built for a different endpoint list.
 Every column header carries an **ⓘ** with the meaning of that column, so
 `PARTIAL`, `From PoC` and `swap_object_id` do not require reading the source.
 
-**Findings** and **Activity** in the sidebar answer the two questions that span
+**Findings** and **Audit Log** in the sidebar answer the two questions that span
 an engagement rather than one ticket: what is outstanding everywhere, and who
-did what. The second is the audit log, which was always written and never
-shown.
+did what.
+
+The sidebar has three groups: **Workspace** (Assessments, Findings),
+**Engagement** (Readiness, Scope & Targets, Identities) and **System** (Audit
+Log, Settings). The UI follows the OS light/dark preference, with a toggle in
+the sidebar footer, and honours `prefers-reduced-motion`.
 
 ### Endpoints are editable, and that matters
 
@@ -263,7 +267,8 @@ unknown kind is rejected rather than improvised.
 | **API5** BFLA | `escalate_persona`, `method_override`, `admin_path_swap` |
 | **API6** Business flows | `repeat_flow`, `race_condition` |
 | **API7** SSRF | `ssrf_url`, `ssrf_url_bypass` |
-| **API8** Misconfiguration | `cors_probe`, `debug_probe`, `security_headers_probe`, `host_header_injection` |
+| **API8** Misconfiguration | `cors_probe` (foreign and `null` origin), `debug_probe`, `security_headers_probe`, `host_header_injection`, `type_confusion_probe` |
+| **API8** Injection (aggressive) | `sqli_error_probe`, `nosqli_operator_probe`, `ssti_probe`, `path_traversal_probe`, `crlf_injection_probe` — detect-only, see below |
 | **API9** Inventory | `version_downgrade`, `undocumented_path_probe`, `graphql_introspection_probe` |
 | **API10** Unsafe consumption | `unsafe_redirect_url`, `oauth_redirect_uri_bypass` |
 
@@ -286,7 +291,23 @@ and the fields an imported specification declares — so an offline run tests th
 too. A ticket about a GraphQL API no longer produces a plan with no GraphQL test
 in it while the coverage table reads as covered.
 
-**Concurrency.** `max_concurrent_tests` (Configuration → Advanced) is how many
+**Injection probes** are detect-only and come with `aggressive` depth. Each is
+judged by an oracle the payload cannot satisfy on its own: a database error
+string, the product of a template evaluating `73331*91237`, the first line of
+`/etc/passwd`, or a response header that only exists if CR/LF split one. A
+target that merely echoes the input is not reported. No payload carries a
+second statement, and time-based blind variants are deliberately absent.
+
+**Out-of-band proof.** `INTERACTSH_SERVER` points SSRF and redirect probes at an
+interactsh server, which sees DNS as well as HTTP callbacks. The generic
+`OAST_PUBLIC_URL`/`OAST_POLL_URL` contract still works.
+
+**Request pacing.** `RUNNER_MAX_RPS` caps the whole run's request rate across
+concurrent tests; a probe's own burst (rate limit, race) is exempt. When the
+target answers 429/503 every later request waits for its `Retry-After` (capped);
+the 429 itself is recorded, never resent.
+
+**Concurrency.** `max_concurrent_tests` (System → Settings) is how many
 approved tests are in flight at once. It defaults to **1**, which runs a plan
 strictly sequentially. Raising it is what makes a 300-test plan finish in a
 minute rather than five, at proportionally higher request rate against the
@@ -330,17 +351,17 @@ attached to a ticket), and its sha256 goes inside every sealed execution. A
 report proves not only that a host was tested but that it was authorized at the
 time; editing the scope afterwards no longer rewrites what an earlier run meant.
 
-The **Setup** section of the sidebar edits that same file, in four panes ordered
-the way a new engagement needs them:
+The **Engagement** and **System** sections of the sidebar edit that same file,
+in four panes ordered the way a new engagement needs them:
 
-| Tab | Writes | Blocks a run when unset |
+| Pane | Writes | Blocks a run when unset |
 |---|---|---|
 | Readiness | — (read-only verdict, plus quick setup while the engagement is empty) | — |
-| Target | `environments`, `active_environment`, `scope.*` | yes — no target and no approved host mean every request comes back `BLOCKED` |
+| Scope & Targets | `environments`, `active_environment`, `scope.*` | yes — no target and no approved host mean every request comes back `BLOCKED` |
 | Identities | `personas`, `attacker`, `victim` | yes — the runner resolves the attacker before scope is even checked |
-| Advanced | `runner` limits, plus AI/evidence settings written to `.env` | no — everything there has a working default |
+| Settings | `runner` limits, plus AI/evidence settings written to `.env` | no — everything there has a working default |
 
-**Quick setup** on the Readiness tab does the whole first-run sequence in one
+**Quick Setup** on the Readiness pane does the whole first-run sequence in one
 submit: the environment, its scope authorization, both personas, and both tokens
 (to `.env`, referenced from the engagement file as `${PERSONA_A_TOKEN}`).
 
@@ -403,7 +424,7 @@ tests/         # scope, redaction, rules, verdict, evidence, approval, analysis,
 | A working report link in the Jira comment | `PLATFORM_BASE_URL=https://…` |
 | Live Jira instead of the mock | `JIRA_MCP_URL=…` `JIRA_CLOUD_ID=…` (+ `pip install mcp`) |
 | PostgreSQL instead of SQLite | `DATABASE_URL=postgresql+psycopg://…` |
-| Reach a lab target on a private IP | **Configuration → Target → allow private / loopback ranges** (lab only) |
+| Reach a lab target on a private IP | **Scope & Targets → Allow private / loopback ranges** (lab only) |
 | Run reviewed arbitrary-Python PoCs | `ENABLE_PYTHON_RUNNER=true` **and** `EGRESS_PROXY=…` (see below) |
 
 ## Importing existing artifacts
@@ -571,7 +592,8 @@ you have to infer from a count.
 **2. Adaptive exploitation loop** (`app/execution/adaptive.py`) — the one place
 a request is sent that no human read first, so it is bounded on four axes:
 iterations, follow-ups per iteration, total follow-ups, and wall clock.
-Destructive follow-ups are excluded by default. Each follow-up passes the
+Destructive follow-ups are always excluded from the UI and API, even on a run that
+includes destructive tests a human approved. Each follow-up passes the
 planner's constraints *and* a second policy gate, and is labelled
 `[AUTO-APPROVED by adaptive policy … Not individually reviewed by a human]` in
 the report — because "a human approved this" and "a policy permitted this" are
@@ -743,6 +765,39 @@ targets the database a normal run would use.
 it exists to be *stamped*, marking "this database already has the schema
 `create_all` has always produced," so later migrations know where they're
 starting from without trying to re-create tables that are already there.
+
+## Working with the list
+
+Every row and card keeps its actions (Edit, Delete, Re-run, Make Default…) in
+one **⋯** menu; destructive items sit last and ask for confirmation. On
+**Assessments**, tick cards to select them and use **Delete Selected**; the
+route re-checks each id against the caller's engagements, because it sits
+outside `/assessment/{aid}` where the isolation middleware works. Two charts
+above the list show findings by severity (a single-hue ordinal scale) and test
+outcomes per run, each with a legend, per-mark tooltips and a table view.
+
+## Copilot, HAR import and the MCP server
+
+- **Copilot** (assessment screen, right-hand panel): hypotheses that cite the
+  executions behind them, and next probes worth sending. It always has a free
+  rules-only brief; with `USE_AI=true` it asks Claude through the same
+  `claude -p` CLI as every other stage, and you can ask it a question. Every AI
+  claim is checked before it is shown — an execution id that does not exist, an
+  endpoint the assessment does not have, or a mutation outside the registry is
+  dropped and counted. **Add To Plan** hands a step to the attack planner, so
+  the resulting test passes `AttackPlanner.accept()` and lands PENDING.
+- **AI spend.** `AI_ASSESSMENT_BUDGET_USD` caps the total AI spend of one
+  assessment (per process). A transient CLI failure is retried
+  (`AI_CLI_RETRIES`), and `ANTHROPIC_MODEL_FAST` can run ticket extraction on a
+  smaller model.
+- **HAR import.** The Scope phase's **Import Endpoints** accepts a HAR capture
+  (browser network panel, Burp, Caido) as well as OpenAPI/Swagger. Only names
+  are kept — never header values, cookies or bodies — and requests to any host
+  but the capture's main one are skipped and listed.
+- **MCP server.** `python -m app.mcp.server` exposes the platform to another
+  agent over stdio, read-only: list assessments, read one, read findings, read
+  or rebuild the Copilot brief. No tool sends traffic, approves or runs anything.
+  `MCP_ENGAGEMENT` restricts it to one engagement.
 
 ## Roadmap
 

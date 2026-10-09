@@ -147,21 +147,21 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
     # 2. A target to aim at.
     if not engagement.environments:
         checks.append(Check(
-            "environments", "Target environment", FAIL,
+            "environments", "Target Environment", FAIL,
             "No environment is configured, so execution is disabled.",
             "Add one under <b>Target</b> — a name and a base URL such as "
             "<code>https://staging.example.com</code>.",
         ))
     elif active is None:
         checks.append(Check(
-            "environments", "Target environment", FAIL,
+            "environments", "Target Environment", FAIL,
             "No environment is marked as the default.",
             "Pick one under <b>Target</b>. Runs use the default unless "
             "another is chosen in the dropdown next to Run approved tests.",
         ))
     else:
         checks.append(Check(
-            "environments", "Target environment", OK,
+            "environments", "Target Environment", OK,
             f"{active.name} — {active.url}",
         ))
 
@@ -173,12 +173,12 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
     elif active.state == OK:
         ip = f" (resolves to {active.resolved_ip})" if active.resolved_ip else ""
         checks.append(Check(
-            "scope", "Scope authorization", OK,
+            "scope", "Scope Authorization", OK,
             f"{active.host} is in the approved scope{ip}.",
         ))
     elif active.host and active.host not in engagement.scope.policy.allowed_hosts:
         checks.append(Check(
-            "scope", "Scope authorization", FAIL,
+            "scope", "Scope Authorization", FAIL,
             active.reason,
             "Every request is checked against <code>scope.allowed_hosts</code> "
             "before it is sent. Add this host only if the engagement actually "
@@ -194,7 +194,7 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
         hint = ("Turn on <b>Allow private / loopback ranges</b> under <b>Target</b> "
                 "if this is a local lab target." if "blocked range" in active.reason else
                 "Fix the host, the DNS entry, or the block-list under <b>Target</b>.")
-        checks.append(Check("scope", "Scope authorization", FAIL, active.reason, hint))
+        checks.append(Check("scope", "Scope Authorization", FAIL, active.reason, hint))
 
     if not allowed:
         checks.append(Check(
@@ -291,18 +291,18 @@ def evaluate(engagement: Engagement, engagement_path: str) -> Readiness:
             why = ("PLATFORM_BASE_URL is HTTPS" if cookie["https_base"]
                    else "AUTH_COOKIE_SECURE=true")
             checks.append(Check(
-                "session_cookie", "Login session cookie", OK,
+                "session_cookie", "Login Session Cookie", OK,
                 f"Marked Secure ({why}).",
             ))
         else:
             checks.append(Check(
-                "session_cookie", "Login session cookie", WARN,
+                "session_cookie", "Login Session Cookie", WARN,
                 "Not marked Secure — it will also be sent over plain HTTP.",
                 "Turn this on for any deployment reachable over HTTPS. Leave it "
                 "off for local HTTP development, where a Secure cookie cannot be "
                 "sent at all and would lock you out of your own login.",
                 fix_action="/config/session-cookie",
-                fix_label="Mark the cookie Secure",
+                fix_label="Mark the Cookie Secure",
                 fix_fields={"secure": "true"},
             ))
 
@@ -406,7 +406,7 @@ def write_dotenv_value(key: str, value: str, path: str = ".env") -> None:
     the first and leaving the rest is worse than not writing at all: .env is
     last-one-wins (see reload_dotenv), so a duplicate further down keeps the
     stale value winning and a freshly refreshed token gets written and then
-    ignored — which is exactly how a "Refresh token" click can appear to do
+    ignored — which is exactly how a "Refresh Token" click can appear to do
     nothing at all.
     """
     update_dotenv_values({key: value}, path)
@@ -475,11 +475,12 @@ def update_dotenv_values(
 def ai_evidence_config_state() -> dict[str, object]:
     """UI-safe runtime state. Secret values are reduced to booleans here."""
     secret_keys = (
-        "EVIDENCE_FINGERPRINT_KEY", "REPORT_SIGNING_KEY", "OAST_API_TOKEN",
+        "EVIDENCE_FINGERPRINT_KEY", "REPORT_SIGNING_KEY", "OAST_API_TOKEN", "INTERACTSH_TOKEN",
     )
     public_keys = (
-        "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_EFFORT",
+        "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_ASSESSMENT_BUDGET_USD", "AI_EFFORT",
         "REPORT_SIGNING_KEY_ID", "OAST_PUBLIC_URL", "OAST_POLL_URL", "OAST_TIMEOUT_S",
+        "INTERACTSH_SERVER",
     )
     return {
         "secrets": {key: bool(os.getenv(key)) for key in secret_keys},

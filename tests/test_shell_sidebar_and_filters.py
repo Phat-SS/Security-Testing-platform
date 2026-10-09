@@ -64,8 +64,8 @@ def test_the_sidebar_has_a_collapse_control_that_names_both_states(client):
     assert 'id="sb-toggle"' in html
     # Both labels ship with the button: the JS swaps them, so a rail whose
     # button still says "Collapse" would be lying about what clicking does.
-    assert 'data-label-collapse="Collapse sidebar"' in html
-    assert 'data-label-expand="Expand sidebar"' in html
+    assert 'data-label-collapse="Collapse Sidebar"' in html
+    assert 'data-label-expand="Expand Sidebar"' in html
     assert 'aria-expanded="true"' in html
 
 
@@ -88,7 +88,7 @@ def test_every_nav_item_carries_its_label_for_the_rail(client):
     assert items
     for attrs in items:
         assert "data-label=" in attrs, attrs
-    for label in ("Assessments", "Findings", "Activity", "Readiness"):
+    for label in ("Assessments", "Findings", "Audit Log", "Readiness", "Scope &amp; Targets", "Settings"):
         assert f'data-label="{label}"' in html
 
 
@@ -222,9 +222,9 @@ def test_the_summary_strip_counts_the_install_not_the_page():
 
 
 def test_clearing_is_offered_only_when_something_is_filtered():
-    assert "Clear filters" in _render(status="EXECUTED", total_matched=1,
+    assert "Clear Filters" in _render(status="EXECUTED", total_matched=1,
                                       totals={"ALL": 3, "CREATED": 3})
-    assert "Clear filters" not in _render(total_matched=3, totals={"ALL": 3, "CREATED": 3})
+    assert "Clear Filters" not in _render(total_matched=3, totals={"ALL": 3, "CREATED": 3})
 
 
 def test_the_search_box_has_its_own_reset():
@@ -235,7 +235,7 @@ def test_the_search_box_has_its_own_reset():
 
 def test_paging_has_a_control_at_all():
     """`per` and `page` were honoured server-side but nothing rendered them, so
-    page 2 was reachable only by editing the URL — which made "Per page" a
+    page 2 was reachable only by editing the URL — which made "Per Page" a
     setting whose only visible effect was hiding assessments."""
     html = _render(assessments=_fake(12), per=12, page_no=2, total_matched=40,
                    totals={"ALL": 40, "CREATED": 40})
@@ -260,3 +260,20 @@ def test_the_old_flat_toolbar_is_gone_from_the_list():
     html = _render(total_matched=3, totals={"ALL": 3, "CREATED": 3})
     assert 'class="toolbar"' not in html
     assert 'class="filters"' in html
+
+
+def test_a_jira_outage_is_a_status_icon_not_a_banner():
+    """It is true on every visit until the token is refreshed, so it belongs in
+    the app bar as a status, with the full message one hover away."""
+    warning = "Live Jira MCP unavailable (RuntimeError: HTTP 401) — using the offline mock."
+    page = render_dashboard([], "http://t", ai_on=False, warning=warning)
+    chip = re.search(r'<a class="chip chip-warn"[^>]*>', page).group(0)
+    assert 'href="/config?tab=mcp"' in chip
+    assert "HTTP 401" in chip  # the whole message, in the tooltip
+    assert "class='card pad warn'" not in page
+    assert "Jira <b>Offline</b>" in page
+
+
+def test_a_healthy_jira_shows_its_mode_quietly():
+    page = render_dashboard([], "http://t", ai_on=False, jira_mode="live Jira")
+    assert 'class="chip chip-warn"' not in page and "Jira <b>Live Jira</b>" in page

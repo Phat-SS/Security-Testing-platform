@@ -8,6 +8,7 @@ import json
 
 from app.api import ui
 from app.api.ui import attr, e
+from .copilot import copilot_panel
 from .plan import _design_section, _plan_section
 from .results import _results_section
 from .run import _execute_section, readiness_banner
@@ -26,12 +27,15 @@ def _phase_rail(aid: str, st: _State, current: str, counts: dict[str, str]) -> s
     """
     states = st.phase_state()
     out = ""
-    for key, label in PHASES:
+    for i, (key, label) in enumerate(PHASES, 1):
         cls = "on" if key == current else states[key]
         n = counts.get(key, "")
+        # The badge is the step number until the phase is done, then a tick:
+        # the rail reads as progress at a glance without a legend.
+        mark = "&#10003;" if states[key] == "done" and key != current else str(i)
         out += (
             f'<a href="/assessment/{attr(aid)}?phase={key}" class="{cls}" data-phase="{key}">'
-            f'<span class="dot"></span>{e(_t(label))}'
+            f'<span class="dot">{mark}</span><b>{e(_t(label))}</b>'
             + (f'<span class="n">{e(n)}</span>' if n else "")
             + "</a>"
         )
@@ -91,7 +95,7 @@ def _flash(aid: str, flash: str, ticket_url: str) -> str:
         # becomes a clickable link.
         return f"""<div class='card pad flash exec-flash'>
 <b>{_t("Posted to Jira")}</b>
-<a href="{e(ticket_url)}" class="btn sec" target="_blank" rel="noopener">{_t("Open ticket")} ↗</a>
+<a href="{e(ticket_url)}" class="btn sec" target="_blank" rel="noopener">{_t("Open Ticket")} ↗</a>
 </div>"""
     if flash:
         return f"<div class='card pad flash'>{e(_t(flash))}</div>"
@@ -172,6 +176,7 @@ def body(
     uncovered_poc_endpoints: list[str] | None = None,
     phase: str = "",
     run_job=None,
+    copilot=None,
 ) -> str:
     verdicts = verdicts or {}
     aid = assessment.id
@@ -191,10 +196,10 @@ def body(
     sensitive = analysis.get("sensitive_operation")
     target = assessment.target_base_url
 
-    copy_tip = _t("Copy the assessment id")
+    copy_tip = _t("Copy the Assessment Id")
     sensitive_label = _t("sensitive operation:") + f" <b>{_t('yes') if sensitive else _t('no')}</b>"
     last_target = (f'· {_t("last target:")} <span class="mono">{e(target)}</span>' if target else "")
-    copied_label = json.dumps(_t("copied"))
+    copied_label = json.dumps(_t("Copied"))
     head = f"""<div class="pagehead">
 <div>
 <h1>{e(assessment.issue_key)} {ui.pill(_t(status_label), status_tone)}</h1>
@@ -202,13 +207,13 @@ def body(
 <p class="muted" style="margin:6px 0 0;font-size:12.5px">
 <span class="mono">{e(aid)}</span>
 <button type="button" class="copy" data-copy="{attr(aid)}"
- data-tip="{attr(copy_tip)}">{_t("copy")}</button>
+ data-tip="{attr(copy_tip)}">{_t("Copy")}</button>
 · {sensitive_label}
 {last_target}</p>
 </div>
 <div class="row" style="gap:6px">
 <a href="/assessment/{attr(aid)}/report" class="btn sec" target="_blank">{_t("Report")} ↗</a>
-<a href="/" class="btn ghost">← {_t("All assessments")}</a>
+<a href="/" class="btn ghost">← {_t("All Assessments")}</a>
 </div>
 </div>"""
 
@@ -256,8 +261,12 @@ def body(
 {head}
 {readiness_banner(readiness)}{stale_banner(aid) if stale else ''}
 {_stats(aid, st, findings, coverage)}
+<div class="ws"><div class="ws-main">
 {_phase_rail(aid, st, current, counts)}
 {panes}
+</div>
+{copilot_panel(aid, copilot, phase=current, planner_enabled=planner_enabled)}
+</div>
 <script>
 {_body_js()}
 (function () {{
@@ -273,12 +282,11 @@ def body(
 
 
 VI.update({
-    "Working…": "Đang xử lý…",
-    "Copy the assessment id": "Copy id của assessment",
+    "Working…": "Đang Xử Lý…",
+    "Copy the Assessment Id": "Copy Id Của Assessment",
     "sensitive operation:": "thao tác nhạy cảm:", "yes": "có", "no": "không",
     "last target:": "mục tiêu gần nhất:",
-    "copied": "đã copy",
-    "copy": "copy",
-    "Report": "Báo cáo", "All assessments": "Tất cả assessment",
-    "Analyzed": "Đã phân tích",
+    "Copied": "Đã Copy", "Copy": "Copy",
+    "Report": "Báo Cáo", "All Assessments": "Tất Cả Assessment",
+    "Analyzed": "Đã Phân Tích",
 })

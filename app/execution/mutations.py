@@ -19,6 +19,7 @@ like assurance.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -841,6 +842,90 @@ def _type_confusion_probe(req: _Req, m: Mutation, env: _Env) -> None:
     req.note = f"sent a {variant} boundary value in {location} field '{field_name}' (parser/type-coercion probe)"
 
 
+# --- Injection (detect-only, error/evaluation oracles) --------------------------
+#
+# OWASP API 2023 folds injection into misconfiguration-adjacent ground, so these
+# register under API8. Every one is DETECT-ONLY: the payload is chosen so the
+# server either evaluates it into a value the payload itself does not contain
+# (SSTI), or fails into an error string a well-configured server never shows
+# (SQL/NoSQL), or reads a file whose content is unmistakable (traversal). None
+# extracts data, writes, or chains a second statement: the classic `; DROP`
+# shape is deliberately absent. Time-based blind variants are not here — a
+# single-request timing oracle cannot tell a slow query from a slow day.
+
+#: What each injection kind writes into the aimed field.
+INJECTION_PAYLOADS: dict[str, object] = {
+    "sqli_error_probe": "'\")(",
+    "ssti_probe": "{{73331*91237}}${73331*91237}<%= 73331*91237 %>#{73331*91237}",
+    "path_traversal_probe": "../../../../../../../../etc/passwd",
+    "crlf_injection_probe": "sentinel\r\nX-Sentinel-Injected: 1",
+}
+#: 73331 * 91237 — present in the response only if a template engine evaluated it.
+SSTI_PRODUCT = "6690500447"
+
+
+def _aim(req: _Req, m: Mutation, value: object, kind: str) -> tuple[str, str]:
+    field_name = m.detail.get("field")
+    if not field_name:
+        raise MutationError(f"{kind} requires detail['field'] naming the parameter to aim at.")
+    location = str(m.detail.get("location", "query"))
+    if location == "query":
+        req.query[str(field_name)] = "" if value is None else (
+            value if isinstance(value, str) else json.dumps(value))
+    elif location == "body":
+        body = _as_dict_body(req)
+        _set_dotted(body, str(field_name), value)
+        req.body = body
+    else:
+        raise MutationError(f"{kind}: 'location' must be query or body.")
+    return str(field_name), location
+
+
+def _sqli_error_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    field_name, location = _aim(req, m, INJECTION_PAYLOADS["sqli_error_probe"], "sqli_error_probe")
+    req.note = (f"sent unbalanced SQL quote/paren characters in {location} field '{field_name}' "
+                "to see whether a database error reaches the response (error-based SQLi)")
+
+
+def _nosqli_operator_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    field_name = m.detail.get("field")
+    if not field_name:
+        raise MutationError("nosqli_operator_probe requires detail['field'].")
+    location = str(m.detail.get("location", "query"))
+    if location == "query":
+        # The bracket form is how Express/qs and PHP turn a query string into
+        # an object — the usual way an operator reaches a Mongo filter.
+        req.query.pop(str(field_name), None)
+        req.query[f"{field_name}[$ne]"] = ""
+    elif location == "body":
+        body = _as_dict_body(req)
+        _set_dotted(body, str(field_name), {"$ne": None})
+        req.body = body
+    else:
+        raise MutationError("nosqli_operator_probe: 'location' must be query or body.")
+    req.note = (f"replaced {location} field '{field_name}' with a query operator ($ne) to see "
+                "whether it reaches a document-store filter")
+
+
+def _ssti_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    field_name, location = _aim(req, m, INJECTION_PAYLOADS["ssti_probe"], "ssti_probe")
+    req.note = (f"sent template expressions for 73331*91237 in {location} field '{field_name}'; "
+                f"'{SSTI_PRODUCT}' in the response means a template engine evaluated input")
+
+
+def _path_traversal_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    field_name, location = _aim(req, m, INJECTION_PAYLOADS["path_traversal_probe"],
+                                "path_traversal_probe")
+    req.note = f"sent a ../ traversal to /etc/passwd in {location} field '{field_name}'"
+
+
+def _crlf_injection_probe(req: _Req, m: Mutation, env: _Env) -> None:
+    field_name, location = _aim(req, m, INJECTION_PAYLOADS["crlf_injection_probe"],
+                                "crlf_injection_probe")
+    req.note = (f"sent a CR/LF sequence in {location} field '{field_name}' to see whether it "
+                "splits into a new response header")
+
+
 # --- API9: inventory management ----------------------------------------------
 
 _GRAPHQL_INTROSPECTION_QUERY = (
@@ -1012,6 +1097,11 @@ for _spec, _handler in [
     (MutationSpec("security_headers_probe", _A.API8, "Inspect response hardening headers"), _security_headers_probe),
     (MutationSpec("host_header_injection", _A.API8, "Test whether an absolute URL in the response trusts a client-supplied Host"), _host_header_injection),
     (MutationSpec("type_confusion_probe", _A.API8, "Send a boundary/type-confusion value into one field and check for an unhandled-exception disclosure"), _type_confusion_probe),
+    (MutationSpec("sqli_error_probe", _A.API8, "Injection: unbalanced SQL quote in one field; a database error in the response is the finding"), _sqli_error_probe),
+    (MutationSpec("nosqli_operator_probe", _A.API8, "Injection: replace one field with a $ne operator to reach a document-store filter"), _nosqli_operator_probe),
+    (MutationSpec("ssti_probe", _A.API8, "Injection: template expressions for 73331*91237; 6690500447 in the response means server-side template evaluation"), _ssti_probe),
+    (MutationSpec("path_traversal_probe", _A.API8, "Injection: ../ traversal to /etc/passwd in a file/path-like field"), _path_traversal_probe),
+    (MutationSpec("crlf_injection_probe", _A.API8, "Injection: CR/LF in one field to split a new response header"), _crlf_injection_probe),
     # API9
     (MutationSpec("version_downgrade", _A.API9, "Re-aim at a superseded API version"), _version_downgrade),
     (MutationSpec("undocumented_path_probe", _A.API9, "Probe for spec dumps / actuators / admin surfaces"), _undocumented_path_probe),

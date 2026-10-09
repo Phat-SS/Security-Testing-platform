@@ -56,7 +56,8 @@ def test_save_and_list_environment(client):
     r = client.post("/config/environments", data={"name": "dev", "url": "http://127.0.0.1:8000"},
                     follow_redirects=True)
     assert r.status_code == 200
-    assert "<b>dev</b>" in r.text
+    assert "<b>Dev</b>" in r.text
+    assert ">dev</span>" in r.text  # the identifier itself, beside its Title Case label
     assert "http://127.0.0.1:8000" in r.text
     assert "default" in r.text  # first saved environment becomes the default
 
@@ -98,8 +99,8 @@ def test_delete_environment_reassigns_active(client):
     client.post("/config/environments", data={"name": "staging", "url": "https://staging.example.com"})
     r = client.post("/config/environments/dev/delete", follow_redirects=True)
     assert r.status_code == 200
-    assert "<b>dev</b>" not in r.text
-    assert "<b>staging</b>" in r.text
+    assert "<b>Dev</b>" not in r.text
+    assert "<b>Staging</b>" in r.text
     assert "No environments configured yet" not in r.text
 
 
@@ -118,8 +119,8 @@ def test_execute_dropdown_shows_saved_environments(client):
     assert r.status_code == 200
     assert "value='dev'" in r.text
     assert "value='staging'" in r.text
-    assert "Run approved tests" in r.text
-    assert "disabled" not in r.text.split("Run approved tests")[0].rsplit("<button", 1)[-1]
+    assert "Run Approved Tests" in r.text
+    assert "disabled" not in r.text.split("Run Approved Tests")[0].rsplit("<button", 1)[-1]
 
 
 def test_run_button_is_disabled_until_something_is_approved(client):
@@ -132,7 +133,7 @@ def test_run_button_is_disabled_until_something_is_approved(client):
     r = client.get(f"/assessment/{aid}?phase=run")
 
     assert "no approved tests" in r.text
-    assert "disabled" in r.text.split("Run approved tests")[0].rsplit("<button", 1)[-1]
+    assert "disabled" in r.text.split("Run Approved Tests")[0].rsplit("<button", 1)[-1]
 
 
 def test_execute_targets_the_selected_environment(client_with_scope):
@@ -190,14 +191,14 @@ def test_delete_removes_a_legacy_default_environment_for_good(tmp_path, monkeypa
     from app.api.main import app
 
     with TestClient(app) as c:
-        assert "<b>default</b>" in c.get("/config/environments").text
+        assert "<b>Default</b>" in c.get("/config/environments").text
 
         r = c.post("/config/environments/default/delete", follow_redirects=True)
         assert r.status_code == 200
-        assert "<b>default</b>" not in r.text
+        assert "<b>Default</b>" not in r.text
         # It must also be gone on a fresh read of the file, not just in the
         # response rendered from the in-memory state right after the write.
-        assert "<b>default</b>" not in c.get("/config/environments").text
+        assert "<b>Default</b>" not in c.get("/config/environments").text
 
     saved = json.loads(cfg.read_text(encoding="utf-8"))
     assert "default" not in saved["environments"]

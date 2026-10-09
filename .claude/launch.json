@@ -4,13 +4,25 @@
     {
       "name": "platform",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "uvicorn", "app.api.main:app", "--port", "8100"],
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.api.main:app",
+        "--port",
+        "8100"
+      ],
       "port": 8100
     },
     {
       "name": "demo-target",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "uvicorn", "demo.vulnerable_api:app", "--port", "8000"],
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "demo.vulnerable_api:app",
+        "--port",
+        "8000"
+      ],
       "port": 8000
     }
   ]

@@ -17,6 +17,8 @@ colour and label living in a script, drifting from this one.
 
 from __future__ import annotations
 
+import math
+
 from app.api import ui
 from app.api.ui import attr, e
 from app.core.i18n import VI, tt as _t
@@ -27,7 +29,7 @@ from app.core.i18n import VI, tt as _t
 _ORDER = (
     ("FAIL", "crit"),
     ("INCONCLUSIVE", "med"),
-    ("PASS", "low"),
+    ("PASS", "ok"),
     ("BLOCKED", "info"),
     ("ERROR", "high"),
 )
@@ -44,6 +46,33 @@ def _bar(verdicts: dict, done: int) -> str:
         for name, tone in _ORDER if verdicts.get(name)
     )
     return f'<div class="runbar">{segments}</div>'
+
+
+def _radar(verdicts: dict, done: int) -> str:
+    """The Sentinel mark at run scale: the sweep turns while the run is live
+    (CSS, `.runcard.live`), and each verdict lands as a blip. Blip positions
+    are fixed per index so the picture does not jump on every poll; colours
+    come from the same tones as the bar and legend."""
+    blips = []
+    i = 0
+    for name, tone in _ORDER:
+        for _ in range(min(verdicts.get(name, 0), 24 - len(blips))):
+            # A golden-angle spiral: even spread, stable for a given index.
+            angle = i * 2.39996
+            radius = 14 + (i * 37 % 34)
+            x, y = 60 + radius * math.cos(angle), 60 + radius * math.sin(angle)
+            blips.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="var(--{tone})"/>')
+            i += 1
+    return (
+        '<svg class="radar" viewBox="0 0 120 120" width="112" height="112" aria-hidden="true">'
+        '<circle cx="60" cy="60" r="54" fill="var(--bg)" stroke="var(--border)"/>'
+        '<circle cx="60" cy="60" r="36" fill="none" stroke="var(--border)"/>'
+        '<circle cx="60" cy="60" r="18" fill="none" stroke="var(--border)"/>'
+        '<g class="sweep"><path d="M60 60 L60 6 A54 54 0 0 1 106.8 33 Z" '
+        'fill="var(--accent)" opacity=".18"/></g>'
+        + "".join(blips)
+        + '<circle cx="60" cy="60" r="3" fill="var(--accent)"/></svg>'
+    )
 
 
 def _legend(verdicts: dict) -> str:
@@ -95,9 +124,9 @@ def panel_fragment(aid: str, job) -> str:
     if running:
         heading, tone = _t("Running"), "warn"
     elif job.state == "FAILED":
-        heading, tone = _t("Run failed"), "err"
+        heading, tone = _t("Run Failed"), "err"
     else:
-        heading, tone = _t("Run finished"), "flash"
+        heading, tone = _t("Run Finished"), "flash"
 
     eta = ""
     if running and progress.get("eta_s") is not None:
@@ -118,7 +147,9 @@ def panel_fragment(aid: str, job) -> str:
         ok = "0" if job.state == "FAILED" else "1"
         finished = f'<span id="run-finished" data-ok="{ok}" hidden></span>'
 
-    return f"""{finished}<div class="card pad {tone}" style="margin-bottom:14px">
+    return f"""{finished}<div class="card pad {tone} runcard{' live' if running else ''}" style="margin-bottom:14px">
+{_radar(verdicts, done)}
+<div class="runinfo">
 <div class="row" style="justify-content:space-between;align-items:baseline">
 <div class="row" style="gap:8px;align-items:baseline">
 <b>{e(heading)}</b>
@@ -130,9 +161,9 @@ def panel_fragment(aid: str, job) -> str:
 {_bar(verdicts, done)}
 {_legend(verdicts)}
 {error}
-</div>
+</div></div>
 <div class="card" style="margin-bottom:14px">
-<div class="runfeed-head">{_t("As they land")}</div>
+<div class="runfeed-head">{_t("As They Land")}</div>
 {_feed_rows(progress.get("recent") or [])}
 </div>"""
 
@@ -171,6 +202,10 @@ _POLL_JS = """
       .then(function (html) {
         if (html === null) return;
         host.innerHTML = html;
+        // The swap replaces the radar every poll; a negative delay keeps the
+        // sweep's phase continuous instead of snapping back to 12 o'clock.
+        var sweep = host.querySelector('.radar .sweep');
+        if (sweep) sweep.style.animationDelay = '-' + (performance.now() % 2600) + 'ms';
         if (host.dataset.done === '1') return;
         var end = document.getElementById('run-finished');
         if (end) {
@@ -194,10 +229,10 @@ _POLL_JS = """
 """
 
 VI.update({
-    "Running": "Đang chạy", "Run finished": "Đã chạy xong", "Run failed": "Chạy thất bại",
-    "sent": "đã gửi", "As they land": "Kết quả về dần",
+    "Running": "Đang Chạy", "Run Finished": "Đã Chạy Xong", "Run Failed": "Chạy Thất Bại",
+    "sent": "đã gửi", "As They Land": "Kết Quả Về Dần",
     "Nothing has come back yet.": "Chưa có kết quả nào.",
     "about {n}s left": "còn khoảng {n}s", "took {n}s": "mất {n}s",
-    "Fail": "Lỗi", "Inconclusive": "Chưa kết luận", "Pass": "Đạt",
-    "Blocked": "Bị chặn", "Error": "Lỗi hệ thống",
+    "Fail": "Lỗi", "Inconclusive": "Chưa Kết Luận", "Pass": "Đạt",
+    "Blocked": "Bị Chặn", "Error": "Lỗi Hệ Thống",
 })

@@ -59,6 +59,7 @@ def assessment_page(
     uncovered_poc_endpoints: list[str] | None = None,
     phase: str = "",
     run_job=None,
+    copilot=None,
 ) -> str:
     """The assessment screen. Its structure lives in `views/assessment/`, one
     module per phase — it is the one page with enough moving parts to be worth
@@ -94,5 +95,6 @@ def assessment_page(
         uncovered_poc_endpoints=uncovered_poc_endpoints or [],
         phase=phase,
         run_job=run_job,
+        copilot=copilot,
     )
     return page(f"Assessment {assessment.issue_key}", body, active="assessment")

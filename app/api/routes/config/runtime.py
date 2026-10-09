@@ -31,6 +31,7 @@ async def save_runner_route(
     max_response_bytes: str = Form(""),
     max_requests_per_test: str = Form(""),
     max_concurrent_tests: str = Form(""),
+    max_requests_per_second: str = Form(""),
     reset: str = Form(""),
     user: User = Depends(require("tester")),
 ):
@@ -43,6 +44,7 @@ async def save_runner_route(
         "max_response_bytes": max_response_bytes,
         "max_requests_per_test": max_requests_per_test,
         "max_concurrent_tests": max_concurrent_tests,
+        "max_requests_per_second": max_requests_per_second,
     }
     limits: dict[str, float] = {}
     for key, raw in submitted.items():
@@ -50,7 +52,8 @@ async def save_runner_route(
         if not raw:
             continue  # blank means "fall back to the env var", not zero
         try:
-            value = float(raw) if key == "timeout_s" else int(float(raw))
+            value = (float(raw) if key in ("timeout_s", "max_requests_per_second")
+                     else int(float(raw)))
         except ValueError:
             return config_redirect("runner", f"{key} must be a number — nothing saved")
         if value < 0:
@@ -93,11 +96,12 @@ async def save_ai_evidence_route(
     """Save AI/evidence runtime settings without ever echoing stored secrets."""
     form = await request.form()
     secret_keys = (
-        "EVIDENCE_FINGERPRINT_KEY", "REPORT_SIGNING_KEY", "OAST_API_TOKEN",
+        "EVIDENCE_FINGERPRINT_KEY", "REPORT_SIGNING_KEY", "OAST_API_TOKEN", "INTERACTSH_TOKEN",
     )
     public_keys = (
-        "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_EFFORT",
+        "ANTHROPIC_MODEL", "AI_MAX_BUDGET_USD", "AI_ASSESSMENT_BUDGET_USD", "AI_EFFORT",
         "REPORT_SIGNING_KEY_ID", "OAST_PUBLIC_URL", "OAST_POLL_URL", "OAST_TIMEOUT_S",
+        "INTERACTSH_SERVER",
     )
     # AUTH_COOKIE_SECURE used to be in this list. It is a login-session setting,
     # not an AI or evidence one, and leaving it here would be worse than untidy:
@@ -149,6 +153,12 @@ async def save_ai_evidence_route(
         if value and (parsed.scheme != "https" or not parsed.hostname):
             return config_redirect("ai-evidence", f"{label} must be an absolute HTTPS URL")
 
+    interactsh = prospective("INTERACTSH_SERVER")
+    if interactsh and not re.fullmatch(r"[A-Za-z0-9.-]{3,253}", interactsh):
+        return config_redirect(
+            "ai-evidence", "INTERACTSH_SERVER must be a bare host name, e.g. oast.example.com"
+        )
+
     model = prospective("ANTHROPIC_MODEL")
     if prospective("AI_REQUIRE_PINNED_MODEL") == "true" and not any(c.isdigit() for c in model):
         return config_redirect(
@@ -156,7 +166,8 @@ async def save_ai_evidence_route(
         )
     budget = prospective("AI_MAX_BUDGET_USD")
     timeout = prospective("OAST_TIMEOUT_S")
-    for key, raw in (("AI_MAX_BUDGET_USD", budget), ("OAST_TIMEOUT_S", timeout)):
+    for key, raw in (("AI_MAX_BUDGET_USD", budget), ("OAST_TIMEOUT_S", timeout),
+                     ("AI_ASSESSMENT_BUDGET_USD", prospective("AI_ASSESSMENT_BUDGET_USD"))):
         if not raw:
             continue
         try:

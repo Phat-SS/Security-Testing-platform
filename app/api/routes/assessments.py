@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import (
     HTMLResponse,
     RedirectResponse,
@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from app.api import views
 from app.api.deps import require, require_page
 from app.api.errors import import_error
-from app.adapters import openapi
+from app.adapters import har, openapi
 from app.api.runtime import state
 from app.core import preflight
 from app.core.auth import User
@@ -158,6 +158,7 @@ async def view_assessment(
         # A run started in another tab is still this assessment's run, so the
         # panel is looked up by assessment rather than by the job id in the URL.
         run_job=state.repo.latest_job(aid, "execute"),
+        copilot=state.orch.latest_copilot(aid),
     )
 
 
@@ -165,6 +166,43 @@ async def view_assessment(
 async def delete_assessment(aid: str, user: User = Depends(require("tester"))):
     state.orch.delete_assessment(aid, actor=user.name)
     return RedirectResponse("/?flash=Deleted+assessment", status_code=303)
+
+
+#: A ceiling on one bulk delete. The list shows at most 96 per page, so this
+#: only ever bites a hand-crafted request — which is the request to bound.
+_MAX_BULK_DELETE = 200
+
+
+@router.post("/assessments/delete")
+async def delete_assessments(request: Request, user: User = Depends(require("tester"))):
+    """Delete several assessments at once (the list's selection bar).
+
+    This path is NOT under `/assessment/{aid}`, so the engagement middleware
+    cannot see which assessments it touches. Each id is therefore checked here,
+    the same way the middleware would: it must exist, and with auth on the
+    caller must be allowed to see the engagement it was opened under. An id
+    that fails either check is skipped and counted, never deleted.
+    """
+    form = await request.form()
+    ids = list(dict.fromkeys(str(v) for v in form.getlist("ids") if str(v).strip()))
+    if not ids:
+        return RedirectResponse(f"/?flash={quote('Nothing selected')}", status_code=303)
+    if len(ids) > _MAX_BULK_DELETE:
+        return RedirectResponse(
+            f"/?flash={quote(f'Select at most {_MAX_BULK_DELETE} assessments at once')}",
+            status_code=303)
+    deleted = refused = 0
+    for aid in ids:
+        if state.repo.get_assessment(aid) is None:
+            refused += 1
+            continue
+        if state.auth.enabled and not user.may_see_engagement(state.repo.assessment_engagement(aid)):
+            refused += 1
+            continue
+        state.orch.delete_assessment(aid, actor=user.name)
+        deleted += 1
+    flash = f"Deleted {deleted} assessment(s)" + (f", {refused} skipped" if refused else "")
+    return RedirectResponse(f"/?flash={quote(flash)}", status_code=303)
 
 
 
@@ -269,7 +307,7 @@ async def import_openapi(aid: str, spec: str = Form(""), spec_file: UploadFile |
 
     try:
         result = state.orch.import_openapi(aid, text, actor=user.name)
-    except openapi.SpecError as exc:
+    except (openapi.SpecError, har.HarError) as exc:
         return _endpoints_redirect(aid, f"Not imported: {exc}")
     except (ValidationError, ValueError) as exc:
         return _endpoints_redirect(aid, f"Not imported: {_first_error(exc)}")
@@ -303,7 +341,7 @@ async def reanalyze(aid: str, user: User = Depends(require("tester"))):
         headline, hint = import_error(a.issue_key, exc)
         return HTMLResponse(
             views.error_page("Re-analysis failed", headline, hint,
-                             back_href=f"/assessment/{aid}", back_label="← Back to assessment"),
+                             back_href=f"/assessment/{aid}", back_label="← Back to Assessment"),
             status_code=400,
         )
     return _endpoints_redirect(aid, "Re-analyzed from the ticket")

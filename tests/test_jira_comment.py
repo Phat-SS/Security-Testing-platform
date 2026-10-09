@@ -243,10 +243,10 @@ def test_the_per_test_explanation_is_not_in_the_comment():
 
     assert "Expected of a secure system" not in comment
     assert "Actually observed" not in comment
-    assert "Attack parameters" not in comment
+    assert "Attack Parameters" not in comment
     assert "targeted object id 2002" not in comment       # the runtime attack note
     assert "returned data belonging to another identity" not in comment  # the reason
-    assert "Positive control" not in comment
+    assert "Positive Control" not in comment
     assert "request(s) sent concurrently" not in comment
 
 

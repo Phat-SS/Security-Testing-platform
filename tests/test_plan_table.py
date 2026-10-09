@@ -54,7 +54,7 @@ def test_the_plan_is_paged_not_dumped(client, big_plan):
 
     page = client.get(f"/assessment/{big_plan}?per=25").text
 
-    assert page.count('name="test_ids"') == 25
+    assert page.count('class="tsel" name="test_ids"') == 25
     assert 'class="pager"' in page
     assert f"{total} tests" in page
 
@@ -87,7 +87,7 @@ def test_filter_by_category(client, big_plan):
 
     page = client.get(f"/assessment/{big_plan}?cat=API1:2023&per=500").text
 
-    assert page.count('name="test_ids"') == expected
+    assert page.count('class="tsel" name="test_ids"') == expected
     ids = [part.split('"')[0] for part in page.split('name="test_ids" value="')[1:]]
     assert ids and all(i.startswith("API1-") for i in ids), (
         f"the filtered plan still lists other categories: {ids[:5]}"

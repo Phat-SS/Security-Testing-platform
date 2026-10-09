@@ -18,6 +18,36 @@ from app.database.models import Assessment
 # states and approval statuses reuse the same 5-color vocabulary as severity
 # (crit/high/med/low/info) so a reader only has to learn one palette.
 
+def _charts(severity_series: list, outcome_series: list) -> str:
+    """The two charts above the list. Hidden entirely until there is a run to
+    describe: an empty chart frame is decoration, not information."""
+    if not severity_series and not outcome_series:
+        return ""
+    sev_labels = {"CRITICAL": _t("Critical"), "HIGH": _t("High"), "MEDIUM": _t("Medium"),
+                  "LOW": _t("Low")}
+    out_labels = {"FAIL": _t("Fail"), "INCONCLUSIVE": _t("Review"), "PASS": _t("Pass"),
+                  "OTHER": _t("Blocked / Error")}
+    return '<div class="charts">' + ui.charts.severity_bars(
+        severity_series, title=_t("Findings by Severity"),
+        sub=_t("Recent Assessments With Findings"), labels=sev_labels,
+        table_label=_t("Show as Table"), empty=_t("No confirmed findings yet."),
+    ) + ui.charts.outcome_columns(
+        outcome_series, title=_t("Test Outcomes per Run"), sub=_t("Latest Executed Assessments"),
+        labels=out_labels, table_label=_t("Show as Table"), empty=_t("Nothing has run yet."),
+    ) + "</div>"
+
+
+def _jira_chip(jira_mode: str, warning: str) -> str:
+    if warning:
+        return (
+            f'<a class="chip chip-warn" href="/config?tab=mcp" data-tip="{attr(warning)}" '
+            f'aria-label="{attr(_t("Jira Offline") + ": " + warning)}">'
+            f'{ui.icon("alert", 14)}Jira <b>{_t("Offline")}</b></a>'
+        )
+    label = jira_mode[:1].upper() + jira_mode[1:]
+    return f'<span class="chip">Jira <b>{_e(label)}</b></span>'
+
+
 def dashboard(
     assessments: list[Assessment],
     # Kept in the signature (main.py and the tests pass it positionally) but no
@@ -38,6 +68,8 @@ def dashboard(
     total_matched: int | None = None,
     status_counts: dict[str, int] | None = None,
     totals: dict[str, int] | None = None,
+    severity_series: list | None = None,
+    outcome_series: list | None = None,
 ) -> str:
     """The assessment list.
 
@@ -47,7 +79,11 @@ def dashboard(
     found.
     """
     flash_html = f"<div class='card pad flash'>{_e(_t(flash))}</div>" if flash else ""
-    warn_html = f"<div class='card pad warn'>&#9888; {_e(warning)}</div>" if warning else ""
+    # A live-Jira failure is a status, not an event: it is true on every visit
+    # until someone refreshes the token. A banner across the top of the page
+    # pushed the work down every time; it is now the Jira chip in the app bar,
+    # amber with a warning icon, the full message in its tooltip, and a click
+    # through to the setting that fixes it.
 
     # Counts describe the whole list, not the page being shown. `assessments`
     # is one window of it, so a 40-assessment install used to read "24
@@ -74,38 +110,31 @@ def dashboard(
         + "</p>"
     )
 
-    ai = _t("AI (Claude)") if ai_on else _t("deterministic (heuristic)")
+    ai = _t("AI (Claude)") if ai_on else _t("Deterministic")
 
     # Available keys come from the mock only; a live instance is not enumerated,
     # so the hint becomes "type your own key" rather than a stale list.
     keys = available_keys or []
     if keys:
-        hint = (_t("importable now:") + " "
+        hint = (_t("Available:") + " "
                 + ", ".join(f"<a href='#' class='keyfill'><code>{_e(k)}</code></a>" for k in keys))
         placeholder = _e(keys[0])
     else:
-        hint = _t("enter any issue key your Jira account can read")
+        hint = _t("Any issue key your Jira account can read.")
         placeholder = "ABC-123"
 
+    # One line per option. Nothing runs on import whichever is chosen, which is
+    # the only thing a tester needs to know before pressing the button.
     plan_tip = _t(
-        "Analyze only: just the endpoint list and OWASP mapping, nothing designed yet — "
-        "pick this when the endpoint list needs correcting first. Auto-plan: the AI planner "
-        "adds its own attacks on top of the rule engine, then a reviewing agent audits the "
-        "result and sends gaps back for one revision round. Run ticket's PoC only: no "
-        "invented attacks — just the PoC script embedded in the ticket's description, "
-        "always sent to the target URL configured for this tool (never a host from the "
-        "script itself), still reviewed by the same reviewing agent read-only. Either way, "
-        "nothing runs: every test lands PENDING."
+        "Analyze Only: map endpoints. Auto-Plan: rules + AI planner + review. "
+        "Ticket PoC Only: just the ticket's script. Nothing runs on import."
     )
     confirm_delete = _t("Delete this assessment? This cannot be undone.")
-    reimport_confirm = _t(
-        "Re-import {issue} from Jira?\n\nCreates a new assessment from the ticket as it "
-        "reads now. No tests are generated and nothing runs."
-    )
+    bulk_confirm = _t("Delete {n} assessment(s)? This cannot be undone.")
+    charts_html = _charts(severity_series or [], outcome_series or [])
+    reimport_confirm = _t("Re-import {issue} from Jira as a new assessment? Nothing runs.")
     rerun_confirm = _t(
-        "Re-run {issue}?\n\nCreates a new assessment with the same plan and approvals, "
-        "then runs the approved non-destructive tests. Destructive tests are never "
-        "included in a re-run. The previous run is kept as the baseline."
+        "Re-run {issue}? Runs the approved non-destructive tests as a new assessment."
     )
     working = _t("Working…")
     running = _t("Running…")
@@ -115,13 +144,13 @@ def dashboard(
     # they say which *kind* of plan the next import will produce.
     bar = appbar(_t("Assessments"), actions=(
         f'<span class="chip">{_t("Analyzer")} <b>{ai}</b></span>'
-        f'<span class="chip">Jira <b>{_e(jira_mode)}</b></span>'
+        + _jira_chip(jira_mode, warning)
     ))
 
     return page(_t("Assessments"), f"""
-{flash_html}{warn_html}
+{flash_html}
 <div class="card pad" style="margin-bottom:22px">
-<label class="field" style="margin-bottom:8px"><span>{_t("Import a Jira issue")}</span></label>
+<h2 class="section" style="margin:0 0 12px">{_t("New Assessment")}</h2>
 <form method="post" action="/import" class="row js-busy" style="align-items:flex-end">
 <input name="issue_key" id="issue_key" placeholder="{placeholder}" style="max-width:220px" required>
 <label class="field" style="max-width:150px;margin:0"><span>{_t("Depth")}</span>
@@ -130,20 +159,32 @@ def dashboard(
 <option value="aggressive">{_t("Aggressive")}</option>
 </select></label>
 <label class="field" style="max-width:190px;margin:0" data-tip="{attr(plan_tip)}">
-<span>{_t("On import")}</span>
+<span>{_t("On Import")}</span>
 <select name="mode">
-<option value="analyze">{_t("Analyze only")}</option>
-<option value="auto_plan" selected>{_t("Auto-plan (AI attack planner)")}</option>
-<option value="ticket_poc">{_t("Run ticket's PoC only")}</option>
+<option value="analyze">{_t("Analyze Only")}</option>
+<option value="auto_plan" selected>{_t("Auto-Plan (AI)")}</option>
+<option value="ticket_poc">{_t("Ticket PoC Only")}</option>
 </select></label>
-<button class="btn">{_t("Import")}</button>
+<button class="btn">{ui.icon("plus", 15)}{_t("Import")}</button>
 </form>
 <p class="muted" style="margin:8px 0 0;font-size:13px">{hint}</p></div>
 {summary}
-<h2 class="section">{_t("Recent assessments")}</h2>
+{charts_html}
+<h2 class="section">{_t("Recent Assessments")}</h2>
 {_dashboard_toolbar(q, status, sort, per, page_no, matched, n_all, status_counts or {})}
-<div class="grid-cards">{cards}</div>
+<div class="grid-cards" id="a-grid">{cards}</div>
 {_dashboard_pager(q, status, sort, per, page_no, pages)}
+<div class="dock-anchor">
+<form method="post" action="/assessments/delete" id="bulk-form" class="dock"
+ role="toolbar" aria-label="{attr(_t("Selection"))}" aria-hidden="true" inert>
+<button type="button" class="dock-x" id="bulk-clear" aria-label="{attr(_t("Clear Selection"))}"
+ data-tip="{attr(_t("Clear Selection") + " · Esc")}">{ui.icon("x", 15)}</button>
+<span class="dock-n"><b id="bulk-n">0</b> {_t("Selected")}</span>
+<span class="dock-sep" aria-hidden="true"></span>
+<button type="button" class="dock-b" id="bulk-all">{ui.icon("check", 15)}<span>{_t("Select All on Page")}</span></button>
+<button class="dock-b danger">{ui.icon("trash", 15)}<span>{_t("Delete Selected")}</span></button>
+</form>
+</div>
 <script>
 // Import can now include a planning + review pass, which takes tens of seconds
 // with the AI path on. A button that looks idle for that long reads as broken and
@@ -162,9 +203,66 @@ document.querySelectorAll('.keyfill').forEach(function (a) {{
     document.getElementById('issue_key').value = a.textContent.trim();
   }});
 }});
+(function () {{
+  var bar = document.getElementById('bulk-form');
+  var grid = document.getElementById('a-grid');
+  var allBtn = document.getElementById('bulk-all');
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('.a-sel'));
+  var last = -1;
+  function sync() {{
+    var n = boxes.filter(function (b) {{ return b.checked; }}).length;
+    var nEl = document.getElementById('bulk-n');
+    if (nEl.textContent !== String(n)) {{
+      nEl.textContent = n;
+      nEl.classList.remove('bump'); void nEl.offsetWidth; nEl.classList.add('bump');
+    }}
+    var on = n > 0;
+    bar.classList.toggle('on', on);
+    bar.setAttribute('aria-hidden', on ? 'false' : 'true');
+    if (on) bar.removeAttribute('inert'); else bar.setAttribute('inert', '');
+    allBtn.hidden = n === boxes.length;
+    // Selection mode: every card shows its box, and a click on a card toggles
+    // it instead of opening it — the way a photo grid behaves.
+    grid.classList.toggle('selecting', on);
+    boxes.forEach(function (b) {{ b.closest('.a-card').classList.toggle('selected', b.checked); }});
+  }}
+  function setAll(v) {{ boxes.forEach(function (b) {{ b.checked = v; }}); last = -1; sync(); }}
+  boxes.forEach(function (b, i) {{
+    // Shift-click selects the run between the last box touched and this one.
+    b.addEventListener('click', function (ev) {{
+      if (ev.shiftKey && last >= 0 && last !== i) {{
+        var lo = Math.min(last, i), hi = Math.max(last, i);
+        for (var k = lo; k <= hi; k++) boxes[k].checked = b.checked;
+      }}
+      last = i;
+    }});
+    b.addEventListener('change', sync);
+  }});
+  grid.addEventListener('click', function (ev) {{
+    if (!grid.classList.contains('selecting')) return;
+    var link = ev.target.closest('.a-card > .stretch');
+    if (!link || ev.metaKey || ev.ctrlKey) return;
+    ev.preventDefault();
+    link.parentNode.querySelector('.a-sel').dispatchEvent(new MouseEvent('click', {{
+      bubbles: true, cancelable: true, shiftKey: ev.shiftKey
+    }}));
+  }});
+  allBtn.addEventListener('click', function () {{ setAll(true); }});
+  document.getElementById('bulk-clear').addEventListener('click', function () {{ setAll(false); }});
+  document.addEventListener('keydown', function (ev) {{
+    if (ev.key !== 'Escape' || !grid.classList.contains('selecting')) return;
+    if (document.querySelector('dialog[open]')) return;
+    setAll(false);
+  }});
+  bar.addEventListener('submit', function (ev) {{
+    var n = boxes.filter(function (b) {{ return b.checked; }}).length;
+    stpConfirmSubmit(bar, ev, {json.dumps(bulk_confirm)}.replace('{{n}}', n), {{ danger: true }});
+  }});
+  sync();
+}})();
 document.querySelectorAll('.delete-form').forEach(function (f) {{
   f.addEventListener('submit', function (e) {{
-    if (!confirm({json.dumps(confirm_delete)})) e.preventDefault();
+    stpConfirmSubmit(f, e, {json.dumps(confirm_delete)}, {{ danger: true }});
   }});
 }});
 document.querySelectorAll('.rerun-form').forEach(function (f) {{
@@ -173,7 +271,7 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
     var msg = mode === 'reimport'
       ? {json.dumps(reimport_confirm)}.replace('{{issue}}', f.dataset.issue)
       : {json.dumps(rerun_confirm)}.replace('{{issue}}', f.dataset.issue);
-    if (!confirm(msg)) {{ e.preventDefault(); return; }}
+    if (!stpConfirmSubmit(f, e, msg)) return;
     var btn = f.querySelector('button');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> ' + {json.dumps(running)};
@@ -185,8 +283,8 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
 
 _DASH_STATUS = [("", "All"), ("CREATED", "Imported"), ("ANALYZED", "Designed"),
                 ("EXECUTED", "Executed")]
-_DASH_SORT = [("recent", "Newest first"), ("oldest", "Oldest first"),
-              ("issue", "Issue key"), ("findings", "Most findings")]
+_DASH_SORT = [("recent", "Newest First"), ("oldest", "Oldest First"),
+              ("issue", "Issue Key"), ("findings", "Most Findings")]
 _DASH_PER = (12, 24, 48, 96)
 
 
@@ -214,7 +312,7 @@ def _dashboard_toolbar(q: str, status: str, sort: str, per: int, page_no: int,
 
     The old bar was one flat row of five labelled fields plus Apply/Clear: the
     search box — the control reached for nine times out of ten — was the same
-    size and weight as "Per page", the status filter hid behind a dropdown that
+    size and weight as "Per Page", the status filter hid behind a dropdown that
     never said how many of anything there were, and nothing on screen told you
     a filter was even active. Here the query gets the full first row, status
     becomes a segmented control carrying its own counts (a facet matching
@@ -246,20 +344,20 @@ def _dashboard_toolbar(q: str, status: str, sort: str, per: int, page_no: int,
              else _t("{n} assessments").format(n=total))
     if page_no > 1:
         count += " · " + _t("page {n}").format(n=page_no)
-    clear = (f'<a class="f-clear" href="/">&#10005; {_t("Clear filters")}</a>'
+    clear = (f'<a class="f-clear" href="/">&#10005; {_t("Clear Filters")}</a>'
              if filtered else "")
     # Inside the form so typing a query and pressing Enter keeps the facet;
     # the facet links carry `q` the same way in the other direction.
     keep_status = f'<input type="hidden" name="status" value="{attr(status)}">' if status else ""
     reset = (f'<a class="f-x" href="{_dash_url("", status, sort, per)}" '
-             f'aria-label="{attr(_t("Clear search"))}">{ui.icon("x", 14)}</a>' if q else "")
+             f'aria-label="{attr(_t("Clear Search"))}">{ui.icon("x", 14)}</a>' if q else "")
 
     return f"""<form method="get" action="/" class="filters" id="dash-filter" role="search">
 {keep_status}
 <div class="f-top">
 <div class="f-search">{ui.icon("search", 16)}
 <input name="q" value="{attr(q)}" autocomplete="off" spellcheck="false"
- aria-label="{attr(_t("Search issue key or assessment id"))}"
+ aria-label="{attr(_t("Search Issue Key or Assessment Id"))}"
  placeholder="{attr(_t("Search issue key or assessment id — e.g. BH-142"))}">{reset}</div>
 <button class="btn sec">{_t("Search")}</button>
 </div>
@@ -284,7 +382,7 @@ document.querySelectorAll('#dash-filter select').forEach(function (s) {{
 def _dashboard_pager(q: str, status: str, sort: str, per: int, page_no: int,
                      pages: int) -> str:
     """Paging existed server-side but had no control: page 2 was reachable only
-    by editing the URL, which made "Per page" a setting with no visible effect
+    by editing the URL, which made "Per Page" a setting with no visible effect
     other than hiding assessments."""
     if pages <= 1:
         return ""
@@ -317,11 +415,11 @@ def _assessment_card(a: Assessment, row: dict) -> str:
 
     facts = []
     if row.get("n_tests"):
-        facts.append(_t("{n} test(s)").format(n=row["n_tests"]))
+        facts.append(_t("{n} Test(s)").format(n=row["n_tests"]))
     if row.get("n_approved"):
-        facts.append(_t("{n} approved").format(n=row["n_approved"]))
+        facts.append(_t("{n} Approved").format(n=row["n_approved"]))
     if row.get("n_executions"):
-        facts.append(_t("{n} run").format(n=row["n_executions"]))
+        facts.append(_t("{n} Run").format(n=row["n_executions"]))
     facts_html = (f'<div class="muted" style="font-size:12px;margin-top:6px">'
                   f'{" &middot; ".join(facts)}</div>' if facts else "")
 
@@ -341,31 +439,51 @@ def _assessment_card(a: Assessment, row: dict) -> str:
         if a.target_base_url else ""
     )
 
-    # Re-run is only offered once there is something to re-run. Before that the
-    # honest action is "open it and finish designing".
-    rerun = ""
+    # Every action lives in the card's menu. Re-run is only offered once there
+    # is something to re-run; before that the honest action is "open it".
+    items = [ui.Item(_t("Open"), href=f"/assessment/{a.id}", icon="arrow-right")]
+    if row.get("n_executions"):
+        items.append(ui.Item(_t("Open Report"), href=f"/assessment/{a.id}/report",
+                             new_tab=True, icon="file"))
     if row.get("n_tests"):
         mode = "same" if row.get("n_approved") else "reimport"
-        word = _t("Re-run") if row.get("n_approved") else _t("Re-import")
-        rerun = (
-            f'<form method="post" action="/assessment/{_e(a.id)}/rerun" '
-            f'class="rerun-form" data-issue="{attr(a.issue_key)}" style="margin:0">'
-            f'<input type="hidden" name="mode" value="{mode}">'
-            f'<button class="btn sec" style="padding:3px 9px;font-size:12px">'
-            f'&#8635; {word}</button></form>'
-        )
+        items.append(ui.Item(
+            _t("Re-Run Plan") if mode == "same" else _t("Re-Import From Jira"),
+            action=f"/assessment/{a.id}/rerun", fields={"mode": mode},
+            form_class="rerun-form", form_data={"issue": a.issue_key},
+            icon="refresh" if mode == "same" else "download",
+        ))
+    items.append(ui.Item(_t("Delete"), action=f"/assessment/{a.id}/delete",
+                         form_class="delete-form", danger=True, icon="trash"))
+    menu = ui.action_menu(items, _t("Actions for {name}").format(name=a.issue_key),
+                          title=a.issue_key, subtitle=a.id)
 
+    total = sum(sev.get(s, 0) for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW"))
+    sevbar = ""
+    if total:
+        sevbar = '<div class="a-sev" aria-hidden="true">' + "".join(
+            f'<span style="flex-basis:{100 * sev[s] / total:.2f}%;background:var(--sev-{s.lower()})"></span>'
+            for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW") if sev.get(s)
+        ) + "</div>"
+
+    # The selection box is a round badge on the card's corner: out of the way
+    # (it used to push the issue key and id into a two-line wrap) until the
+    # card is hovered, focused, or any card is already selected.
+    pick = (
+        f"<label class='a-pick' data-tip='{attr(_t('Select'))}'>"
+        f"<input type='checkbox' class='a-sel' form='bulk-form' name='ids' value='{_e(a.id)}' "
+        f"aria-label='{attr(_t('Select {name}').format(name=a.issue_key))}'>"
+        f"<span class='a-box' aria-hidden='true'>{ui.icon('check', 13)}</span></label>"
+    )
+    meta = f"<span class='mono'>{_e(a.id)}</span>" + (
+        f"<span class='a-dot' aria-hidden='true'></span><span>{_e(when)}</span>" if when else "")
     return (
-        f"<div class='a-card'>"
+        f"<div class='a-card' data-id='{_e(a.id)}'>"
         f"<a class='stretch' href='/assessment/{_e(a.id)}' aria-label='Open {_e(a.issue_key)}'></a>"
-        f"<div class='top'><div><div class='issue'>{_e(a.issue_key)}</div>"
-        f"<div class='id mono'>{_e(a.id)}</div>"
-        + (f"<div class='id'>{_e(when)}</div>" if when else "")
-        + f"</div><span class='pill {cls}'>{_e(label)}</span></div>"
-        f"{target_html}{facts_html}{findings_html}"
-        f"<div class='cardact'>{rerun}"
-        f"<form method='post' action='/assessment/{_e(a.id)}/delete' class='delete-form' "
-        f"style='margin:0'>"
-        f"<button type='submit' class='btn ghost danger' "
-        f"style='padding:3px 9px;font-size:12px'>{_t('Delete')}</button></form></div></div>"
+        f"{pick}"
+        f"<div class='top'>"
+        f"<div class='a-head'><div class='issue'>{_e(a.issue_key)}</div></div>"
+        f"<span class='pill {cls}'>{_e(_t(label))}</span>{menu}</div>"
+        f"<div class='a-meta'>{meta}</div>"
+        f"{target_html}{facts_html}{findings_html}{sevbar}</div>"
     )

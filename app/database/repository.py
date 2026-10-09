@@ -632,6 +632,10 @@ class Repository:
         self.save_agent_record(assessment_id, "derived_verdict", event.model_dump(mode="json"))
         return True
 
+    def latest_agent_record(self, assessment_id: str, kind: str) -> dict | None:
+        """The newest record of a kind, without loading the rest."""
+        return self._latest_agent_record(assessment_id, kind)
+
     def _latest_agent_record(self, assessment_id: str, kind: str) -> dict | None:
         with self._sf() as s:
             row = (
@@ -972,7 +976,7 @@ def _test_fingerprint(data: dict) -> str:
     to `TestCase` does not silently invalidate every approval in the database.
     Without this, a row written before the field existed lacks the key, the row
     being written has it at its default, the two blobs differ, and the next
-    "Regenerate test plan" quietly resets a plan a human had already approved —
+    "Regenerate Test Plan" quietly resets a plan a human had already approved —
     for a schema change that altered nothing about what any test does.
 
     An unparseable blob (a row from a future schema, a hand-edited one) falls

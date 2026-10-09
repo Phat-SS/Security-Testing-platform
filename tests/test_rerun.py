@@ -226,8 +226,8 @@ def test_the_card_shows_what_the_run_found(client):
 
     card = client.get("/").text
 
-    assert "2 approved" in card
-    assert f"{len(_ids(aid))} test(s)" in card
+    assert "2 Approved" in card
+    assert f"{len(_ids(aid))} Test(s)" in card
 
 
 # -- a re-run that actually executes ----------------------------------------
@@ -274,7 +274,7 @@ def test_a_rerun_executes_and_lands_on_the_regression_diff(client_with_scope):
     r = client.post(f"/assessment/{aid}/rerun", data={"mode": "same"}, follow_redirects=True)
 
     assert r.status_code == 200
-    assert "Regression diff" in r.text
+    assert "Regression Diff" in r.text
     new_id = r.url.path.split("/assessment/")[1].split("/")[0]
     assert new_id != aid
     assert _repo().get_executions(new_id), "the re-run should have executed"

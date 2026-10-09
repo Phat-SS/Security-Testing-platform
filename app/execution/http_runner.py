@@ -71,6 +71,58 @@ _MIN_MARKER_LEN = 6
 logger = logging.getLogger(__name__)
 
 
+class Pacer:
+    """One run-wide request clock, shared by every test in flight.
+
+    `wait()` blocks until this request's slot; `hold(seconds)` pushes every
+    later slot out (a 429's Retry-After). Thread-safe: with
+    `max_concurrent_tests > 1` several tests share one runner.
+    """
+
+    def __init__(self, rps: float, max_pause_s: float = 30.0,
+                 clock=time.monotonic, sleep=time.sleep) -> None:
+        self._interval = 1.0 / rps if rps and rps > 0 else 0.0
+        self._max_pause = max(0.0, max_pause_s)
+        self._next = 0.0
+        self._lock = threading.Lock()
+        self._clock, self._sleep = clock, sleep
+
+    def wait(self) -> float:
+        with self._lock:
+            now = self._clock()
+            start = max(now, self._next)
+            self._next = start + self._interval
+        delay = start - now
+        if delay > 0:
+            self._sleep(delay)
+        return delay
+
+    def hold(self, seconds: float) -> None:
+        seconds = min(max(0.0, seconds), self._max_pause)
+        if seconds <= 0:
+            return
+        with self._lock:
+            self._next = max(self._next, self._clock() + seconds)
+
+
+def retry_after_seconds(headers, default: float = 2.0) -> float:
+    """Retry-After as seconds: a delta, an HTTP date, or `default`."""
+    from email.utils import parsedate_to_datetime
+
+    value = (headers.get("retry-after") or "").strip() if headers else ""
+    if not value:
+        return default
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return default
+
+
 class HttpRunner:
     def __init__(
         self,
@@ -99,6 +151,8 @@ class HttpRunner:
             timeout=settings.limits.timeout_s,
             user_agent=settings.limits.user_agent,
         )
+        self._pacer = Pacer(settings.limits.max_requests_per_second,
+                            settings.limits.max_throttle_pause_s)
 
     def _seal(self, ex, prev_hash: str | None):
         """Stamp the authorization fingerprint, then seal.
@@ -162,11 +216,16 @@ class HttpRunner:
             if self._oast is None:
                 log.append("OAST: verifier is not configured; callback proof is unavailable")
             else:
-                oast_token, oast_callback = self._oast.issue()
-                runtime = test.model_copy(deep=True)
-                runtime.attack_mutation.detail["value"] = oast_callback
-                test = runtime
-                log.append("OAST: issued a unique callback token for this execution")
+                try:
+                    oast_token, oast_callback = self._oast.issue()
+                except Exception as exc:  # noqa: BLE001 - collaborator down: no proof, still run
+                    log.append(f"OAST: could not issue a callback ({type(exc).__name__}); "
+                               "the probe runs without out-of-band proof")
+                else:
+                    runtime = test.model_copy(deep=True)
+                    runtime.attack_mutation.detail["value"] = oast_callback
+                    test = runtime
+                    log.append("OAST: issued a unique callback token for this execution")
         supporting: list[SupportingExchange] = []
 
         attacker = self._vault.get(test.auth_context.persona)
@@ -643,6 +702,11 @@ class HttpRunner:
             )
             return req, resp, raw, None
 
+        # The burst waits its turn once, then goes out unpaced: what a rate or
+        # race probe measures is the target's answer to N requests close
+        # together, and pacing them would test the pacer instead.
+        self._pacer.wait()
+
         # `max_requests_per_test` is the operator's ceiling on fan-out. It was
         # displayed and stored but never enforced; the mutation layer's own
         # hard cap (50) is a safety net, not the configured limit.
@@ -654,7 +718,7 @@ class HttpRunner:
         def _one(_i: int):
             return self._send(
                 prepared.method, url, headers, query, body, pinned_ip,
-                prepared.body_encoding,
+                prepared.body_encoding, paced=False,
             )
 
         # Every request in the burst carries the same pin, so the concurrent
@@ -694,6 +758,8 @@ class HttpRunner:
                 succeeded += 1
             if resp.status_code in (429, 503):
                 throttled = True
+                # The probe got its answer; everything AFTER it backs off.
+                self._pacer.hold(retry_after_seconds(resp.headers))
 
         stats = RepeatStats(
             sent=count, succeeded=succeeded, status_counts=status_counts,
@@ -767,6 +833,8 @@ class HttpRunner:
         body: object | None,
         pinned_ip: str | None,
         body_encoding: str = "json",
+        *,
+        paced: bool = True,
     ) -> tuple[CapturedRequest, CapturedResponse | None, str | None]:
         """Send one request. The returned CapturedRequest/CapturedResponse are
         redacted for storage; the third element is the raw (pre-redaction,
@@ -817,7 +885,14 @@ class HttpRunner:
             timestamp=timestamp,
         )
 
+        if paced:
+            self._pacer.wait()
         response = self._send_with_retry(_build, method)
+        if response is not None and paced and response.status_code in (429, 503):
+            # Recorded exactly as received — never resent — but the next
+            # request waits: a target that asked us to slow down and kept
+            # being hit would turn every later test into an undecidable 429.
+            self._pacer.hold(retry_after_seconds(response.headers))
         # No cookie state carries between exchanges: identity in this platform
         # is the explicit persona auth header, never a cookie jar, and a
         # Set-Cookie from one persona's response must never ride along on the
