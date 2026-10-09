@@ -1,16 +1,99 @@
-# AI-assisted API Security Testing Platform
+<div align="center">
 
-Transform Jira security requirements and existing PoCs into an OWASP API
-Security Top 10 (2023) aligned test plan, execute **approved** tests in a
-controlled way, collect tamper-evident evidence, and report findings — with a
-web UI, a CLI, and a JSON API.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg">
+  <img alt="Sentinel — AI-assisted API security testing. The AI proposes; a trusted runner disposes." src="docs/assets/banner-dark.svg" width="100%">
+</picture>
 
+<br>
+
+[![CI](https://github.com/Phat-SS/Security-Testing-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Phat-SS/Security-Testing-platform/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-2ee6b6?logo=python&logoColor=white&labelColor=0a0e13)
+![FastAPI](https://img.shields.io/badge/FastAPI-web%20UI%20%2B%20JSON%20API-2ee6b6?logo=fastapi&logoColor=white&labelColor=0a0e13)
+![OWASP](https://img.shields.io/badge/OWASP-API%20Top%2010%20(2023)-ff5468?labelColor=0a0e13)
+![Claude](https://img.shields.io/badge/AI-Claude%20(optional)-6ca8ff?labelColor=0a0e13)
+![Offline](https://img.shields.io/badge/runs-fully%20offline-8b97a7?labelColor=0a0e13)
+![License](https://img.shields.io/badge/license-proprietary-8b97a7?labelColor=0a0e13)
+
+**Turn Jira security requirements and existing PoCs into an OWASP-aligned test plan,
+run only what a human approved, and report findings backed by tamper-evident evidence.**
+
+[Getting started](#getting-started) ·
+[How it works](#how-it-works) ·
+[Configuration](#configuration) ·
+[Roadmap](#roadmap) ·
+[Security](#security)
+
+</div>
+
+---
+
+## Overview
+
+**Sentinel** is an AI-assisted API security testing platform with a web UI, a
+CLI, a JSON API and a read-only MCP server. It maps Jira security tickets to
+the OWASP API Security Top 10 (2023), designs declarative tests, executes the
+**approved** ones in a controlled way, collects tamper-evident evidence, and
+writes findings back to a report and to Jira.
+
+> [!NOTE]
 > Runs **fully offline** out of the box: SQLite persistence, a deterministic
 > (no-API-key) analyzer, and a mock Jira MCP. The AI (Claude) and live Jira MCP
 > are feature-gated behind the same interfaces — flip them on with env vars,
 > nothing below changes.
 
-## The one design decision everything hangs on
+### Highlights
+
+| | |
+|---|---|
+| 🛰️ **Jira → plan** | Ticket text, comments and attached PoCs become an OWASP-aligned plan of declarative `TestCase`s — rules first, AI second. |
+| 🛡️ **Scope-validated** | DNS-aware, IP-pinned scope checks block SSRF, metadata and rebinding before a single packet leaves. |
+| ✋ **Human-approved** | Nothing runs until a person approves it; destructive tests need a second confirmation. |
+| 🔗 **Evidence-chained** | sha256-chained, redacted evidence and a signed report manifest. |
+| 🚫 **Never executes PoC code** | PoCs are parsed statically and transpiled into data; only the reviewed `HttpRunner` sends traffic. |
+| 🎯 **Low false positives** | A 200 is never a finding and a 404 is never proof of safety — every authorization test carries a positive control. |
+| 🤖 **Advisory AI** | Plan-review and result-review agents, plus a Copilot — they propose; they never approve or overwrite a verdict. |
+| 📦 **Imports & exports** | Python PoCs, Postman, Burp XML, JMeter, HAR, OpenAPI in; HTML, PDF, XLSX, JSON, Postman/Newman out. |
+
+### Table of contents
+
+- [How it works](#how-it-works)
+- [Getting started](#getting-started)
+- [Using the web UI](#using-the-web-ui)
+- [What it can actually send](#what-it-can-actually-send)
+- [Importing existing artifacts](#importing-existing-artifacts)
+- [The Jira comment](#the-jira-comment)
+- [Where the AI is allowed to act](#where-the-ai-is-allowed-to-act)
+- [Configuration](#configuration)
+- [Project layout](#project-layout)
+- [Testing](#testing)
+- [Upgrading](#upgrading)
+- [Roadmap](#roadmap)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+## How it works
+
+```mermaid
+flowchart LR
+  J[Jira ticket<br/>+ PoCs] --> N[Normalize]
+  N --> A[Rules + AI<br/>analysis]
+  A --> P[Declarative<br/>TestCase plan]
+  P --> R{{Plan review<br/>agent}}
+  R --> H[/Human<br/>approval/]
+  H --> S[Scope<br/>validation]
+  S --> X[Trusted<br/>HttpRunner]
+  X --> E[(Evidence<br/>chain)]
+  E --> F[Findings]
+  F --> V{{Result review<br/>agent}}
+  V --> O[Report · Jira<br/>comment]
+  classDef gate fill:#2ee6b6,stroke:#007a61,color:#04221a;
+  class H,S gate;
+```
+
+### The one design decision everything hangs on
 
 **The AI proposes; a trusted runner disposes.**
 
@@ -39,7 +122,7 @@ Three non-negotiable controls, each with its own tests:
 | **Secret redaction** | `app/core/redaction.py` | A report that leaks its own bearer token is an incident. Runs before any store/log/report. |
 | **Approval gate + evidence chain** | `app/execution/` | No unapproved test runs; evidence is sha256-chained and tamper-evident (see the honest scope of that claim in `evidence.py`). |
 
-### Two rules, not one
+#### Two rules, not one
 
 The anti-false-**positive** rule: an HTTP 200 is **never** a vulnerability on
 its own. A `FAIL` requires correlated evidence — the attacker's response
@@ -78,20 +161,30 @@ python -m app.evals candidate.jsonl --baseline production.jsonl
 The gate checks finding precision/recall, invented evidence references, and
 the share of executions still requiring manual review.
 
-## Quick start (Windows / PowerShell)
+## Getting started
+
+### Prerequisites
+
+| Need | For |
+|---|---|
+| **Python 3.11+** | everything (CI runs 3.11 and 3.12) |
+| Node.js 18+ *(optional)* | `npm run security:ui`, and the one-click Jira OAuth refresh (`npx mcp-remote`) |
+| [Claude Code](https://claude.com/claude-code) CLI *(optional)* | `USE_AI=true` — every AI call goes through `claude -p` |
+| Docker *(optional)* | `docker compose up`, and the isolated Python-PoC sandbox |
+
+### 1. Install
 
 ```bash
-cd security-testing-platform
+git clone https://github.com/Phat-SS/Security-Testing-platform.git
+cd Security-Testing-platform
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.venv\Scripts\Activate.ps1          # Windows PowerShell
+# source .venv/bin/activate         # macOS / Linux
 pip install -r requirements.txt
-pytest                      # the full suite: safety controls + full pipeline;
-                            # enforced on every push/PR by .github/workflows/ci.yml,
-                            # so this comment can't go stale the way a hardcoded
-                            # count already had (the CI job is the source of truth)
+pytest                              # optional: the full suite (see Testing)
 ```
 
-### 1. The self-contained demo
+### 2. The self-contained demo
 
 ```bash
 python -m demo.run_assessment
@@ -101,7 +194,7 @@ Spins up a deliberately vulnerable CRM API on `127.0.0.1`, runs two approved
 tests, writes `reports/assessment_demo.html`: `API1-001` (BOLA) → **FAIL** with
 the correlated data leak as evidence; `API2-001` (unauth read) → **PASS**.
 
-### 2. The web UI (import → analyze → design → approve → execute → report → Jira)
+### 3. The web UI (import → analyze → design → approve → execute → report → Jira)
 
 ```bash
 # terminal 1 — a target to test (the bundled vulnerable app)
@@ -129,8 +222,41 @@ a host) rather than a filename to go and edit. A whole run coming back
 `scope.allowed_hosts`; that check is the first row on the panel, and the
 readiness verdict is also available as JSON at `/api/readiness` for CI.
 
+### 4. The CLI
 
-## The assessment screen
+```bash
+python -m app.cli CRM-1234 --engagement config/engagement.json --execute
+```
+
+Both reviewing agents run by default, and the deterministic half of each needs no
+API key — so an offline CI run still prints "this plan has no test for the
+category the ticket is about" and "4 of these results need a person". Every
+agent-read result is printed with the word *advisory* attached, because a CI log
+is exactly where that would otherwise get quoted as a confirmed break.
+`--no-review` reproduces the pre-agent output exactly; `--review-rounds N` bounds
+how many times the planner may answer the reviewer.
+
+### 5. Running in Docker
+
+```bash
+cp .env.example .env
+cp config/engagement.example.json config/engagement.json   # then edit it
+docker compose up --build
+```
+
+Open `http://127.0.0.1:8100`. `docker-compose.yml` at the repo root builds
+`docker/Dockerfile` — non-root, read-only application directory, dropped
+Linux capabilities — and mounts `./config` read-only plus a named volume for
+the SQLite file, so `docker compose down` never discards an assessment.
+`docker compose --profile postgres up --build` adds a Postgres service
+instead (see the compose file's header for the two extra `.env` lines it
+needs). This is unrelated to `docker/docker-compose.yml`, which is the
+isolated sandbox for `ENABLE_PYTHON_RUNNER` covered under "Multi-user auth"
+below — that one exists to contain arbitrary Python, not to run the platform.
+
+## Using the web UI
+
+### The assessment screen
 
 Four phases, shown one at a time, ordered so that what a thing is *derived from*
 comes before the thing itself. `?phase=` carries which one, so a filtered plan
@@ -162,7 +288,7 @@ The sidebar has three groups: **Workspace** (Assessments, Findings),
 Log, Settings). The UI follows the OS light/dark preference, with a toggle in
 the sidebar footer, and honours `prefers-reduced-motion`.
 
-### Endpoints are editable, and that matters
+#### Endpoints are editable, and that matters
 
 `TestDesigner` builds one test set **per endpoint**, and the OWASP mapping is
 computed from these parameters — so this list is the single input the whole plan
@@ -185,7 +311,7 @@ behind your back. Regenerating replaces the plan and **keeps an approval given t
 a test that comes back byte-for-byte unchanged**; anything whose request or
 mutation differs returns to `PENDING`.
 
-### Reviewing a large plan
+#### Reviewing a large plan
 
 Aggressive depth over a handful of endpoints is a hundred-plus tests. The plan
 table filters, sorts and pages **server-side**, which is what makes *"approve all
@@ -198,7 +324,7 @@ actually contains them.
 Unchecking a box never withdrew an approval — the handler only ever read the
 boxes that *were* ticked — so withdrawing one is now an explicit action.
 
-### Re-running
+#### Re-running
 
 **↻ Re-run** (on a card or in step 6) creates a **new assessment** of the same
 issue, copies the analysis and the plan *with its approvals*, runs the approved
@@ -218,38 +344,52 @@ A re-run stops before sending anything and says why — no environment, nothing
 approved, or a blocking configuration check — rather than reporting a run that
 came back entirely `BLOCKED`.
 
+### Working with the list
 
-### 3. The CLI
+Every row and card keeps its actions (Edit, Delete, Re-run, Make Default…) in
+one **⋯** menu; destructive items sit last and ask for confirmation. On
+**Assessments**, tick cards to select them and use **Delete Selected**; the
+route re-checks each id against the caller's engagements, because it sits
+outside `/assessment/{aid}` where the isolation middleware works. Two charts
+above the list show findings by severity (a single-hue ordinal scale) and test
+outcomes per run, each with a legend, per-mark tooltips and a table view.
 
-```bash
-python -m app.cli CRM-1234 --engagement config/engagement.json --execute
-```
+### Regression testing
 
-Both reviewing agents run by default, and the deterministic half of each needs no
-API key — so an offline CI run still prints "this plan has no test for the
-category the ticket is about" and "4 of these results need a person". Every
-agent-read result is printed with the word *advisory* attached, because a CI log
-is exactly where that would otherwise get quoted as a confirmed break.
-`--no-review` reproduces the pre-agent output exactly; `--review-rounds N` bounds
-how many times the planner may answer the reviewer.
+**↻ Re-run** on an assessment card clones the plan into a new assessment, runs
+the approved non-destructive tests and opens **Regression diff**
+(`/assessment/{id}/regression`): findings matched against the previous executed
+run by dedup key, as *new (regressions) / fixed / still-open*, plus a Jira-ready
+note. Schedule it with OS cron or CI calling `python -m app.cli <ISSUE>
+--execute`.
 
-### 4. Running in Docker
+Running the *same* assessment twice is also supported and appends to its
+evidence chain: execution ids are tagged per round so two runs are never
+indistinguishable in the evidence, and findings are recomputed over the whole
+history and replaced rather than appended.
 
-```bash
-cp .env.example .env
-cp config/engagement.example.json config/engagement.json   # then edit it
-docker compose up --build
-```
+### Copilot, HAR import and the MCP server
 
-Open `http://127.0.0.1:8100`. `docker-compose.yml` at the repo root builds
-`docker/Dockerfile` — non-root, read-only application directory, dropped
-Linux capabilities — and mounts `./config` read-only plus a named volume for
-the SQLite file, so `docker compose down` never discards an assessment.
-`docker compose --profile postgres up --build` adds a Postgres service
-instead (see the compose file's header for the two extra `.env` lines it
-needs). This is unrelated to `docker/docker-compose.yml`, which is the
-isolated sandbox for `ENABLE_PYTHON_RUNNER` covered under "Multi-user auth"
-below — that one exists to contain arbitrary Python, not to run the platform.
+- **Copilot** (assessment screen, right-hand panel): hypotheses that cite the
+  executions behind them, and next probes worth sending. It always has a free
+  rules-only brief; with `USE_AI=true` it asks Claude through the same
+  `claude -p` CLI as every other stage, and you can ask it a question. Every AI
+  claim is checked before it is shown — an execution id that does not exist, an
+  endpoint the assessment does not have, or a mutation outside the registry is
+  dropped and counted. **Add To Plan** hands a step to the attack planner, so
+  the resulting test passes `AttackPlanner.accept()` and lands PENDING.
+- **AI spend.** `AI_ASSESSMENT_BUDGET_USD` caps the total AI spend of one
+  assessment (per process). A transient CLI failure is retried
+  (`AI_CLI_RETRIES`), and `ANTHROPIC_MODEL_FAST` can run ticket extraction on a
+  smaller model.
+- **HAR import.** The Scope phase's **Import Endpoints** accepts a HAR capture
+  (browser network panel, Burp, Caido) as well as OpenAPI/Swagger. Only names
+  are kept — never header values, cookies or bodies — and requests to any host
+  but the capture's main one are skipped and listed.
+- **MCP server.** `python -m app.mcp.server` exposes the platform to another
+  agent over stdio, read-only: list assessments, read one, read findings, read
+  or rebuild the Copilot brief. No tool sends traffic, approves or runs anything.
+  `MCP_ENGAGEMENT` restricts it to one engagement.
 
 ## What it can actually send
 
@@ -316,117 +456,6 @@ why it is not raised for you. The evidence chain is unaffected either way: tests
 run in parallel and are sealed afterwards in plan order, so the record is
 identical and reproducible.
 
-## The engagement config = authorization as an artifact
-
-Execution is impossible until an `engagement.json` defines the approved target,
-scope allow/block lists, and persona credentials (see
-`config/engagement.example.json`). No config → empty scope + no personas →
-nothing runs. Authorization is explicit and reviewable, never inferred from a
-ticket.
-
-**More than one client, one process.** Point `ENGAGEMENTS_DIR` at a directory
-and every `*.json` in it is an engagement, named after the file:
-
-```
-config/engagements/bmw-au.json     ->  "bmw-au"
-config/engagements/acme.json       ->  "acme"
-```
-
-A single `ENGAGEMENT_CONFIG` install keeps working untouched and appears under
-its own name — nothing has to be moved to upgrade. Discovery happens **only**
-when one of those two variables names it: a directory of config files sitting on
-disk beside the code is not a human saying where the authorization lives, and
-default-deny is the first rule here.
-
-Which engagement a request is about is decided per request, never globally. An
-assessment records the engagement it was opened under and always resolves to
-that one, so two tickets for two clients open in two tabs cannot aim one
-client's run at the other's target. The sidebar's picker is for everything else,
-and is deliberately absent on an assessment screen.
-
-**What a run was authorized by is recorded with the run.** Before the first
-request goes out, the scope, the identities, their ownership map and the runner
-limits are frozen into a snapshot (never the credentials — it is meant to be
-attached to a ticket), and its sha256 goes inside every sealed execution. A
-report proves not only that a host was tested but that it was authorized at the
-time; editing the scope afterwards no longer rewrites what an earlier run meant.
-
-The **Engagement** and **System** sections of the sidebar edit that same file,
-in four panes ordered the way a new engagement needs them:
-
-| Pane | Writes | Blocks a run when unset |
-|---|---|---|
-| Readiness | — (read-only verdict, plus quick setup while the engagement is empty) | — |
-| Scope & Targets | `environments`, `active_environment`, `scope.*` | yes — no target and no approved host mean every request comes back `BLOCKED` |
-| Identities | `personas`, `attacker`, `victim` | yes — the runner resolves the attacker before scope is even checked |
-| Settings | `runner` limits, plus AI/evidence settings written to `.env` | no — everything there has a working default |
-
-**Quick Setup** on the Readiness pane does the whole first-run sequence in one
-submit: the environment, its scope authorization, both personas, and both tokens
-(to `.env`, referenced from the engagement file as `${PERSONA_A_TOKEN}`).
-
-Every writer reads the whole document, changes only the keys it owns, and
-writes it back, so hand-written comments and keys the UI does not expose
-survive a save made through the browser.
-
-**Persona tokens are references, not values.** `engagement.json` is the artifact
-a tester reads, diffs and attaches to a ticket, so a live bearer token does not
-belong in it. Write `"Authorization": "Bearer ${PERSONA_A_TOKEN}"` and keep the
-token in `.env`; `load_engagement` resolves `${VAR}` from the environment at load
-time. An unset or empty variable **withholds the header and fails readiness**
-rather than falling back, because both fallbacks corrupt the result instead of
-just weakening it: a literal `${VAR}` on the wire earns a 401 that reads in the
-report exactly like a 401 the endpoint meant to return, and silently dropping the
-header turns "identity A reaches B's object" into "anonymous reaches B's object",
-where a PASS means nothing it appears to mean. The readiness row names the
-variable to set, never its value.
-
-## Layout
-
-```
-app/
-  schemas/     # Pydantic contract: enums, TestCase, Execution, Finding, Analysis,
-               #   agent.py            RequirementItem, PlanReview, Adjudication,
-               #                       RunAssessment — all advisory by construction
-  core/        # config, scope validator, redaction, engagement  ← security-critical
-  owasp/       # API Top 10 2023 metadata, rule engine, coverage engine
-  vault/       # persona credential vault (required for BOLA/BFLA)
-  analysis/    # heuristic + Claude analyzer, deterministic test designer,
-               #   requirements.py     what the ticket asks for (the coverage denominator)
-               #   plan_reviewer.py    the reviewing agent (structural + AI)
-               #   adjudicator.py      triage + reading of undecided results
-  poc/         # static PoC transpiler (ast-based; never executes)
-  execution/   # templating, mutations, trusted HTTP runner, verdict, evidence
-  pipeline/    # executions → deduplicated findings
-  reporting/   # HTML report + coverage matrix (dependency-free)
-  database/    # SQLAlchemy models + repository (SQLite / Postgres)
-  mcp/         # Jira MCP interface + mock (live SDK connector = drop-in)
-  api/         # FastAPI app: web UI + JSON API
-               #   ui.py               shared primitives: tooltip, section, table, theme
-               #   views.py            dashboard, config, login, report-adjacent pages
-               #   views/            one module per screen; views/assessment/
-               #                     is the four phases, views/config/ the panes
-               #   routes/           one module per part of the workflow
-               #   runtime.py        the shared state, per-request engagement
-  orchestrator.py  # the end-to-end workflow, wired to persistence
-  cli.py       # command-line driver
-demo/          # vulnerable target + sample tests + end-to-end runner
-tests/         # scope, redaction, rules, verdict, evidence, approval, analysis,
-               # transpiler, orchestrator, api, endpoint editing, plan filtering,
-               # re-runs, plan/finding idempotency, assessment-screen structure
-```
-
-## Feature flags
-
-| Want | Set |
-|---|---|
-| Staged Claude analyzer instead of heuristic, plus the AI half of both reviewing agents | `USE_AI=true` + the `claude` CLI installed and logged in (rides your Claude Code login — no API key, no extra pip package) |
-| A working report link in the Jira comment | `PLATFORM_BASE_URL=https://…` |
-| Live Jira instead of the mock | `JIRA_MCP_URL=…` `JIRA_CLOUD_ID=…` (+ `pip install mcp`) |
-| PostgreSQL instead of SQLite | `DATABASE_URL=postgresql+psycopg://…` |
-| Reach a lab target on a private IP | **Scope & Targets → Allow private / loopback ranges** (lab only) |
-| Run reviewed arbitrary-Python PoCs | `ENABLE_PYTHON_RUNNER=true` **and** `EGRESS_PROXY=…` (see below) |
-
 ## Importing existing artifacts
 
 All flow through the same "parse-as-data, never execute, strip host, run
@@ -476,51 +505,6 @@ the *first* file's requests, silently, producing test cases aimed at a path
 nobody wrote. Every generated test carries `source_ref` ("PoC
 02_change_ownership.py"), and a syntax error in one script no longer takes the
 other one down with it.
-
-## Regression testing
-
-**↻ Re-run** on an assessment card clones the plan into a new assessment, runs
-the approved non-destructive tests and opens **Regression diff**
-(`/assessment/{id}/regression`): findings matched against the previous executed
-run by dedup key, as *new (regressions) / fixed / still-open*, plus a Jira-ready
-note. Schedule it with OS cron or CI calling `python -m app.cli <ISSUE>
---execute`.
-
-Running the *same* assessment twice is also supported and appends to its
-evidence chain: execution ids are tagged per round so two runs are never
-indistinguishable in the evidence, and findings are recomputed over the whole
-history and replaced rather than appended.
-
-## Multi-user auth
-
-Off by default (single-user local-admin). To enable: create users and set
-`AUTH_ENABLED=true`.
-
-```bash
-python -m app.core.auth add alice tester   # prints an entry + a one-time API key
-```
-
-Add the printed entry to `config/users.json`. Mutating routes then require
-`X-API-Key` (or `Authorization: Bearer <key>`) with role ≥ tester; only the
-SHA-256 hash of each key is stored. Reads stay open so the dashboard/monitoring
-keep working.
-
-For PoCs whose logic can't be expressed declaratively, the gated
-`app/execution/python_runner.py` can execute them — but only with **all four
-gates** satisfied (`ENABLE_PYTHON_RUNNER=true`, per-PoC `reviewed=True`, static
-validation clean, and an `EGRESS_PROXY` allowlist). It fails closed and is off
-by default. A subprocess is not a security boundary on its own — run it inside
-container isolation with a network egress allowlist.
-
-The real boundary ships in `docker/`: an isolated container (non-root,
-read-only FS, dropped caps, no direct network) whose **only** egress is a
-default-deny tinyproxy driven by `docker/allowlist` — the network-level
-enforcement of your engagement scope. See `docker/docker-compose.yml`.
-
-This is a separate image from the one that runs the platform itself
-(`docker/Dockerfile`, `docker-compose.yml` at the repo root — see "Running in
-Docker" below): the sandbox exists only to isolate arbitrary Python from
-`ENABLE_PYTHON_RUNNER`, it is not how you'd normally deploy the app.
 
 ## The Jira comment
 
@@ -732,6 +716,165 @@ python -m app.cli CRM-1234 --engagement config/engagement.json \
     --depth aggressive --execute --adaptive
 ```
 
+## Configuration
+
+Settings come from `.env` (read at startup; real environment variables win) and the engagement file. Every variable is documented in [docs/configuration.md](docs/configuration.md); most can also be edited under **System → Settings** in the sidebar.
+
+### The engagement config = authorization as an artifact
+
+Execution is impossible until an `engagement.json` defines the approved target,
+scope allow/block lists, and persona credentials (see
+`config/engagement.example.json`). No config → empty scope + no personas →
+nothing runs. Authorization is explicit and reviewable, never inferred from a
+ticket.
+
+**More than one client, one process.** Point `ENGAGEMENTS_DIR` at a directory
+and every `*.json` in it is an engagement, named after the file:
+
+```
+config/engagements/bmw-au.json     ->  "bmw-au"
+config/engagements/acme.json       ->  "acme"
+```
+
+A single `ENGAGEMENT_CONFIG` install keeps working untouched and appears under
+its own name — nothing has to be moved to upgrade. Discovery happens **only**
+when one of those two variables names it: a directory of config files sitting on
+disk beside the code is not a human saying where the authorization lives, and
+default-deny is the first rule here.
+
+Which engagement a request is about is decided per request, never globally. An
+assessment records the engagement it was opened under and always resolves to
+that one, so two tickets for two clients open in two tabs cannot aim one
+client's run at the other's target. The sidebar's picker is for everything else,
+and is deliberately absent on an assessment screen.
+
+**What a run was authorized by is recorded with the run.** Before the first
+request goes out, the scope, the identities, their ownership map and the runner
+limits are frozen into a snapshot (never the credentials — it is meant to be
+attached to a ticket), and its sha256 goes inside every sealed execution. A
+report proves not only that a host was tested but that it was authorized at the
+time; editing the scope afterwards no longer rewrites what an earlier run meant.
+
+The **Engagement** and **System** sections of the sidebar edit that same file,
+in four panes ordered the way a new engagement needs them:
+
+| Pane | Writes | Blocks a run when unset |
+|---|---|---|
+| Readiness | — (read-only verdict, plus quick setup while the engagement is empty) | — |
+| Scope & Targets | `environments`, `active_environment`, `scope.*` | yes — no target and no approved host mean every request comes back `BLOCKED` |
+| Identities | `personas`, `attacker`, `victim` | yes — the runner resolves the attacker before scope is even checked |
+| Settings | `runner` limits, plus AI/evidence settings written to `.env` | no — everything there has a working default |
+
+**Quick Setup** on the Readiness pane does the whole first-run sequence in one
+submit: the environment, its scope authorization, both personas, and both tokens
+(to `.env`, referenced from the engagement file as `${PERSONA_A_TOKEN}`).
+
+Every writer reads the whole document, changes only the keys it owns, and
+writes it back, so hand-written comments and keys the UI does not expose
+survive a save made through the browser.
+
+**Persona tokens are references, not values.** `engagement.json` is the artifact
+a tester reads, diffs and attaches to a ticket, so a live bearer token does not
+belong in it. Write `"Authorization": "Bearer ${PERSONA_A_TOKEN}"` and keep the
+token in `.env`; `load_engagement` resolves `${VAR}` from the environment at load
+time. An unset or empty variable **withholds the header and fails readiness**
+rather than falling back, because both fallbacks corrupt the result instead of
+just weakening it: a literal `${VAR}` on the wire earns a 401 that reads in the
+report exactly like a 401 the endpoint meant to return, and silently dropping the
+header turns "identity A reaches B's object" into "anonymous reaches B's object",
+where a PASS means nothing it appears to mean. The readiness row names the
+variable to set, never its value.
+
+### Feature flags
+
+| Want | Set |
+|---|---|
+| Staged Claude analyzer instead of heuristic, plus the AI half of both reviewing agents | `USE_AI=true` + the `claude` CLI installed and logged in (rides your Claude Code login — no API key, no extra pip package) |
+| A working report link in the Jira comment | `PLATFORM_BASE_URL=https://…` |
+| Live Jira instead of the mock | `JIRA_MCP_URL=…` `JIRA_CLOUD_ID=…` (+ `pip install mcp`) |
+| PostgreSQL instead of SQLite | `DATABASE_URL=postgresql+psycopg://…` |
+| Reach a lab target on a private IP | **Scope & Targets → Allow private / loopback ranges** (lab only) |
+| Run reviewed arbitrary-Python PoCs | `ENABLE_PYTHON_RUNNER=true` **and** `EGRESS_PROXY=…` (see below) |
+
+### Multi-user auth
+
+Off by default (single-user local-admin). To enable: create users and set
+`AUTH_ENABLED=true`.
+
+```bash
+python -m app.core.auth add alice tester   # prints an entry + a one-time API key
+```
+
+Add the printed entry to `config/users.json`. Mutating routes then require
+`X-API-Key` (or `Authorization: Bearer <key>`) with role ≥ tester; only the
+SHA-256 hash of each key is stored. Reads stay open so the dashboard/monitoring
+keep working.
+
+For PoCs whose logic can't be expressed declaratively, the gated
+`app/execution/python_runner.py` can execute them — but only with **all four
+gates** satisfied (`ENABLE_PYTHON_RUNNER=true`, per-PoC `reviewed=True`, static
+validation clean, and an `EGRESS_PROXY` allowlist). It fails closed and is off
+by default. A subprocess is not a security boundary on its own — run it inside
+container isolation with a network egress allowlist.
+
+The real boundary ships in `docker/`: an isolated container (non-root,
+read-only FS, dropped caps, no direct network) whose **only** egress is a
+default-deny tinyproxy driven by `docker/allowlist` — the network-level
+enforcement of your engagement scope. See `docker/docker-compose.yml`.
+
+This is a separate image from the one that runs the platform itself
+(`docker/Dockerfile`, `docker-compose.yml` at the repo root — see "Running in
+Docker" below): the sandbox exists only to isolate arbitrary Python from
+`ENABLE_PYTHON_RUNNER`, it is not how you'd normally deploy the app.
+
+## Project layout
+
+```
+app/
+  schemas/     # Pydantic contract: enums, TestCase, Execution, Finding, Analysis,
+               #   agent.py            RequirementItem, PlanReview, Adjudication,
+               #                       RunAssessment — all advisory by construction
+  core/        # config, scope validator, redaction, engagement  ← security-critical
+  owasp/       # API Top 10 2023 metadata, rule engine, coverage engine
+  vault/       # persona credential vault (required for BOLA/BFLA)
+  analysis/    # heuristic + Claude analyzer, deterministic test designer,
+               #   requirements.py     what the ticket asks for (the coverage denominator)
+               #   plan_reviewer.py    the reviewing agent (structural + AI)
+               #   adjudicator.py      triage + reading of undecided results
+  poc/         # static PoC transpiler (ast-based; never executes)
+  execution/   # templating, mutations, trusted HTTP runner, verdict, evidence
+  pipeline/    # executions → deduplicated findings
+  reporting/   # HTML report + coverage matrix (dependency-free)
+  database/    # SQLAlchemy models + repository (SQLite / Postgres)
+  mcp/         # Jira MCP interface + mock (live SDK connector = drop-in)
+  api/         # FastAPI app: web UI + JSON API
+               #   ui.py               shared primitives: tooltip, section, table, theme
+               #   views.py            dashboard, config, login, report-adjacent pages
+               #   views/            one module per screen; views/assessment/
+               #                     is the four phases, views/config/ the panes
+               #   routes/           one module per part of the workflow
+               #   runtime.py        the shared state, per-request engagement
+  orchestrator.py  # the end-to-end workflow, wired to persistence
+  cli.py       # command-line driver
+demo/          # vulnerable target + sample tests + end-to-end runner
+tests/         # scope, redaction, rules, verdict, evidence, approval, analysis,
+               # transpiler, orchestrator, api, endpoint editing, plan filtering,
+               # re-runs, plan/finding idempotency, assessment-screen structure
+```
+
+## Testing
+
+```bash
+pytest                       # the full suite (~20 min): safety controls + full pipeline
+pytest tests/test_scope.py   # one area
+ruff check app tests demo    # lint, as CI runs it
+```
+
+CI (`.github/workflows/ci.yml`) runs lint and the suite with coverage on Python
+3.11 and 3.12, plus advisory jobs: bandit, pip-audit, mypy, gitleaks, hadolint,
+and a `requirements.txt` ↔ lock consistency check. The CI job, not a number in
+this file, is the source of truth for what passes.
+
 ## Upgrading
 
 The evidence hash now covers the baseline/verification exchanges, multi-request
@@ -766,39 +909,6 @@ it exists to be *stamped*, marking "this database already has the schema
 `create_all` has always produced," so later migrations know where they're
 starting from without trying to re-create tables that are already there.
 
-## Working with the list
-
-Every row and card keeps its actions (Edit, Delete, Re-run, Make Default…) in
-one **⋯** menu; destructive items sit last and ask for confirmation. On
-**Assessments**, tick cards to select them and use **Delete Selected**; the
-route re-checks each id against the caller's engagements, because it sits
-outside `/assessment/{aid}` where the isolation middleware works. Two charts
-above the list show findings by severity (a single-hue ordinal scale) and test
-outcomes per run, each with a legend, per-mark tooltips and a table view.
-
-## Copilot, HAR import and the MCP server
-
-- **Copilot** (assessment screen, right-hand panel): hypotheses that cite the
-  executions behind them, and next probes worth sending. It always has a free
-  rules-only brief; with `USE_AI=true` it asks Claude through the same
-  `claude -p` CLI as every other stage, and you can ask it a question. Every AI
-  claim is checked before it is shown — an execution id that does not exist, an
-  endpoint the assessment does not have, or a mutation outside the registry is
-  dropped and counted. **Add To Plan** hands a step to the attack planner, so
-  the resulting test passes `AttackPlanner.accept()` and lands PENDING.
-- **AI spend.** `AI_ASSESSMENT_BUDGET_USD` caps the total AI spend of one
-  assessment (per process). A transient CLI failure is retried
-  (`AI_CLI_RETRIES`), and `ANTHROPIC_MODEL_FAST` can run ticket extraction on a
-  smaller model.
-- **HAR import.** The Scope phase's **Import Endpoints** accepts a HAR capture
-  (browser network panel, Burp, Caido) as well as OpenAPI/Swagger. Only names
-  are kept — never header values, cookies or bodies — and requests to any host
-  but the capture's main one are skipped and listed.
-- **MCP server.** `python -m app.mcp.server` exposes the platform to another
-  agent over stdio, read-only: list assessments, read one, read findings, read
-  or rebuild the Copilot brief. No tool sends traffic, approves or runs anything.
-  `MCP_ENGAGEMENT` restricts it to one engagement.
-
 ## Roadmap
 
 - **Phase 1–2 (done):** schemas, scope, redaction, rule engine, vault, HTTP
@@ -822,7 +932,7 @@ outcomes per run, each with a legend, per-mark tooltips and a table view.
   requirement list in the UI (the endpoint list's treatment, applied to the other
   input a plan is derived from).
 
-## Safety
+## Security
 
 - Default-deny scope. Private/loopback/link-local ranges are blocked unless
   `scope.allow_private_ranges` is turned on in `config/engagement.json`
@@ -830,3 +940,25 @@ outcomes per run, each with a legend, per-mark tooltips and a table view.
   the authorization artifact a human reviews).
 - Only run this against systems you are explicitly authorized to test.
 - The bundled `demo/vulnerable_api.py` is intentionally insecure — never deploy it.
+
+**Reporting a vulnerability in Sentinel itself:** please do not open a public
+issue or PR. Tell the maintainers privately, with steps to reproduce, and wait
+for a fix before discussing it anywhere shared.
+
+## Contributing
+
+1. Branch from `main`; keep one concern per pull request.
+2. Run `ruff check app tests demo` and `pytest` before pushing.
+3. Anything that sends traffic goes through `HttpRunner` and the scope
+   validator — a change that adds another path to the network will not be merged.
+4. A schema change ships as an Alembic migration under `migrations/`.
+5. UI labels are Title Case and need a Vietnamese entry in the i18n table.
+
+Brand assets in `docs/assets/` are generated: edit
+`scripts/brand/build_assets.py` and run
+`python scripts/brand/build_assets.py --png`, never the SVGs by hand.
+
+## License
+
+Proprietary — all rights reserved. See [LICENSE](LICENSE). Use, copying or
+distribution requires written permission from the copyright holders.
