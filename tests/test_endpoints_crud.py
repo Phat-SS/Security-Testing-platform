@@ -309,7 +309,7 @@ def test_a_filter_that_matches_nothing_does_not_hide_the_stale_warning(client):
 
     assert "Nothing matches this filter" in page, "the filter should have emptied the page"
     assert "different endpoint list" in page
-    assert "Regenerate test plan" in page
+    assert "Regenerate Test Plan" in page
 
 
 # -- the stale warning must also travel with anything exported ---------------

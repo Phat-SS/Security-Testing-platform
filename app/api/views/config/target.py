@@ -18,22 +18,22 @@ from app.core.i18n import tt as _t
 def _environments_pane(environments: dict[str, str], active: str) -> str:
     rows = ""
     for name, url in environments.items():
-        badge = f" <span class='pill low'>{_t('default')}</span>" if name == active else ""
+        badge = f" <span class='pill ok'>{_t('Default')}</span>" if name == active else ""
         # Names are free-form labels ("DEV_BMW AU"), so the path segment is
         # percent-encoded rather than left to the browser to guess at.
-        slug = _e(quote(name, safe=""))
-        make_default = "" if name == active else (
-            f"<form method='post' action='/config/environments/{slug}/activate' "
-            f"style='margin:0;display:inline-block'>"
-            f"<button class='btn ghost' style='padding:4px 8px'>{_t('Make default')}</button></form>"
-        )
+        slug = quote(name, safe="")
+        items = [] if name == active else [
+            ui.Item(_t("Make Default"), action=f"/config/environments/{slug}/activate")]
+        items.append(ui.Item(_t("Delete"), action=f"/config/environments/{slug}/delete",
+                             form_class="confirm-delete",
+                             form_data={"what": f"environment {name}"}, danger=True))
+        menu = ui.action_menu(items, _t("Actions for {name}").format(name=name))
         rows += (
-            f"<tr><td><b>{_e(name)}</b>{badge}</td><td class='mono'>{_e(url)}</td>"
-            f"<td style='white-space:nowrap'>{make_default}"
-            f"<form method='post' action='/config/environments/{slug}/delete' "
-            f"style='margin:0;display:inline-block' class='confirm-delete' "
-            f"data-what='environment {_e(name)}'>"
-            f"<button class='btn sec' style='padding:4px 10px'>{_t('Delete')}</button></form></td></tr>"
+            f"<tr><td><b>{_e(ui.titleize(name))}</b>"
+            + (f" <span class='mono muted' style='font-size:12px'>{_e(name)}</span>"
+               if ui.titleize(name) != name else "")
+            + f"{badge}</td><td class='mono'>{_e(url)}</td>"
+            f"<td class='rowact'>{menu}</td></tr>"
         )
     rows = rows or f"<tr><td colspan='3' class='muted'>{_t('No environments configured yet.')}</td></tr>"
     intro = _t("The base URL each run is sent to.")
@@ -56,10 +56,10 @@ def _environments_pane(environments: dict[str, str], active: str) -> str:
 <input name="name" placeholder="staging" style="max-width:160px" required>
 <input name="url" placeholder="https://staging.company.com" style="flex:1;min-width:240px" required>
 <label class="muted" style="display:flex;align-items:center;gap:4px">
-<input type="checkbox" name="make_active" value="true" style="width:auto"> {_t("make default")}</label>
+<input type="checkbox" name="make_active" value="true" style="width:auto"> {_t("Make Default")}</label>
 <label class="muted" style="display:flex;align-items:center;gap:4px"
  title="{attr(authorize_tip)}">
-<input type="checkbox" name="authorize_host" value="true" style="width:auto" checked> {_t("authorize its host")}</label>
+<input type="checkbox" name="authorize_host" value="true" style="width:auto" checked> {_t("Authorize Its Host")}</label>
 <button class="btn">{_t("Save")}</button>
 </form>
 </div>"""
@@ -92,16 +92,16 @@ def _scope_pane(policy) -> str:
 <div class="card pad">
 <form method="post" action="/config/scope">
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-<label class="field"><span>{_t("Approved hosts — one per line")}</span>
+<label class="field"><span>{_t("Approved Hosts — One per Line")}</span>
 <textarea name="allowed_hosts" rows="7" placeholder="staging-api.company.com&#10;127.0.0.1">{_e(allowed)}</textarea></label>
-<label class="field"><span>{_t("Never test — one per line (always wins)")}</span>
+<label class="field"><span>{_t("Never Test — One per Line (Always Wins)")}</span>
 <textarea name="blocked_hosts" rows="7" placeholder="production.company.com">{_e(blocked)}</textarea></label>
 </div>
 <label class="row" style="gap:8px;margin-top:14px">
 <input type="checkbox" name="allow_private_ranges" value="true" style="width:auto" {priv}>
-<span><b>{_t("Allow private / loopback ranges")}</b>
-<span class="muted"> — {_t("lab targets only")}</span>{ui.info(priv_tip)}</span></label>
-<div style="margin-top:14px"><button class="btn">{_t("Save scope")}</button></div>
+<span><b>{_t("Allow Private / Loopback Ranges")}</b>
+<span class="muted"> — {_t("Lab Targets Only")}</span>{ui.info(priv_tip)}</span></label>
+<div style="margin-top:14px"><button class="btn">{_t("Save Scope")}</button></div>
 </form></div>"""
 
 
@@ -113,5 +113,5 @@ def _target_pane(engagement) -> str:
     BLOCKED, and the fix used to be one tab away from the mistake.
     """
     return f"""{_environments_pane(engagement.environments, engagement.active_environment)}
-<h2 class="section">{_t("Scope authorization")}</h2>
+<h2 class="section">{_t("Scope Authorization")}</h2>
 {_scope_pane(engagement.scope.policy)}"""

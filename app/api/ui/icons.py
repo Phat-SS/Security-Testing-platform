@@ -30,6 +30,23 @@ _PATHS = {
     "search": '<circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8L20 20"/>',
     "x": '<path d="M6 6l12 12M18 6L6 18"/>',
     "external": '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/>',
+    "moon": '<path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/>',
+    "sun": ('<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2'
+            'M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>'),
+    "file": '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h4"/>',
+    "settings": ('<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3'
+                 'M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>'),
+    "sparkle": '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
+    "trash": ('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/>'
+              '<path d="M6.5 7l.8 12.5a1.5 1.5 0 001.5 1.5h6.4a1.5 1.5 0 001.5-1.5L17.5 7"/>'
+              '<path d="M10 11v6M14 11v6"/>'),
+    "copy": ('<rect x="8" y="8" width="12" height="12" rx="2"/>'
+             '<path d="M16 8V5.5A1.5 1.5 0 0014.5 4h-9A1.5 1.5 0 004 5.5v9A1.5 1.5 0 005.5 16H8"/>'),
+    "plus": '<path d="M12 5v14M5 12h14"/>',
+    "arrow-right": '<path d="M5 12h14M13 6l6 6-6 6"/>',
+    "download": '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+    "refresh": '<path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 4v7h-7"/>',
+    "lock": '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
 }
 
 
@@ -45,6 +62,24 @@ def icon(name: str, size: int = 16, cls: str = "") -> str:
         f'<svg{klass} width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
         f'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
         f'stroke-linejoin="round" aria-hidden="true">{body}</svg>'
+    )
+
+
+def logo(size: int = 28) -> str:
+    """The Sentinel mark: a radar sweep that has locked onto one finding.
+
+    Not part of the `icon()` set because it is not a line icon — it is filled,
+    two-coloured, and owns its own frame.
+    """
+    return (
+        f'<svg class="logo" width="{size}" height="{size}" viewBox="0 0 40 40" aria-hidden="true">'
+        '<rect x="1" y="1" width="38" height="38" rx="10" fill="var(--surface)" '
+        'stroke="var(--accent)" stroke-opacity=".4"/>'
+        '<circle cx="20" cy="20" r="12" fill="none" stroke="var(--accent)" stroke-width="1.4" opacity=".45"/>'
+        '<circle cx="20" cy="20" r="6" fill="none" stroke="var(--accent)" stroke-width="1.6"/>'
+        '<path d="M20 20 L20 7 A13 13 0 0 1 31.3 13.5 Z" fill="var(--accent)" opacity=".3"/>'
+        '<circle cx="20" cy="20" r="2" fill="var(--accent)"/>'
+        '<circle cx="28" cy="12.5" r="1.8" fill="var(--crit)"/></svg>'
     )
 
 

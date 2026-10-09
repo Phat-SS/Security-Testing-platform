@@ -131,7 +131,7 @@ def test_report_shows_evidence_chain_verified_banner():
     orch.approve(aid, [t.test_id for t in orch_tests(repo, aid)])
     orch.execute(aid, "http://demo-target.local", _scope(), build_vault(),
                 Settings.from_env(), client=_client())
-    assert "Evidence chain verified" in orch.build_report_html(aid)
+    assert "Evidence Chain Verified" in orch.build_report_html(aid)
 
 
 def test_one_bad_test_does_not_abort_the_whole_execution_batch():
@@ -172,7 +172,7 @@ def test_one_bad_test_does_not_abort_the_whole_execution_batch():
 def test_editing_a_test_to_a_destructive_method_flags_it_destructive():
     """A test designed as a safe GET must not stay is_destructive=False after
     being edited to send DELETE — otherwise it would run under the default
-    "Run approved tests" path (non-destructive only), completely bypassing
+    "Run Approved Tests" path (non-destructive only), completely bypassing
     the destructive-action confirmation gate."""
     from app.schemas import RequestSpec
 

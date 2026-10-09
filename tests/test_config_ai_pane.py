@@ -163,7 +163,7 @@ def test_the_key_boxes_move_behind_a_disclosure(client):
     the pane's primary affordance; now it is the fallback."""
     page = _pane(client)
     assert 'id="evidence-manual"' in page
-    assert "Generate the missing keys" in page
+    assert "Generate the Missing Keys" in page
     manual = page.split('id="evidence-manual"')[1]
     assert 'name="EVIDENCE_FINGERPRINT_KEY"' in manual
     assert 'name="REPORT_SIGNING_KEY"' in manual
@@ -182,8 +182,8 @@ def test_generating_never_overwrites_a_live_key(client):
         "REPORT_SIGNING_KEY": "report-signing-key-0123456789abcdef",
     }, follow_redirects=True)
     page = _pane(client)
-    assert "Generate the missing keys" not in page
-    assert page.count('class="pill low">ACTIVE<') == 2
+    assert "Generate the Missing Keys" not in page
+    assert page.count('class="pill ok">ACTIVE<') == 2
 
 
 # -- the optional integration is folded away --------------------------------
@@ -191,7 +191,7 @@ def test_generating_never_overwrites_a_live_key(client):
 def test_oast_is_collapsed_until_it_is_configured(client):
     page = _pane(client)
     # the <details> immediately before the OAST heading is closed
-    before = page.split("Out-of-band collaborator")[0]
+    before = page.split("Out-of-band Collaborator")[0]
     assert before.rstrip().endswith('<summary style="cursor:pointer"><b>')
     assert "<details>" in before.rsplit("<h2", 1)[-1]
     assert "<details open>" not in before.rsplit("<h2", 1)[-1]
@@ -267,4 +267,4 @@ def test_the_readiness_fix_writes_the_flag(client, monkeypatch):
     assert "AUTH_COOKIE_SECURE=true" in client._runtime_env.read_text(encoding="utf-8")
     assert os.environ["AUTH_COOKIE_SECURE"] == "true"
     page = client.get("/config?tab=readiness").text
-    assert "Login session cookie" in page
+    assert "Login Session Cookie" in page

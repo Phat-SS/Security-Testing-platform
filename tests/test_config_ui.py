@@ -267,7 +267,7 @@ def test_ai_evidence_secrets_can_be_saved_without_being_echoed(client):
     # business; that they SAY something and leak nothing is the contract.
     assert "ACTIVE" in page          # the two evidence keys
     assert "CONFIGURED" in page      # the OAST collaborator
-    assert "OFF" not in page.split("Evidence keys")[1].split("Optional integration")[0]
+    assert "OFF" not in page.split("Evidence Keys")[1].split("Optional Integration")[0]
     assert fingerprint not in page
     assert signing not in page
     assert oast_token not in page
@@ -348,7 +348,7 @@ def test_assessment_page_warns_before_the_run_not_after(client, cfg):
     assert r.status_code == 200
     assert "will block this run before any request is sent" in r.text
     assert "not in the approved testing scope" in r.text
-    assert "Open configuration" in r.text
+    assert "Open Configuration" in r.text
 
 
 def test_assessment_page_is_quiet_when_everything_checks_out(client, cfg):
@@ -374,7 +374,7 @@ def test_assessment_page_is_quiet_when_everything_checks_out(client, cfg):
     r = client.get(f"/assessment/{aid}")
     # A banner that is always present is a banner nobody reads.
     assert "will block this run" not in r.text
-    assert "Open configuration" not in r.text
+    assert "Open Configuration" not in r.text
 
 
 def test_persona_name_must_be_url_safe(client, cfg):

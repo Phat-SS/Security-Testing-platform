@@ -178,6 +178,7 @@ RUNNER_KEYS = (
     "max_response_bytes",
     "max_requests_per_test",
     "max_concurrent_tests",
+    "max_requests_per_second",
 )
 
 

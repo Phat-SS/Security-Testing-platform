@@ -154,6 +154,11 @@ jobs:
   secret-scan:
     name: Secret scan (gitleaks, advisory)
     runs-on: ubuntu-latest
+    # gitleaks-action lists the PR's commits through the API; the workflow-
+    # wide contents:read token alone gets a 403 there.
+    permissions:
+      contents: read
+      pull-requests: read
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -169,9 +174,9 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: hadolint/hadolint-action@v3
+      - uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: docker/Dockerfile
-      - uses: hadolint/hadolint-action@v3
+      - uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: docker/Dockerfile.sandbox

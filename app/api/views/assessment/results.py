@@ -34,7 +34,7 @@ def _verdict_strip(verdicts: dict) -> str:
             f'{info(TIP["verdict"], _t("Verdicts"))}</span>{pills}{others}</div>')
 
 
-_OVERALL_TONE = {"PASSED": "low", "FAILED": "crit", "INCOMPLETE": "med"}
+_OVERALL_TONE = {"PASSED": "ok", "FAILED": "crit", "INCOMPLETE": "med"}
 
 
 def _triage_summary(triage: dict) -> str:
@@ -79,7 +79,7 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
             + _triage_summary(triage) +
             f"<form method='post' action='/assessment/{attr(aid)}/adjudicate' "
             "class='js-busy' style='margin:0'>"
-            f"<button class='btn sec'>{_t('Review results')}</button></form></div>"
+            f"<button class='btn sec'>{_t('Review Results')}</button></form></div>"
         )
 
     tone = _OVERALL_TONE.get(run.overall, "info")
@@ -103,7 +103,7 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
             "derived promotion is audited separately)"
         )
         resolved_html = (
-            f'<div class="glabel" style="margin-top:12px">{_t("Settled by review")} '
+            f'<div class="glabel" style="margin-top:12px">{_t("Settled by Review")} '
             f'<span class="muted">{settled_note}</span></div>'
             + ui.table([_t("Test"), _t("Read as"), _t("How"), _t("Why")], rows, cls="compact",
                        scroll=len(resolved) > 8)
@@ -112,7 +112,7 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
 
     degraded = (f"<p class='muted' style='margin:6px 0 0'>&#9888; {e(run.degraded_reason)}</p>"
                 if run.degraded_reason else "")
-    who = _t("AI reviewer") if run.reviewer == "ai" else _t("deterministic triage only")
+    who = _t("AI Reviewer") if run.reviewer == "ai" else _t("deterministic triage only")
     header_meta = _t("· {decided}% of executions decided · reviewed by {who}").format(
         decided=run.decided_pct, who=e(who))
     coverage_label = _t("{pct}% of the ticket covered").format(pct=run.coverage_pct)
@@ -126,7 +126,7 @@ def _assessment_panel(aid: str, run, st: _State, triage: dict) -> str:
         f"{manual_html}{resolved_html}"
         f"<form method='post' action='/assessment/{attr(aid)}/adjudicate' class='js-busy' "
         f"style='margin:12px 0 0'>"
-        f"<button class='btn ghost'>&#8635; {_t('Review again')}</button>"
+        f"<button class='btn ghost'>&#8635; {_t('Review Again')}</button>"
         + _rerun_transient_control(run) +
         "</form></div>"
     )
@@ -163,13 +163,13 @@ _BLOCKER_LABEL = {
                               "rejection means anything yet. Fix the data and re-run."),
     "config": ("Configuration", "Scope, policy or the network stopped the request before it "
                                 "was sent. Nothing ran, so there is nothing to read."),
-    "no_evidence": ("No evidence captured", "It ran, but captured nothing readable either "
+    "no_evidence": ("No Evidence Captured", "It ran, but captured nothing readable either "
                                             "way. Add a secret marker on the target persona "
                                             "or a verification read-back, then re-run."),
     "ambiguous": ("Genuinely ambiguous", "There is readable evidence and it does not settle "
                                          "the question. This is the bucket that actually "
                                          "needs your judgement."),
-    "unread": ("Not read", "No reader was available — the AI adjudicator is not configured, "
+    "unread": ("Not Read", "No reader was available — the AI adjudicator is not configured, "
                            "or this pass ran out of its review budget."),
 }
 
@@ -194,7 +194,7 @@ def _blocker_groups(manual: list) -> str:
         )
     if not chips:
         return ""
-    intro = _t("What is in the way")
+    intro = _t("What Is in the Way")
     return (f"<div class='glabel' style='margin-top:12px'>{intro}</div>"
             f"<div class='row' style='gap:6px;flex-wrap:wrap;margin:0 0 4px'>{chips}</div>")
 
@@ -211,9 +211,9 @@ def _manual_table(manual: list) -> str:
             f'<td class="muted">{e(note)}</td></tr>'
         )
     html = (
-        f'<div class="glabel" style="margin-top:8px">{_t("Still needs you")}'
+        f'<div class="glabel" style="margin-top:8px">{_t("Still Needs You")}'
         f'{info(TIP["review"], _t("Review"))}</div>'
-        + ui.table([_t("Test"), _t("Why it is undecided"), _t("What would settle it")],
+        + ui.table([_t("Test"), _t("Why It Is Undecided"), _t("What Would Settle It")],
                    rows, cls="compact", scroll=len(manual) > 8)
     )
     if len(manual) > 12:
@@ -263,9 +263,9 @@ def _how_settled_line(run) -> str:
 
 
 _DECISION_SOURCE_LABEL = {
-    "sealed_runner": ("runner-sealed", "low"),
-    "measured": ("measured", "low"),
-    "ai_consensus": ("AI-adjudicated", "med"),
+    "sealed_runner": ("Runner-Sealed", "ok"),
+    "measured": ("measured", "ok"),
+    "ai_consensus": ("AI-Adjudicated", "med"),
 }
 
 
@@ -280,7 +280,7 @@ def _finding_triage_controls(aid: str, finding_id: str, state: dict | None, back
     is_fp = bool(state) and state.get("status") == "false_positive"
     if is_fp:
         note = e(state.get("note", "")) if state.get("note") else ""
-        badge = ui.pill(_t("False positive"), "med") + (
+        badge = ui.pill(_t("False Positive"), "med") + (
             f'<div class="muted" style="font-size:11px;margin-top:2px">{note}</div>' if note else ""
         )
         return (
@@ -353,12 +353,12 @@ def _results_section(aid: str, issue_key: str, st: _State, findings, verdicts: d
             "default environment. This run is kept as the baseline."
         ).format(issue=e(issue_key))
         working_label = _t("Working…")
-        rerun = f"""<div class="glabel" style="margin-top:16px">{_t("Run again")}</div>
+        rerun = f"""<div class="glabel" style="margin-top:16px">{_t("Run Again")}</div>
 <div class="actionrow">
 <form method="post" action="/assessment/{attr(aid)}/rerun" class="rerun-form" style="margin:0"
  data-kind="same">
 <input type="hidden" name="mode" value="same">
-<button class="btn sec">&#8635; {_t("Re-run this plan")}</button></form>
+<button class="btn sec">&#8635; {_t("Re-run This Plan")}</button></form>
 <form method="post" action="/assessment/{attr(aid)}/rerun" class="rerun-form" style="margin:0"
  data-kind="reimport">
 <input type="hidden" name="mode" value="reimport">
@@ -371,7 +371,7 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
     var msg = f.dataset.kind === 'reimport'
       ? {json.dumps(reimport_confirm)}
       : {json.dumps(rerun_confirm)};
-    if (!confirm(msg)) {{ ev.preventDefault(); return; }}
+    if (!stpConfirmSubmit(f, ev, msg)) return;
     var btn = f.querySelector('button');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> ' + {json.dumps(working_label)};
@@ -384,9 +384,9 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
 {findings_table}{rerun}
 <div class="glabel" style="margin-top:16px">{_t("View")}</div>
 <div class="actionrow">
-<a class="btn sec" href="/assessment/{attr(aid)}/report" target="_blank">{_t("HTML report")} ↗</a>
-<a class="btn sec" href="/assessment/{attr(aid)}/regression">{_t("Regression diff")}</a>
-<a class="btn sec" href="/assessment/{attr(aid)}/comment">{_t("Preview Jira comment")}</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/report" target="_blank">{_t("HTML Report")} ↗</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/regression">{_t("Regression Diff")}</a>
+<a class="btn sec" href="/assessment/{attr(aid)}/comment">{_t("Preview Jira Comment")}</a>
 </div>
 <div class="glabel">{_t("Export")}</div>
 <div class="actionrow">
@@ -397,9 +397,9 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
 <a class="btn sec" href="/assessment/{attr(aid)}/export.json" title="{_t('The full machine-readable record — everything the other formats are rendered from.')}">JSON</a>
 <a class="btn sec" href="/assessment/{attr(aid)}/export.postman" title="{_t('Approved tests as a Postman collection, for replay with Newman outside this platform.')}">Postman (Newman)</a>
 </div>"""
-    summary = _t("{n} finding(s)").format(n=len(findings)) if st.n_executions else _t("not run yet")
+    summary = _t("{n} Finding(s)").format(n=len(findings)) if st.n_executions else _t("Not Run Yet")
     if run is not None:
-        summary = _t("{overall} · {pct}% covered · ").format(
+        summary = _t("{overall} · {pct}% Covered · ").format(
             overall=_t(run.overall), pct=run.coverage_pct) + summary
     return ui.section(
         "s-results", "", _t("Results"), body,
@@ -416,7 +416,7 @@ document.querySelectorAll('.rerun-form').forEach(function (f) {{
 
 
 VI.update({
-    "Verdicts": "Kết luận",
+    "Verdicts": "Kết Luận",
     "need a person": "cần người xem", "are a reading task": "cần đọc lại",
     "need only a re-run": "chỉ cần chạy lại",
     "Of the undecided results, {parts}.": "Trong các kết quả chưa rõ, {parts}.",
@@ -429,12 +429,12 @@ VI.update({
         "cần chạy lại, cái nào giải quyết được bằng cách đọc phản hồi đã ghi lại — rồi "
         "trả lời lượt chạy này có đạt không và đã phủ bao nhiêu phần ticket. Nó không "
         "bao giờ ghi đè kết luận đã niêm phong và không tạo finding.",
-    "Review results": "Đánh giá kết quả",
-    "Still needs you": "Vẫn cần bạn", "Review": "Đánh giá",
-    "Test": "Test", "Why it is undecided": "Vì sao chưa rõ",
-    "What would settle it": "Cần gì để giải quyết",
+    "Review Results": "Đánh Giá Kết Quả",
+    "Still Needs You": "Vẫn Cần Bạn", "Review": "Đánh Giá",
+    "Test": "Test", "Why It Is Undecided": "Vì Sao Chưa Rõ",
+    "What Would Settle It": "Cần Gì Để Giải Quyết",
     "{n} more in the report.": "{n} mục nữa trong báo cáo.",
-    "advisory": "tham khảo", "Settled by review": "Đã giải quyết qua đánh giá",
+    "advisory": "tham khảo", "Settled by Review": "Đã Giải Quyết Qua Đánh Giá",
     "(advisory — the sealed verdict and the finding count are unchanged)":
         "(chỉ tham khảo — kết luận đã niêm phong và số finding không đổi)",
     "(sealed verdict unchanged; derived promotion is audited separately)":
@@ -443,12 +443,12 @@ VI.update({
     "derived promotion is audited separately)":
         "(chỉ tham khảo — kết luận niêm phong và số finding không đổi trực tiếp; "
         "việc nâng cấp dẫn xuất được audit riêng)",
-    "Read as": "Đọc là", "Why": "Vì sao",
-    "AI reviewer": "AI reviewer", "deterministic triage only": "chỉ phân loại tất định",
+    "Read as": "Đọc Là", "Why": "Vì Sao",
+    "AI Reviewer": "AI Reviewer", "deterministic triage only": "chỉ phân loại tất định",
     "· {decided}% of executions decided · reviewed by {who}":
         "· {decided}% lượt thực thi đã quyết · người đánh giá {who}",
-    "{pct}% of the ticket covered": "{pct}% ticket đã được phủ",
-    "ID": "ID", "Title": "Tiêu đề", "Endpoint": "Endpoint", "Tests": "Test",
+    "{pct}% of the ticket covered": "{pct}% Ticket Đã Được Phủ",
+    "ID": "ID", "Title": "Tiêu Đề", "Endpoint": "Endpoint", "Tests": "Test",
     "No confirmed findings. An inconclusive result is not a finding — "
     "open the report to see what was undecided and why.":
         "Không có phát hiện nào được xác nhận. Kết quả chưa rõ không phải là finding — "
@@ -473,15 +473,15 @@ VI.update({
         "Chạy lại {issue}?\n\nTạo một assessment mới với kế hoạch này và các duyệt hiện "
         "có, rồi chạy các test không phá huỷ đã duyệt trên môi trường mặc định. Lượt "
         "chạy này được giữ làm mốc so sánh.",
-    "Working…": "Đang xử lý…",
-    "Run again": "Chạy lại", "Re-run this plan": "Chạy lại kế hoạch này",
-    "Re-import from Jira": "Nhập lại từ Jira",
-    "View": "Xem", "HTML report": "Báo cáo HTML", "Regression diff": "So sánh regression",
-    "Preview Jira comment": "Xem trước comment Jira", "Export": "Xuất",
-    "{n} finding(s)": "{n} phát hiện", "not run yet": "chưa chạy",
-    "{overall} · {pct}% covered · ": "{overall} · phủ {pct}% · ",
+    "Working…": "Đang Xử Lý…",
+    "Run Again": "Chạy Lại", "Re-run This Plan": "Chạy Lại Kế Hoạch Này",
+    "Re-import from Jira": "Nhập Lại Từ Jira",
+    "View": "Xem", "HTML Report": "Báo Cáo HTML", "Regression Diff": "So Sánh Regression",
+    "Preview Jira Comment": "Xem Trước Comment Jira", "Export": "Xuất",
+    "{n} Finding(s)": "{n} Phát Hiện", "Not Run Yet": "Chưa Chạy",
+    "{overall} · {pct}% Covered · ": "{overall} · Phủ {pct}% · ",
     "PASSED": "ĐẠT", "FAILED": "LỖI", "INCOMPLETE": "CHƯA HOÀN TẤT",
-    "Results": "Kết quả",
+    "Results": "Kết Quả",
     "A finding is only minted from a test the runner judged FAIL — a confirmed "
     "control break with disclosure in the response.":
         "Một finding chỉ được tạo từ test mà runner đánh giá là LỖI — control thực sự bị "
@@ -490,5 +490,5 @@ VI.update({
     "decision accepted by the conservative promotion policy.":
         "Finding cần runner niêm phong FAIL hoặc một quyết định dẫn xuất gắn hash "
         "được policy nâng cấp thận trọng chấp nhận.",
-    "Open ticket": "Mở ticket",
+    "Open Ticket": "Mở Ticket",
 })

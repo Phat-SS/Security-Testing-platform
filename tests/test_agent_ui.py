@@ -49,9 +49,9 @@ def test_the_import_form_offers_the_planning_pass_and_explains_it():
     assert 'value="analyze"' in page
     assert 'value="auto_plan" selected' in page
     assert 'value="ticket_poc"' in page
-    assert "Auto-plan (AI attack planner)" in page
-    assert "Run ticket's PoC only" in page
-    assert "every test lands PENDING" in page
+    assert "Auto-Plan (AI)" in page
+    assert "Ticket PoC Only" in page
+    assert "Nothing runs on import" in page
 
 
 def test_importing_with_the_box_ticked_produces_a_plan_to_approve(client):
@@ -83,12 +83,12 @@ def test_the_page_shows_the_review_beside_the_plan_it_reviewed(client):
 def test_the_requirements_read_from_the_ticket_are_shown(client):
     aid = _import(client, plan="true")
     page = client.get(f"/assessment/{aid}?phase=scope").text
-    assert "Requirements read from the ticket" in page
+    assert "Requirements Read from the Ticket" in page
     assert "R-01" in page
     # ui.section escapes the title it is given, so the ampersand arrives as
     # &amp; exactly once. It used to be pre-escaped and rendered as literal
     # "&amp;" in the heading.
-    assert "Requirements &amp; endpoints" in page
+    assert "Requirements &amp; Endpoints" in page
     assert "&amp;amp;" not in page
 
 
@@ -157,7 +157,7 @@ def test_the_review_panel_names_the_agent_and_the_advisory_status():
 
     assert "FAILED" in html
     assert "50% of the ticket covered" in html
-    assert "AI reviewer" in html
+    assert "AI Reviewer" in html
     assert "advisory" in html
     assert "the finding count" in html
     # The one needing a person is shown as that, not as a verdict.

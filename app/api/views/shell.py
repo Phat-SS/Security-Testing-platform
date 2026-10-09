@@ -56,12 +56,11 @@ def set_chrome(**chrome) -> None:
     _chrome.set(chrome)
 
 
-def page(title: str, body: str, active: str = "", *, appbar_html: str = "",
-         narrow: bool = False) -> str:
+def page(title: str, body: str, active: str = "", *, appbar_html: str = "") -> str:
     chrome = dict(_chrome.get())
     chrome.setdefault("auth_enabled", _AUTH_ENABLED)
     return ui.page(title, body, active, chrome=chrome,
-                   appbar_html=appbar_html, narrow=narrow)
+                   appbar_html=appbar_html)
 
 
 def appbar(title: str, *, actions: str = "", note: str = "") -> str:

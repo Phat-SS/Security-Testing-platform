@@ -6,6 +6,8 @@ from __future__ import annotations
 
 
 
+from app.api import ui
+
 from ..shell import _e
 from .shared import _section
 from app.core.i18n import tt as _t
@@ -39,14 +41,15 @@ def _runner_pane(limits, overrides: dict) -> str:
 <div class="card pad">
 <form method="post" action="/config/runner">
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
-{field("timeout_s", _t("Request timeout (s)"), _t("Raise it for a slow staging host."), "0.5")}
-{field("max_requests_per_test", _t("Max requests per test"), _t("Caps a single test's fan-out, race windows included."))}
-{field("max_concurrent_tests", _t("Tests in flight at once"), _t("1 runs a plan one test at a time. Higher finishes a long plan faster, at proportionally higher request rate against the target — a blast-radius decision, so it is not raised for you."))}
-{field("max_response_bytes", _t("Max response bytes"), _t("Body larger than this is truncated before storage."))}
+{field("timeout_s", _t("Request Timeout (s)"), _t("Raise it for a slow staging host."), "0.5")}
+{field("max_requests_per_test", _t("Max Requests per Test"), _t("Caps a single test's fan-out, race windows included."))}
+{field("max_concurrent_tests", _t("Tests in Flight at Once"), _t("1 runs a plan one test at a time. Higher finishes a long plan faster, at proportionally higher request rate against the target — a blast-radius decision, so it is not raised for you."))}
+{field("max_response_bytes", _t("Max Response Bytes"), _t("Body larger than this is truncated before storage."))}
+{field("max_requests_per_second", _t("Max Requests per Second"), _t("Ceiling on the whole run's request rate. Blank or 0 means no ceiling. Probe bursts are exempt."), "0.5")}
 </div>
 <div style="margin-top:14px" class="row">
-<button class="btn">{_t("Save limits")}</button>
-<button class="btn ghost" name="reset" value="true">{_t("Reset to .env defaults")}</button>
+<button class="btn">{_t("Save Limits")}</button>
+<button class="btn ghost" name="reset" value="true">{_t("Reset to .env Defaults")}</button>
 </div>
 </form></div>
 <p class="muted" style="margin-top:12px">{footer}</p>"""
@@ -59,7 +62,7 @@ def _mcp_pane(
     jira_env: list[tuple[str, str, str]],
     jira_keys: list[str],
 ) -> str:
-    cls = "low" if jira_live else "med"
+    cls = "ok" if jira_live else "med"
     word = _t("LIVE") if jira_live else _t("MOCK")
     warning_html = (
         f"<div class='muted' style='margin-top:6px;color:var(--crit)'>&#9888; {_e(jira_warning)}</div>"
@@ -72,7 +75,7 @@ def _mcp_pane(
     )
     env_rows = "".join(
         f"<tr><td class='mono'>{_e(name)}</td>"
-        f"<td><span class='pill {'low' if status == 'set' else 'med'}'>{_t(status.upper())}</span></td>"
+        f"<td><span class='pill {'ok' if status == 'set' else 'med'}'>{_t(status.upper())}</span></td>"
         f"<td class='muted'>{_e(hint)}</td></tr>"
         for name, status, hint in jira_env
     )
@@ -107,7 +110,7 @@ def _mcp_pane(
 </div>
 <div class="row" style="gap:8px;margin:0">
 <form method="post" action="/config/mcp/jira/refresh-token" class="js-busy" style="margin:0">
-<button class="btn ghost">{_t("Refresh token")}</button></form>
+<button class="btn ghost">{_t("Refresh Token")}</button></form>
 <form method="post" action="/config/mcp/jira/reconnect" style="margin:0">
 <button class="btn">{_t("Reconnect")}</button></form>
 </div>
@@ -115,11 +118,11 @@ def _mcp_pane(
 </div>
 
 <div class="card" style="margin-bottom:18px"><div class="tblwrap"><table>
-<tr><th>{_t("Environment variable")}</th><th>{_t("Status")}</th><th>{_t("Purpose")}</th></tr>{env_rows}
+<tr><th>{_t("Environment Variable")}</th><th>{_t("Status")}</th><th>{_t("Purpose")}</th></tr>{env_rows}
 </table></div></div>
 <p class="muted" style="margin-bottom:22px">{refresh_note}</p>
 
-<h2 class="section">{_t("Other connectors")}</h2>
+<h2 class="section">{_t("Other Connectors")}</h2>
 <div class="card pad">
 <b>Postman</b> <span class="pill med" style="margin-left:6px">{_t("NOT CONFIGURED")}</span>
 <div class="muted" style="margin-top:4px">{postman_note}</div>
@@ -156,7 +159,7 @@ def _clear_box(key: str) -> str:
         f'<label class="muted" style="display:flex;gap:6px;align-items:center;'
         f'margin-top:6px;{_HINT}">'
         f'<input type="checkbox" name="clear_{_e(key)}" value="true" style="width:auto">'
-        f'{_t("Clear the stored value")}</label>'
+        f'{_t("Clear the Stored Value")}</label>'
     )
 
 
@@ -181,7 +184,7 @@ def _ai_pane(values: dict, flags: dict, ai: dict) -> str:
             "runs on the deterministic path until it is."
         )
     elif on:
-        tone, word = "low", _t("ON")
+        tone, word = "ok", _t("ON")
         detail = _t(
             "Runs through your own Claude Code login — no separate API key, no separate bill."
         )
@@ -200,7 +203,7 @@ def _ai_pane(values: dict, flags: dict, ai: dict) -> str:
     hints = "".join(f'<option value="{_e(m)}">' for m in _AI_MODEL_HINTS)
     current_effort = str(values.get("AI_EFFORT", ""))
     efforts = "".join(
-        f'<option value="{_e(v)}"{" selected" if current_effort == v else ""}>{_e(v)}</option>'
+        f'<option value="{_e(v)}"{" selected" if current_effort == v else ""}>{_e(ui.titleize(v))}</option>'
         for v in _AI_EFFORTS
     )
     effort_default = "" if current_effort else " selected"
@@ -239,20 +242,24 @@ def _ai_pane(values: dict, flags: dict, ai: dict) -> str:
 
 <label class="field"><span>{_t("Effort")}</span>
 <select name="AI_EFFORT">
-<option value=""{effort_default}>{_t("CLI default")}</option>{efforts}</select>
+<option value=""{effort_default}>{_t("CLI Default")}</option>{efforts}</select>
 {effort_hint}</label>
 
-<label class="field"><span>{_t("Spend cap per call (USD)")}</span>
+<label class="field"><span>{_t("Spend Cap per Call (USD)")}</span>
 <input type="number" min="0.01" step="0.01" name="AI_MAX_BUDGET_USD"
  value="{_e(values.get("AI_MAX_BUDGET_USD", ""))}" placeholder="{_t("no cap")}">
 {budget_hint}</label>
+
+<label class="field"><span>{_t("Budget per Assessment (USD)")}</span>
+<input type="number" min="0.01" step="0.01" name="AI_ASSESSMENT_BUDGET_USD"
+ value="{_e(values.get("AI_ASSESSMENT_BUDGET_USD", ""))}" placeholder="{_t("no cap")}"></label>
 </div>
 
 <details style="margin-top:12px">
-<summary class="muted" style="cursor:pointer;font-size:12.5px">{_t("Compliance option")}</summary>
+<summary class="muted" style="cursor:pointer;font-size:12.5px">{_t("Compliance Option")}</summary>
 <label class="row" style="gap:7px;margin:10px 0 0">
 <input type="checkbox" name="AI_REQUIRE_PINNED_MODEL" value="true" style="width:auto"{pin_checked}>
-{_t("Refuse to run unless the model above is a full versioned id")}</label>
+{_t("Refuse to Run Unless the Model Above Is a Full Versioned Id")}</label>
 <div class="muted" style="margin-top:6px;font-size:12.5px">{pin_note}</div>
 </details>
 </div>"""
@@ -270,12 +277,12 @@ def _evidence_pane(values: dict, secrets: dict) -> str:
     back from a secret manager.
     """
     rows = (
-        ("EVIDENCE_FINGERPRINT_KEY", _t("Cross-identity correlation"), _t(
+        ("EVIDENCE_FINGERPRINT_KEY", _t("Cross-identity Correlation"), _t(
             "HMACs identity values so a BOLA finding can show the attacker saw the victim's "
             "own data. Without it that comparison is skipped and those verdicts come back "
             "INCONCLUSIVE."
         )),
-        ("REPORT_SIGNING_KEY", _t("Report manifest signing"), _t(
+        ("REPORT_SIGNING_KEY", _t("Report Manifest Signing"), _t(
             "Signs each report manifest, so it can be shown not to have been edited after "
             "the run. Without it manifests are still written, just unsigned."
         )),
@@ -283,7 +290,7 @@ def _evidence_pane(values: dict, secrets: dict) -> str:
     body = ""
     for index, (key, label, why) in enumerate(rows):
         live = bool(secrets.get(key))
-        pill = (f'<span class="pill low">{_t("ACTIVE")}</span>' if live
+        pill = (f'<span class="pill ok">{_t("ACTIVE")}</span>' if live
                 else f'<span class="pill med">{_t("OFF")}</span>')
         # The rule SEPARATES the rows, so the first one does not get it — it
         # would otherwise draw a stray line across the top of the card.
@@ -297,7 +304,7 @@ def _evidence_pane(values: dict, secrets: dict) -> str:
     if any(not secrets.get(key) for key, _, _ in rows):
         action = (
             f'<button class="btn" type="button" onclick="fillEvidenceKeys()">'
-            f'{_t("Generate the missing keys")}</button>'
+            f'{_t("Generate the Missing Keys")}</button>'
             + _hint(_t("Generated in your browser, stored when you save."))
         )
     else:
@@ -321,13 +328,13 @@ def _evidence_pane(values: dict, secrets: dict) -> str:
 {body}
 <div class="row" style="margin-top:12px;align-items:center">{action}</div>
 <details style="margin-top:12px" id="evidence-manual">
-<summary class="muted" style="cursor:pointer;font-size:12.5px">{_t("Enter keys by hand")}</summary>
+<summary class="muted" style="cursor:pointer;font-size:12.5px">{_t("Enter Keys by Hand")}</summary>
 <div class="muted" style="margin:8px 0 12px;font-size:12.5px">{manual_note}</div>
 <div style="{_GRID.format("260px")}">
 {box("EVIDENCE_FINGERPRINT_KEY", 16)}
 {box("REPORT_SIGNING_KEY", 32)}
 </div>
-<label class="field" style="margin-top:12px;max-width:320px"><span>{_t("Signing key id")}</span>
+<label class="field" style="margin-top:12px;max-width:320px"><span>{_t("Signing Key Id")}</span>
 <input name="REPORT_SIGNING_KEY_ID" value="{_e(values.get("REPORT_SIGNING_KEY_ID", ""))}"
  placeholder="local-hmac">
 {key_id_hint}</label>
@@ -342,8 +349,9 @@ def _oast_pane(values: dict, secrets: dict) -> str:
     engagements do not have was most of this pane's apparent length; collapsed,
     it states the consequence of not having one and gets out of the way.
     """
-    configured = bool(values.get("OAST_PUBLIC_URL") and values.get("OAST_POLL_URL"))
-    pill = (f'<span class="pill low">{_t("CONFIGURED")}</span>' if configured
+    configured = bool(values.get("INTERACTSH_SERVER")
+                      or (values.get("OAST_PUBLIC_URL") and values.get("OAST_POLL_URL")))
+    pill = (f'<span class="pill ok">{_t("CONFIGURED")}</span>' if configured
             else f'<span class="pill info">{_t("NOT SET UP")}</span>')
     if configured:
         summary = _t("Blind and out-of-band tests can be confirmed.")
@@ -354,26 +362,38 @@ def _oast_pane(values: dict, secrets: dict) -> str:
         )
     token_placeholder = (_t("stored — blank keeps it") if secrets.get("OAST_API_TOKEN")
                          else _t("not set"))
+    ish_placeholder = (_t("stored — blank keeps it") if secrets.get("INTERACTSH_TOKEN")
+                       else _t("not set"))
     footer = _t(
         "Both URLs must be HTTPS and are set together. The token is sent only to the polling "
         "endpoint — never into the callback URL handed to the target."
     )
     return f"""<div class="card pad">
 <details{" open" if configured else ""}>
-<summary style="cursor:pointer"><b>{_t("Out-of-band collaborator")}</b> {pill}
+<summary style="cursor:pointer"><b>{_t("Out-of-band Collaborator")}</b> {pill}
 <div class="muted" style="margin-top:4px;font-size:12.5px">{summary}</div></summary>
 <div style="{_GRID.format("260px")};margin-top:14px">
-<label class="field"><span>{_t("Public callback base URL")}</span>
+<label class="field"><span>{_t("Interactsh Server")}</span>
+<input name="INTERACTSH_SERVER" value="{_e(values.get("INTERACTSH_SERVER", ""))}"
+ placeholder="oast.example.com"></label>
+<div><label class="field"><span>{_t("Interactsh Token")}</span>
+<input type="password" name="INTERACTSH_TOKEN" autocomplete="new-password"
+ placeholder="{ish_placeholder}"></label>
+{_clear_box("INTERACTSH_TOKEN")}</div>
+</div>
+<div class="muted" style="margin:8px 0 0;font-size:12.5px">{_t("Or a generic collector:")}</div>
+<div style="{_GRID.format("260px")};margin-top:8px">
+<label class="field"><span>{_t("Public Callback Base URL")}</span>
 <input name="OAST_PUBLIC_URL" value="{_e(values.get("OAST_PUBLIC_URL", ""))}"
  placeholder="https://callbacks.example.test/c"></label>
-<label class="field"><span>{_t("Authenticated polling base URL")}</span>
+<label class="field"><span>{_t("Authenticated Polling Base URL")}</span>
 <input name="OAST_POLL_URL" value="{_e(values.get("OAST_POLL_URL", ""))}"
  placeholder="https://callbacks.example.test/api/events"></label>
-<div><label class="field"><span>{_t("Polling API token")}</span>
+<div><label class="field"><span>{_t("Polling API Token")}</span>
 <input type="password" name="OAST_API_TOKEN" autocomplete="new-password"
  placeholder="{token_placeholder}"></label>
 {_clear_box("OAST_API_TOKEN")}</div>
-<label class="field"><span>{_t("Polling timeout (s)")}</span>
+<label class="field"><span>{_t("Polling Timeout (s)")}</span>
 <input type="number" min="0.1" step="0.1" name="OAST_TIMEOUT_S"
  value="{_e(values.get("OAST_TIMEOUT_S", ""))}" placeholder="5"></label>
 </div>
@@ -431,10 +451,10 @@ def _ai_evidence_pane(config: dict[str, object]) -> str:
 <h2 class="section" style="margin-top:0">{_t("Analyzer")}</h2>
 {_ai_pane(values, flags, ai)}
 
-<h2 class="section">{_t("Evidence keys")}</h2>
+<h2 class="section">{_t("Evidence Keys")}</h2>
 {_evidence_pane(values, secrets)}
 
-<h2 class="section">{_t("Optional integration")}</h2>
+<h2 class="section">{_t("Optional Integration")}</h2>
 {_oast_pane(values, secrets)}
 
 <div class="row" style="margin-top:16px"><button class="btn">{_t("Save")}</button></div>
@@ -460,7 +480,7 @@ def _runtime_pane(facts: list[tuple[str, str, str]]) -> str:
     )
     return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
 <div class="card"><div class="tblwrap"><table>
-<tr><th>{_t("Setting")}</th><th>{_t("Current")}</th><th>{_t("Environment variable")}</th></tr>{rows}
+<tr><th>{_t("Setting")}</th><th>{_t("Current")}</th><th>{_t("Environment Variable")}</th></tr>{rows}
 </table></div></div>
 <p class="muted" style="margin-top:12px">{footer}</p>"""
 
@@ -484,17 +504,15 @@ def _advanced_pane(
     block they just saved already expanded — a flash message above four
     collapsed rows would otherwise read as "saved something, somewhere".
     """
-    intro = _t(
-        "Everything here already has a working default — a normal engagement never "
-        "needs to open this tab. Full reference: <code>docs/configuration.md</code>."
-    )
+    intro = _t("Everything here has a working default. Reference: "
+               "<code>docs/configuration.md</code>.")
     return f"""<p class="muted" style="margin:0 0 12px">{intro}</p>
-{_section("Runner limits", "timeouts and request caps",
+{_section("Runner Limits", "Timeouts and Request Caps",
           _runner_pane(limits, runner_overrides), open_section in ("runner", "advanced"))}
-{_section("AI &amp; Evidence", "analyzer, evidence keys — writes to .env",
+{_section("AI &amp; Evidence", "Analyzer, Evidence Keys — Writes to .env",
           _ai_evidence_pane(ai_evidence), open_section == "ai-evidence")}
-{_section("Jira connector (MCP)", "live server vs offline mock",
+{_section("Jira Connector (MCP)", "Live Server vs Offline Mock",
           _mcp_pane(jira_mode, jira_live, jira_warning, jira_env, jira_keys),
           open_section == "mcp")}
-{_section("Runtime (.env)", "read-only; changing these needs a restart",
+{_section("Runtime (.env)", "Read-Only · Restart to Change",
           _runtime_pane(runtime), open_section == "runtime")}"""

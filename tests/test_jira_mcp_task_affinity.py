@@ -16,6 +16,9 @@ import asyncio
 
 import pytest
 
+# The live connector's SDK is optional (commented out in requirements.txt).
+pytest.importorskip("mcp")
+
 from app.mcp.live import LiveJiraMCPClient
 
 

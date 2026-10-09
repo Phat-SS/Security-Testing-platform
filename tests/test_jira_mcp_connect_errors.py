@@ -38,7 +38,7 @@ def test_explain_names_the_expired_token_on_401(monkeypatch):
 
     assert "401" in message
     assert "JIRA_MCP_TOKEN" in message
-    assert "Refresh token" in message
+    assert "Refresh Token" in message
 
 
 def test_explain_distinguishes_403_scopes_from_401(monkeypatch):

@@ -97,12 +97,12 @@ def test_the_panel_says_what_the_job_says(client, approved):
     wait_for_run(client, approved)
 
     panel = client.get(f"/assessment/{approved}/run-panel").text
-    assert "Run finished" in panel
+    assert "Run Finished" in panel
     assert 'id="run-finished"' in panel, "the poll needs its stop marker"
 
     # And the same markup is on the Run phase itself, not only behind the poll.
     page = client.get(f"/assessment/{approved}?phase=run").text
-    assert "Run finished" in page
+    assert "Run Finished" in page
     assert 'id="run-live"' in page
 
 
@@ -184,7 +184,7 @@ def test_a_run_orphaned_by_a_restart_is_settled_at_startup(tmp_path, monkeypatch
         assert "restarted" in settled.error
 
         panel = c.get("/assessment/A-orphan/run-panel").text
-        assert "Run failed" in panel
+        assert "Run Failed" in panel
         assert 'id="run-finished"' in panel, "the poll must be able to stop"
 
 
@@ -287,3 +287,29 @@ def test_progress_is_reported_once_per_test():
                              on_progress=lambda done, total, ex: seen.append(done))
 
     assert sorted(seen) == [1, 2, 3, 4, 5, 6]
+
+
+def test_adaptive_follow_ups_are_never_destructive_even_when_the_run_is(client, approved,
+                                                                         monkeypatch):
+    """The adaptive planner reads the target's response body before proposing
+    the next probe, and nobody reviews what it proposes. A run that includes
+    destructive tests a human READ must not hand that consent to probes nobody
+    read — otherwise a hostile response could steer the loop into a write."""
+    from app.api.main import state
+
+    seen = {}
+
+    def fake_execute(aid, *args, include_destructive=False, adaptive=None, **kwargs):
+        seen["include_destructive"] = include_destructive
+        seen["budget"] = adaptive
+        return []
+
+    monkeypatch.setattr(state.orch, "execute", fake_execute)
+    client.post(f"/assessment/{approved}/execute",
+                data={"include_destructive": "true", "adaptive": "true"},
+                follow_redirects=False)
+    wait_for_run(client, approved)
+
+    assert seen["include_destructive"] is True
+    assert seen["budget"] is not None
+    assert seen["budget"].allow_destructive is False

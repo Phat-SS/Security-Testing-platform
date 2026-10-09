@@ -10,6 +10,7 @@ both drive.
 
 from __future__ import annotations
 
+import functools
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -24,17 +25,19 @@ from app.analysis.adjudicator import (
     triage,
     triage_detail,
 )
+from app.analysis.copilot import CopilotBrief, CopilotContext, build_copilot, step_as_gap
 from app.analysis.evidence_signals import analyze_evidence, body_shape, measure
 from app.analysis.extractor import build_signals, map_owasp, ticket_text
 from app.analysis.plan_reviewer import build_reviewer
 from app.analysis.promotion import evaluate_promotion
+from app.analysis.staged import ai_budget_scope
 from app.analysis.requirements import (
     extract_requirements,
     extract_requirements_from_text,
     merge_requirements,
 )
 from app.core.config import Settings
-from app.adapters import openapi
+from app.adapters import har, openapi
 from app.core import snapshot
 from app.core.scope import ScopeValidator
 from app.database.repository import Repository
@@ -158,6 +161,16 @@ def _propagated(leader, execution, signals, cluster_id: str, cluster_size: int):
     )
 
 
+def _ai_scoped(method):
+    """Charge every AI call made inside `method` to the assessment it is for,
+    so AI_ASSESSMENT_BUDGET_USD caps one assessment's total spend."""
+    @functools.wraps(method)
+    def wrapper(self, assessment_id, *args, **kwargs):
+        with ai_budget_scope(assessment_id):
+            return method(self, assessment_id, *args, **kwargs)
+    return wrapper
+
+
 def _report(on_progress, done: int, total: int, execution) -> None:
     """Hand one step to a progress callback, never letting it break the run.
 
@@ -175,7 +188,7 @@ def _report(on_progress, done: int, total: int, execution) -> None:
 class Orchestrator:
     def __init__(self, repo: Repository, jira_client, analyzer=None,
                  designer: TestDesigner | None = None, planner=None,
-                 reviewer=None, adjudicator=None):
+                 reviewer=None, adjudicator=None, copilot=None):
         self._repo = repo
         self._jira = jira_client
         self._analyzer = analyzer or build_analyzer()
@@ -190,6 +203,9 @@ class Orchestrator:
         # switches on.
         self._reviewer = reviewer or build_reviewer()
         self._adjudicator = adjudicator or build_adjudicator()
+        # The assessment Copilot. Like the reviewers it is never None: with AI
+        # off it still produces the deterministic brief.
+        self._copilot = copilot or build_copilot()
 
     def set_jira_client(self, jira_client) -> None:
         """Swap the Jira client after construction (used when a live MCP server
@@ -206,6 +222,9 @@ class Orchestrator:
 
     def set_adjudicator(self, adjudicator) -> None:
         self._adjudicator = adjudicator
+
+    def set_copilot(self, copilot) -> None:
+        self._copilot = copilot
 
     def set_planner(self, planner) -> None:
         """Attach the AI planner once the engagement's personas are known — it
@@ -239,7 +258,8 @@ class Orchestrator:
                                      engagement=engagement)
         self._repo.audit("import_issue", assessment_id, detail=issue.issue_key)
 
-        analysis = self._analyzer.analyze(issue)
+        with ai_budget_scope(assessment_id):
+            analysis = self._analyzer.analyze(issue)
 
         # An AI analyzer that fell back to the heuristic path did so silently
         # before: a bad API key, a truncated response or a schema mismatch all
@@ -491,7 +511,12 @@ class Orchestrator:
         if analysis is None:
             raise ValueError("assessment has no analysis to edit")
 
-        imported, summary = openapi.parse(text)
+        # A HAR (captured traffic) arrives through the same form: both are
+        # "what the API really has", and the merge rules are identical.
+        if har.looks_like_har(text):
+            imported, summary = har.parse(text)
+        else:
+            imported, summary = openapi.parse(text)
         merged, changes = openapi.merge(analysis.endpoints, imported)
         analysis.endpoints = merged
         self._refresh_mappings(analysis)
@@ -531,7 +556,8 @@ class Orchestrator:
         """
         assessment = self._repo.get_assessment(assessment_id)
         issue = await self._jira.get_issue(assessment.issue_key)
-        analysis = self._analyzer.analyze(issue)
+        with ai_budget_scope(assessment_id):
+            analysis = self._analyzer.analyze(issue)
         analysis.source_text = ticket_text(issue)
 
         if not analysis.requirements:
@@ -594,6 +620,7 @@ class Orchestrator:
 
     # 3-4. design tests + transpile PoCs + coverage -------------------------
 
+    @_ai_scoped
     def design(self, assessment_id: str, poc_python: str | None = None,
                poc_curl: str | None = None, poc_postman: str | None = None,
                burp_xml: str | None = None, jmeter_xml: str | None = None,
@@ -873,6 +900,7 @@ class Orchestrator:
 
     # 6. scope-validated execution -----------------------------------------
 
+    @_ai_scoped
     def execute(
         self,
         assessment_id: str,
@@ -1091,6 +1119,7 @@ class Orchestrator:
         states what was wrong and what to do about it.
         """
 
+    @_ai_scoped
     def rerun_execution(
         self,
         assessment_id: str,
@@ -1468,6 +1497,7 @@ class Orchestrator:
             )
         return reran, reproduced
 
+    @_ai_scoped
     def adjudicate(self, assessment_id: str, actor: str = "tester",
                    max_ai_calls: int | None = None, *, cluster: bool = True,
                    rerun_transient: bool = False, scope=None, vault=None,
@@ -1731,6 +1761,104 @@ class Orchestrator:
 
     def plan_review(self, assessment_id: str):
         return self._repo.get_plan_review(assessment_id)
+
+    # Copilot -----------------------------------------------------------------
+
+    def copilot_context(self, assessment_id: str) -> CopilotContext:
+        assessment = self.require_assessment(assessment_id)
+        analysis = self.get_analysis(assessment_id)
+        if analysis is None:
+            raise ValueError("this assessment has no analysis yet")
+        tests = self._repo.get_test_cases(assessment_id)
+        by_id = {t.test_id: t for t in tests}
+        executions = []
+        for ex in self.latest_executions(assessment_id):
+            test = by_id.get(ex.test_id)
+            executions.append({
+                "execution_id": ex.execution_id, "test_id": ex.test_id,
+                "category": test.owasp_category.value if test else "",
+                "result": ex.verdict.result.value,
+                "status": ex.response.status_code if ex.response else "",
+                "reason": ex.verdict.reason,
+            })
+        return CopilotContext(
+            analysis=analysis,
+            tests=[{"test_id": t.test_id, "category": t.owasp_category.value,
+                    "kind": t.attack_mutation.kind,
+                    "endpoint": f"{t.request.method} {t.request.path}",
+                    "approval": t.approval_status.value} for t in tests],
+            executions=executions,
+            findings=[{"finding_id": f.finding_id, "severity": f.severity.value,
+                       "title": f.title, "endpoint": f.endpoint}
+                      for f in self._repo.get_findings(assessment_id)],
+            coverage=list(assessment.coverage_json or []),
+        )
+
+    @_ai_scoped
+    def copilot_brief(self, assessment_id: str, question: str = "",
+                      actor: str = "tester") -> CopilotBrief:
+        """Build and store a Copilot brief. Sends nothing to the target."""
+        brief = self._copilot.brief(self.copilot_context(assessment_id), question=question.strip())
+        self._repo.save_agent_record(assessment_id, "copilot", brief.model_dump(mode="json"))
+        self._repo.audit(
+            "copilot_brief", assessment_id, actor=actor,
+            detail=(f"{brief.source}: {len(brief.hypotheses)} hypothesis(es), "
+                    f"{len(brief.next_steps)} step(s), {len(brief.dropped)} claim(s) dropped"
+                    + (f"; degraded: {brief.degraded_reason}" if brief.degraded_reason else "")),
+        )
+        return brief
+
+    def latest_copilot(self, assessment_id: str) -> CopilotBrief | None:
+        record = self._repo.latest_agent_record(assessment_id, "copilot")
+        if record is None:
+            return None
+        try:
+            return CopilotBrief.model_validate(record)
+        except Exception:  # noqa: BLE001 - an old/malformed record is just absent
+            return None
+
+    @_ai_scoped
+    def copilot_accept(self, assessment_id: str, step_index: int,
+                       actor: str = "tester", brief_id: str = "") -> tuple[int, list[str]]:
+        """Turn one Copilot next step into PENDING tests, via the planner.
+
+        The step is handed to the attack planner as a review gap, so whatever
+        comes back passes `AttackPlanner.accept()` (registry mutations only,
+        relative paths, known personas, destructiveness recomputed) and lands
+        PENDING. Returns (tests added, rejections).
+        """
+        brief = self.latest_copilot(assessment_id)
+        if brief is None or not 0 <= step_index < len(brief.next_steps):
+            raise ValueError("that Copilot step no longer exists — refresh the brief")
+        # The form names the brief it was rendered from. If someone (another
+        # tester, an MCP refresh) rebuilt it since, the index points at a
+        # different step, and acting on it would add a test nobody chose.
+        if brief_id and brief_id != brief.generated_at:
+            raise ValueError("the Copilot brief changed since you opened it — review it again")
+        if self._planner is None:
+            raise ValueError("adding a step to the plan needs the AI planner (USE_AI=true)")
+        analysis = self.get_analysis(assessment_id)
+        existing = self._repo.get_test_cases(assessment_id)
+        prior = len(self._repo.get_agent_records(assessment_id, "copilot_accept"))
+        result = self._planner.plan_for_gaps(
+            analysis, [step_as_gap(brief.next_steps[step_index])], existing=existing,
+            id_prefix=f"CP{prior + 1}",
+        )
+        if result.error:
+            raise RuntimeError(result.error)
+        known = {t.test_id for t in existing}
+        fresh = [t for t in result.tests if t.test_id not in known]
+        if fresh:
+            self._repo.save_test_cases(assessment_id, fresh)
+        self._repo.save_agent_record(assessment_id, "copilot_accept", {
+            "step": brief.next_steps[step_index].model_dump(), "tests": [t.test_id for t in fresh],
+        })
+        self._repo.audit("copilot_accept", assessment_id, actor=actor,
+                         detail=f"{brief.next_steps[step_index].title}: {len(fresh)} test(s) "
+                                f"added PENDING, {len(result.rejected)} rejected")
+        for rejection in result.rejected:
+            self._repo.audit("ai_plan_rejected", assessment_id, detail=rejection)
+        return len(fresh), list(result.rejected)
 
     # 7. report -------------------------------------------------------------
 

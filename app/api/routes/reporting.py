@@ -172,7 +172,7 @@ async def comment_post(aid: str, user: User = Depends(require("tester")),
         headline, hint = comment_error(a.issue_key if a else aid, exc)
         return HTMLResponse(
             views.error_page("Posting to Jira failed", headline, hint,
-                             back_href=f"/assessment/{aid}", back_label="← Back to assessment"),
+                             back_href=f"/assessment/{aid}", back_label="← Back to Assessment"),
             status_code=400,
         )
     state.repo.transition_job(job.job_id, "SUCCEEDED", result={"posted": True})

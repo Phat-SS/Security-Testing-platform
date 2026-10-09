@@ -31,7 +31,11 @@ _DASH_SORTS = {"recent", "oldest", "issue", "findings"}
 async def dashboard(flash: str = "", q: str = "", status: str = "",
                     sort: str = "recent", page: int = 1, per: int = 24,
                     user: User = Depends(require_page())) -> str:
-    everything = state.repo.list_assessments()
+    # Same rule as /findings and /activity: this engagement's assessments plus
+    # unstamped ones. Bulk delete and the charts are built from this list.
+    current = state.engagements.current_name
+    everything = [a for a in state.repo.list_assessments()
+                  if not current or (a.engagement or "") in (current, "")]
     # Counts per card, from one query each rather than loading every test case of
     # every assessment: a card that says only "Executed" tells you the one thing
     # you already knew and nothing about what the run found.
@@ -66,6 +70,25 @@ async def dashboard(flash: str = "", q: str = "", status: str = "",
     page = min(max(1, page), pages)
     window = shown[(page - 1) * per: page * per]
 
+    # Chart series describe the engagement, not the current page or search:
+    # newest first, only assessments that have something to show.
+    # The same ticket is often assessed more than once; its key alone would
+    # label two different bars identically, so a repeat gets its id's tail.
+    key_counts = Counter(a.issue_key for a in everything)
+
+    def label(a) -> str:
+        return a.issue_key if key_counts[a.issue_key] == 1 else f"{a.issue_key}·{a.id[-4:]}"
+
+    severity_series = [
+        (label(a), f"/assessment/{a.id}?phase=results", by_id[a.id]["severities"])
+        for a in everything
+        if any(by_id[a.id]["severities"].get(s) for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW"))
+    ][:6]
+    outcome_series = [
+        (label(a), f"/assessment/{a.id}?phase=results", state.repo.execution_verdicts(a.id))
+        for a in [a for a in everything if by_id[a.id]["n_executions"]][:8]
+    ]
+
     return views.dashboard(
         window,
         state.engagement.target_base_url,
@@ -78,6 +101,8 @@ async def dashboard(flash: str = "", q: str = "", status: str = "",
         q=q,
         status=status,
         sort=sort,
+        severity_series=severity_series,
+        outcome_series=list(reversed(outcome_series)),
         page_no=page,
         per=per,
         total_matched=len(shown),

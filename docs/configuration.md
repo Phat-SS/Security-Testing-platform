@@ -72,6 +72,8 @@ Two settings look like they could be env vars and deliberately are not:
 | `RUNNER_MAX_REQUESTS_PER_TEST` | `25` | Caps one test's fan-out, race windows included. |
 | `RUNNER_RETRY_MAX_ATTEMPTS` | `2` | Attempts for a GET/HEAD/OPTIONS request that hit a transient connect/read error (`1` = no retry). A POST/PUT/PATCH/DELETE is never retried, since the runner cannot tell "never reached the server" from "reached it and the reply was lost" — retrying the latter would be an unrequested second write. |
 | `RUNNER_RETRY_BACKOFF_MS` | `200` | Delay before a retry, multiplied by the attempt number. |
+| `RUNNER_MAX_RPS` | `0` | Ceiling on the whole run's request rate, across concurrent tests. `0` = none. A multi-request probe's burst (rate limit, race) is exempt but waits its turn to start. Overridable per engagement under Settings → Runner Limits. |
+| `RUNNER_MAX_THROTTLE_PAUSE_S` | `30` | When the target answers 429/503, later requests wait for its `Retry-After` (2s if absent), capped at this. The 429 is recorded as received; nothing is resent. |
 
 The runner never follows redirects — a 302 to an internal host is the same SSRF
 wearing a hat, and chasing it would re-resolve DNS outside the scope gate. There
@@ -85,6 +87,9 @@ is no setting for it.
 | `CLAUDE_CLI_PATH` | `claude` | Path to the binary if it is not on `PATH`. |
 | `AI_REQUIRE_PINNED_MODEL` | `false` | Production: refuse to run without a versioned model id. |
 | `AI_MAX_BUDGET_USD` | — | Hard ceiling per CLI call. |
+| `AI_ASSESSMENT_BUDGET_USD` | — | Ceiling on the total AI spend of one assessment, summed from the CLI's own `total_cost_usd`. Once reached, every AI stage falls back to its deterministic half. Tracked per process: a restart starts again at zero. |
+| `AI_CLI_RETRIES` | `1` | Extra attempts after a transient CLI failure (timeout, non-JSON output, overloaded). `0`–`3`. Never retries a refusal or a budget stop. |
+| `ANTHROPIC_MODEL_FAST` | — | Model for ticket extraction only (runs on every import). Blank uses `ANTHROPIC_MODEL`. Planning, review, adjudication and the Copilot always use `ANTHROPIC_MODEL`. |
 | `AI_EFFORT` | — | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Blank leaves it to the CLI. |
 | `ADJUDICATOR_CHALLENGE` | `true` | A second adversarial pass tries to refute the adjudicator's own reading before a result is shown as settled; an objection sends it back to a human. Doubles the model cost of an auto-resolved row and catches the failure mode that matters — a confident wrong reading handed over as an answer. Set `false` and single-pass readings are labelled "read by the agent" instead of "read, then challenged". |
 
@@ -99,6 +104,9 @@ is no setting for it.
 | `OAST_POLL_URL` | — | Authenticated endpoint returning `{"observed": true}` for a token. Must be set together with the public URL; both must be HTTPS. |
 | `OAST_API_TOKEN` | — | Sent only to the polling endpoint, never into the callback URL. |
 | `OAST_TIMEOUT_S` | `5` | Poll timeout. |
+| `INTERACTSH_SERVER` | — | Use an [interactsh](https://github.com/projectdiscovery/interactsh) server as the collaborator instead (e.g. your self-hosted `oast.example.com`). Sees DNS as well as HTTP callbacks, which is what a blind SSRF behind an egress proxy usually manages. Registering sends this platform's RSA public key to that server — use a server you trust. Takes precedence over `OAST_PUBLIC_URL`. |
+| `INTERACTSH_TOKEN` | — | Authorization token for a self-hosted interactsh server started with `-token`. |
+| `OAST_WAIT_S` | `5` | How long to keep polling for a callback after the probe before calling it not observed. A DNS lookup can lag the HTTP response. |
 
 ### Access control
 
@@ -145,6 +153,7 @@ Scope for arbitrary code is enforced by the egress proxy, not by the app.
 | `JIRA_TOOL_SEARCH` | `searchJiraIssuesUsingJql` | Same. |
 | `JIRA_TOOL_COMMENT` | `addCommentToJiraIssue` | Same. |
 | `SECURITY_UI_PORT` | `8100` | Port used by `npm run security:ui`. |
+| `MCP_ENGAGEMENT` | — | Restricts the read-only MCP server (`python -m app.mcp.server`) to one engagement's assessments. |
 | `POSTGRES_PASSWORD` | — | Only read by `docker-compose.yml` under the `postgres` profile. |
 
 ## The Configuration page

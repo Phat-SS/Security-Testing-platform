@@ -229,3 +229,15 @@ def test_the_sidebar_claims_no_user_when_nobody_is_signed_in(tmp_path, monkeypat
         html = c.get("/login").text
     assert "local-admin" not in html
     assert 'class="sb-av"' not in html
+
+
+def test_engagement_and_system_pages_use_the_full_width_like_the_workspace(client):
+    """The config panes (Readiness, Scope & Targets, Identities, Settings) were
+    capped at 1180px while every Workspace page ran full width, so the two
+    halves of the sidebar opened visibly different layouts."""
+    assert ".content.narrow" not in ui.CSS
+    for url in ("/", "/findings", "/activity", "/config?tab=readiness", "/config?tab=target",
+                "/config?tab=identities", "/config?tab=advanced"):
+        html = client.get(url).text
+        assert '<div class="content">' in html, url
+        assert "content narrow" not in html, url

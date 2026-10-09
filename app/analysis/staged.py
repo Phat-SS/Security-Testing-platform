@@ -16,10 +16,14 @@ architecture is legible end to end.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import hashlib
 import logging
 import os
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -178,6 +182,76 @@ def _signals_from(extraction: ExtractionResult, issue: NormalizedIssue) -> Requi
     )
 
 
+# -- spend ceiling ---------------------------------------------------------------
+#
+# AI_MAX_BUDGET_USD caps ONE CLI call. Nothing capped the sum: a 300-test plan
+# reviewed, adjudicated with a challenge pass, then briefed by the Copilot is
+# hundreds of calls, each individually cheap. AI_ASSESSMENT_BUDGET_USD caps the
+# total spent on one assessment. The ledger is per process (a restart starts it
+# again at zero), keyed by the assessment the orchestrator is working on, which
+# it declares with `ai_budget_scope()`; a call made outside any scope is charged
+# to "" and capped the same way.
+
+
+class AIBudgetExceeded(RuntimeError):
+    """The assessment has spent its AI budget. Every caller already treats a
+    raised error as "fall back to the deterministic path", which is exactly the
+    behaviour wanted once the money is gone."""
+
+
+_budget_scope: contextvars.ContextVar[str] = contextvars.ContextVar("ai_budget_scope", default="")
+_spent: dict[str, float] = {}
+_spent_lock = threading.Lock()
+
+
+@contextmanager
+def ai_budget_scope(key: str):
+    token = _budget_scope.set(key or "")
+    try:
+        yield
+    finally:
+        _budget_scope.reset(token)
+
+
+def assessment_budget_usd() -> float | None:
+    raw = os.getenv("AI_ASSESSMENT_BUDGET_USD", "").strip()
+    try:
+        value = float(raw) if raw else None
+    except ValueError:
+        return None
+    return value if value and value > 0 else None
+
+
+def ai_spent(key: str) -> float:
+    with _spent_lock:
+        return _spent.get(key, 0.0)
+
+
+def _check_budget() -> None:
+    cap = assessment_budget_usd()
+    if cap is None:
+        return
+    key = _budget_scope.get()
+    spent = ai_spent(key)
+    if spent >= cap:
+        raise AIBudgetExceeded(
+            f"AI budget for this assessment is spent (${spent:.2f} of ${cap:.2f}, "
+            "AI_ASSESSMENT_BUDGET_USD)"
+        )
+
+
+def _charge(cost) -> None:
+    if not isinstance(cost, (int, float)) or cost <= 0:
+        return
+    key = _budget_scope.get()
+    with _spent_lock:
+        _spent[key] = _spent.get(key, 0.0) + float(cost)
+
+
+class _TransientCLIError(RuntimeError):
+    """A CLI failure worth one more try: nothing about the prompt caused it."""
+
+
 class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
     """Real LLM client backed by the local Claude Code CLI (`claude -p`) rather
     than a separate Anthropic API key — this rides whatever login/subscription
@@ -208,6 +282,10 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
         self._timeout = timeout
         self._max_budget_usd = os.getenv("AI_MAX_BUDGET_USD", "").strip()
         self._effort = os.getenv("AI_EFFORT", "").strip()
+        try:
+            self._retries = max(0, min(3, int(os.getenv("AI_CLI_RETRIES", "1") or 1)))
+        except ValueError:
+            self._retries = 1
         self.last_call_metadata: dict[str, object] = {}
 
     @staticmethod
@@ -221,6 +299,32 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
         return self.complete_with_schema(system, user, None, "unversioned")
 
     def complete_with_schema(
+        self,
+        system: str,
+        user: str,
+        json_schema: dict | None,
+        prompt_version: str,
+    ) -> str:
+        """One completion, retried on a transient CLI failure.
+
+        Only a timeout, a non-JSON reply or an overloaded/rate-limited answer is
+        retried: those say nothing about the prompt. A budget refusal or a model
+        error is final. The spend ceiling is checked before every attempt, so a
+        retry can never be the call that overspends.
+        """
+        attempt = 0
+        while True:
+            _check_budget()
+            try:
+                return self._complete_once(system, user, json_schema, prompt_version)
+            except _TransientCLIError as exc:
+                attempt += 1
+                if attempt > self._retries:
+                    raise RuntimeError(str(exc)) from exc
+                logger.warning("claude CLI transient failure (attempt %s): %s", attempt, exc)
+                time.sleep(min(8.0, 2.0 * attempt))
+
+    def _complete_once(
         self,
         system: str,
         user: str,
@@ -263,18 +367,23 @@ class ClaudeLLM:  # pragma: no cover - requires an authenticated `claude` CLI
                 "or set CLAUDE_CLI_PATH"
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"claude CLI timed out after {self._timeout}s") from exc
+            raise _TransientCLIError(f"claude CLI timed out after {self._timeout}s") from exc
 
         try:
             payload = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
+            raise _TransientCLIError(
                 f"claude CLI returned non-JSON output (exit {proc.returncode}): "
                 f"stdout={proc.stdout[:500]!r} stderr={proc.stderr[:500]!r}"
             ) from exc
 
+        # Charged even when the call then fails: the money is spent either way.
+        _charge(payload.get("total_cost_usd"))
         if proc.returncode != 0 or payload.get("is_error"):
-            raise RuntimeError(f"claude CLI error: {payload.get('result') or proc.stderr[:500]}")
+            message = f"claude CLI error: {payload.get('result') or proc.stderr[:500]}"
+            if any(k in message.lower() for k in ("overloaded", "rate limit", "529", "503")):
+                raise _TransientCLIError(message)
+            raise RuntimeError(message)
         self.last_call_metadata = {
             "model_id": payload.get("model") or self._model or "cli-default-unpinned",
             "model_pinned": bool(self._model),

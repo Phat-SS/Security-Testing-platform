@@ -17,7 +17,7 @@ which is what allowed the palette to be declared twice.
 
 from __future__ import annotations
 
-from . import base, icons, shell, tokens
+from . import base, charts, icons, menu, select, shell, tokens
 from .base import (
     APPROVAL_CLASS,
     LANG_JS,
@@ -38,17 +38,19 @@ from .base import (
     section,
     stats,
     table,
+    titleize,
 )
 from .icons import icon
+from .menu import Item, action_menu
 from .shell import Nav, appbar, page, sidebar
 
 #: The complete stylesheet every page emits.
 CSS = shell.FULL_CSS
 
 __all__ = [
-    "APPROVAL_CLASS", "CSS", "LANG_JS", "Nav", "SECTION_JS", "SEV_CLASS", "STATE_CLASS",
+    "APPROVAL_CLASS", "CSS", "Item", "action_menu", "charts", "menu", "select", "LANG_JS", "Nav", "SECTION_JS", "SEV_CLASS", "STATE_CLASS",
     "STATUS_PILL", "THEME_JS", "THEME_TOGGLE_HTML", "TOOLTIP_JS", "VERDICT_CLASS",
     "appbar", "attr", "bar", "base", "e", "icon", "icons", "info",
     "lang_toggle_html", "page", "pill", "section", "shell", "sidebar", "stats", "table",
-    "tokens",
+    "titleize", "tokens",
 ]

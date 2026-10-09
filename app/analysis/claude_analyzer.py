@@ -57,7 +57,11 @@ def build_analyzer():
     if ClaudeAnalyzer.is_enabled():
         from app.analysis.staged import ClaudeLLM, StagedAnalyzer
 
-        return StagedAnalyzer(ClaudeLLM())
+        # Extraction only restates the ticket, on every import: the one stage
+        # where a smaller, faster model is enough. Planning, review and
+        # adjudication keep ANTHROPIC_MODEL.
+        fast = os.getenv("ANTHROPIC_MODEL_FAST", "").strip() or None
+        return StagedAnalyzer(ClaudeLLM(model=fast))
     from app.analysis.extractor import HeuristicAnalyzer
 
     return HeuristicAnalyzer()

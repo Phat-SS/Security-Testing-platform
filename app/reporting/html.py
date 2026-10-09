@@ -10,27 +10,33 @@ import html
 import json
 from collections import Counter
 
+from app.api.ui.icons import logo
 from app.core.i18n import DEFAULT_LANG, VI, t
 from app.execution.mutations import MUTATION_KINDS
 from app.schemas.execution import Execution
-from app.schemas.finding import Finding
+from app.schemas.finding import Finding, cvss_score
 from app.schemas.testcase import TestCase
 
+# The Sentinel light palette (app/api/ui/tokens.py), as literal hex: these are
+# painted as fills under white text and as text on the page, and every one of
+# them clears 4.5:1 against white. A pass is the brand mint and LOW is blue, so
+# "low severity" can never be read as "passed".
 _SEV_COLOR = {
-    "CRITICAL": "#b4232a",
-    "HIGH": "#c8500f",
-    "MEDIUM": "#b8860b",
-    "LOW": "#2f855a",
-    "INFO": "#4a5568",
+    "CRITICAL": "#c8102e",
+    "HIGH": "#a84a08",
+    "MEDIUM": "#8a6400",
+    "LOW": "#1d5fd1",
+    "INFO": "#566173",
 }
+_SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 _RESULT_COLOR = {
-    "PASS": "#2f855a",
-    "FAIL": "#b4232a",
-    "INCONCLUSIVE": "#b8860b",
-    "BLOCKED": "#4a5568",
-    "ERROR": "#4a5568",
-    "SKIPPED": "#718096",
-    "TIMEOUT": "#4a5568",
+    "PASS": "#007a61",
+    "FAIL": "#c8102e",
+    "INCONCLUSIVE": "#8a6400",
+    "BLOCKED": "#566173",
+    "ERROR": "#566173",
+    "SKIPPED": "#647083",
+    "TIMEOUT": "#566173",
 }
 
 
@@ -46,15 +52,12 @@ def _evidence_chain_banner(chain_ok: bool | None, lang: str) -> str:
         return ""
     if chain_ok:
         return (
-            '<p style="margin:0 0 18px"><span style="color:#2f855a;font-weight:600">'
-            f'&#10003; {t("Evidence chain verified", lang)}</span> — '
-            + t("every execution's SHA-256 hash recomputes and links to the previous "
-                "one; nothing below has been edited since it was recorded.", lang)
-            + "</p>"
+            f'<span class="okchip" title="{_e(t("Every execution hash recomputes and links to the previous one.", lang))}">'
+            f'&#10003; {t("Evidence Chain Verified", lang)}</span>'
         )
     return (
-        '<p style="margin:0 0 18px;padding:10px 14px;border:1px solid #b4232a;'
-        'border-radius:8px;background:rgba(180,35,42,.08)"><span style="color:#b4232a;'
+        '<p style="margin:0 0 18px;padding:10px 14px;border:1px solid #c8102e;'
+        'border-radius:8px;background:rgba(200,16,46,.08)"><span style="color:#c8102e;'
         f'font-weight:700">&#9888; {t("Evidence chain FAILED verification", lang)}</span> — '
         + t("at least one execution record's hash no longer matches its content, or the "
             "chain link to the previous record is broken. This report's evidence may have "
@@ -69,15 +72,15 @@ def _report_quality_banner(verification, lang: str) -> str:
         return ""
     if verification.ok:
         return (
-            '<p style="margin:0 0 18px"><span style="color:#2f855a;font-weight:600">'
-            f'&#10003; {_e("Report claims verified")}</span> — '
-            f'{verification.checked_findings} finding(s), '
-            f'{verification.checked_references} evidence reference(s).</p>'
+            f'<span class="okchip">&#10003; {t("Claims Verified", lang)} &middot; '
+            + t("{f} findings, {r} evidence refs", lang).format(
+                f=verification.checked_findings, r=verification.checked_references)
+            + "</span>"
         )
     errors = sum(1 for issue in verification.issues if issue.severity == "error")
     return (
-        '<p style="margin:0 0 18px;padding:10px 14px;border:1px solid #b4232a;'
-        'border-radius:8px;background:rgba(180,35,42,.08)"><span style="color:#b4232a;'
+        '<p style="margin:0 0 18px;padding:10px 14px;border:1px solid #c8102e;'
+        'border-radius:8px;background:rgba(200,16,46,.08)"><span style="color:#c8102e;'
         f'font-weight:700">&#9888; {_e("Report quality verification failed")}</span> — '
         f'{errors} blocking issue(s). Treat finding narratives as non-authoritative '
         'until the evidence references are corrected.</p>'
@@ -89,15 +92,13 @@ def _input_snapshot_banner(snapshot: dict | None) -> str:
         return ""
     digest = str(snapshot.get("snapshot_hash", ""))[:12]
     if snapshot.get("complete", False):
-        return (
-            '<p class="muted" style="margin:0 0 18px">Jira input snapshot '
-            f'<code>{_e(digest)}</code> is marked complete.</p>'
-        )
+        return f'<span class="okchip">&#10003; Jira Input Complete <code>{_e(digest)}</code></span>'
+
     warnings = snapshot.get("warnings") or ["Jira input was incomplete."]
     items = "".join(f"<li>{_e(item)}</li>" for item in warnings)
     return (
-        '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #b8860b;'
-        'border-radius:8px;background:rgba(184,134,11,.08)"><b>Jira input incomplete</b>'
+        '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #8a6400;'
+        'border-radius:8px;background:rgba(138,100,0,.08)"><b>Jira input incomplete</b>'
         f' — snapshot <code>{_e(digest)}</code>. Coverage cannot be treated as exhaustive.'
         f'<ul>{items}</ul></div>'
     )
@@ -116,19 +117,18 @@ def _manifest_banner(manifest) -> str:
         # again would silently stop meaning anything the day the key rotates.
         from app.reporting.manifest import verify_manifest
         verified = verify_manifest(manifest)
-        status = (
-            '<span style="color:#2f855a">&#10003; verified against the '
-            'currently configured signing key</span>' if verified else
-            '<span style="color:#b8860b">&#9888; does NOT verify against the '
-            'currently configured signing key — the key may have rotated, or '
-            'this manifest may have been altered</span>'
-        )
+        if verified:
+            return (f'<span class="okchip">&#10003; Manifest Signed '
+                    f'<code>{_e(manifest.signature[:12])}…</code> ({_e(manifest.key_id)})</span>')
         return (
             '<p class="muted" style="margin:0 0 18px">Signed report manifest '
-            f'<code>{_e(manifest.signature[:20])}…</code> ({_e(manifest.key_id)}) — {status}.</p>'
+            f'<code>{_e(manifest.signature[:20])}…</code> ({_e(manifest.key_id)}) — '
+            '<span style="color:#8a6400">&#9888; does NOT verify against the '
+            'currently configured signing key — the key may have rotated, or '
+            'this manifest may have been altered</span>.</p>'
         )
     return (
-        '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #b8860b;'
+        '<div style="margin:0 0 18px;padding:10px 14px;border:1px solid #8a6400;'
         'border-radius:8px"><b>Unsigned report manifest</b> — configure '
         '<code>REPORT_SIGNING_KEY</code> before distributing this report.</div>'
     )
@@ -191,9 +191,15 @@ def render_report(
         for k in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     )
 
-    findings_html = "\n".join(_finding_block(f, lang) for f in findings) or (
+    # Worst first: the reader of a report starts at the top and may stop
+    # there, so the top has to be the thing that most needs fixing.
+    ranked = sorted(findings, key=lambda f: _SEV_ORDER.index(f.severity.value)
+                    if f.severity.value in _SEV_ORDER else len(_SEV_ORDER))
+    findings_html = "\n".join(_finding_block(f, lang) for f in ranked) or (
         f'<p class="ok">{t("No confirmed findings.", lang)}</p>'
     )
+    cover_html = _cover(title, target, ranked, result_counts, sev_counts,
+                        coverage_rows or [], lang)
 
     # The re-run control only exists when the report knows which assessment it
     # belongs to — the same gate the Jira bar uses. A report rendered by the CLI
@@ -228,32 +234,95 @@ def render_report(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_e(title)}</title>
 <style>
-  :root {{ --bg:#fff; --fg:#1a202c; --muted:#4a5568; --card:#f7fafc;
-           --border:#e2e8f0; --code:#f1f5f9; }}
+  :root {{ --bg:#f5f7fa; --paper:#fff; --fg:#0e1520; --muted:#566173; --card:#f5f7fa;
+           --border:#e1e6ed; --code:#f0f3f7; --accent:#007a61; --accent-ink:#fff;
+           --ink:#0a0e13; --ink-fg:#e8edf3; --ink-muted:#8b97a7; --ink-line:#222c38;
+           --display:"Space Grotesk","Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+           --mono-f:"JetBrains Mono","Cascadia Code",ui-monospace,Consolas,monospace; }}
   @media (prefers-color-scheme: dark) {{
-    :root {{ --bg:#0f1419; --fg:#e2e8f0; --muted:#a0aec0; --card:#1a212b;
-             --border:#2d3748; --code:#161d27; }} }}
+    :root {{ --bg:#0a0e13; --paper:#0d1218; --fg:#e8edf3; --muted:#8b97a7; --card:#11171f;
+             --border:#222c38; --code:#161e28; --accent:#2ee6b6; --accent-ink:#04221a;
+             --ink:#11171f; }} }}
+  /* Verdict and severity colours are written inline, from the light palette
+     in the _SEV_COLOR/_RESULT_COLOR tables. On the dark page
+     those text colours fall under 4.5:1, so each is remapped to its dark
+     twin here. Fills under white text keep the light value, which already
+     passes on both grounds. */
+  @media (prefers-color-scheme: dark) {{
+    [style*="color:#c8102e"] {{ color:#ff5468 !important; }}
+    [style*="color:#a84a08"] {{ color:#ff9447 !important; }}
+    [style*="color:#8a6400"] {{ color:#f2c14e !important; }}
+    [style*="color:#1d5fd1"] {{ color:#6ca8ff !important; }}
+    [style*="color:#566173"] {{ color:#8b97a7 !important; }}
+    [style*="color:#647083"] {{ color:#8b97a7 !important; }}
+    [style*="color:#007a61"] {{ color:#2ee6b6 !important; }}
+  }}
   * {{ box-sizing:border-box; }}
-  body {{ font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;
+  body {{ font:15px/1.6 "IBM Plex Sans","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
           margin:0; background:var(--bg); color:var(--fg); }}
-  .wrap {{ max-width:1600px; margin:0 auto; padding:28px 20px 80px; }}
-  h1 {{ font-size:24px; margin:0 0 4px; }} h2 {{ font-size:19px; margin:32px 0 12px;
-        border-bottom:1px solid var(--border); padding-bottom:6px; }}
-  .titlebar {{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }}
-  .sub {{ color:var(--muted); margin:0 0 20px; }}
+  /* clip, not hidden: `overflow:hidden` would make .doc the scroll container
+     of the sticky table of contents, and it would scroll away with the page. */
+  .doc {{ max-width:1280px; margin:24px auto 80px; background:var(--paper);
+          border:1px solid var(--border); border-radius:18px; overflow:clip;
+          box-shadow:0 12px 40px rgba(14,21,32,.08); }}
+  .doc-body {{ padding:8px 40px 48px; }}
+  h1,h2,h3 {{ font-family:var(--display); letter-spacing:-.01em; }}
+  h1 {{ font-size:32px; line-height:1.15; margin:0 0 6px; }}
+  h2 {{ font-size:21px; margin:40px 0 14px; scroll-margin-top:16px; }}
+  a {{ color:var(--accent); }}
+  /* cover */
+  /* The band is dark in both themes, so the logo's own tokens are pinned to
+     their dark values here rather than inherited from the page. */
+  .cover {{ background:var(--ink); color:var(--ink-fg); padding:32px 40px 28px;
+            --accent:#2ee6b6; --surface:#0a0e13; --crit:#ff5468; }}
+  .cover .brand {{ display:flex; align-items:center; gap:10px; font-family:var(--display);
+                   font-weight:700; font-size:17px; margin-bottom:24px; }}
+  .cover .brand .sp {{ flex:1; }}
+  .cover .kicker {{ font-family:var(--mono-f); font-size:12px; color:#2ee6b6; margin:0 0 8px; }}
+  .cover .sub {{ color:var(--ink-muted); margin:0; }}
+  .cover code {{ background:transparent; color:var(--ink-fg); padding:0; }}
+  .risk {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px;
+           margin:24px 0 18px; }}
+  .risk .cell {{ border:1px solid var(--ink-line); border-radius:14px; padding:14px 16px;
+                 background:rgba(255,255,255,.02); }}
+  .risk .cell .k {{ font-size:12px; color:var(--ink-muted); }}
+  .risk .cell .v {{ font-family:var(--display); font-size:26px; font-weight:700; }}
+  .sevbar {{ display:flex; height:10px; border-radius:999px; overflow:hidden; background:var(--ink-line); }}
+  .sevbar span {{ display:block; height:100%; animation:grow 1s cubic-bezier(.2,.8,.2,1) both;
+                  transform-origin:left; }}
+  .sevlegend {{ display:flex; gap:16px; flex-wrap:wrap; font-size:12px; color:var(--ink-muted);
+                margin-top:8px; }}
+  .toc {{ display:flex; gap:6px; flex-wrap:wrap; padding:14px 40px; border-bottom:1px solid var(--border);
+          position:sticky; top:0; background:var(--paper); z-index:5; }}
+  .toc a {{ padding:5px 11px; border-radius:8px; color:var(--muted); text-decoration:none;
+            font-size:13px; font-weight:600; }}
+  .toc a:hover {{ background:var(--card); color:var(--fg); }}
+  .integrity {{ display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; margin:18px 0 0; }}
+  .integrity > p, .integrity > div {{ flex-basis:100%; }}
+  .okchip {{ display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:999px;
+             font-size:12.5px; font-weight:600; color:var(--accent); background:var(--card);
+             border:1px solid var(--border); }}
+  .okchip code {{ font-size:11.5px; }}
+  @keyframes grow {{ from {{ transform:scaleX(0); }} to {{ transform:scaleX(1); }} }}
+  @keyframes rise {{ from {{ opacity:0; transform:translateY(8px); }} to {{ opacity:1; transform:none; }} }}
   .langswitch {{ font-size:12.5px; color:var(--muted); white-space:nowrap; margin-top:4px; }}
   .langswitch a {{ color:var(--muted); text-decoration:none; padding:2px 6px; border-radius:5px; }}
-  .langswitch a.active {{ color:#fff; background:#0d6e6e; font-weight:600; }}
+  .cover .langswitch a {{ color:var(--ink-muted); }}
+  .langswitch a.active, .cover .langswitch a.active {{ color:#04221a; background:#2ee6b6; font-weight:600; }}
   .langswitch a:not(.active):hover {{ background:var(--card); }}
+  .cover .langswitch a:not(.active):hover {{ background:var(--ink-line); color:var(--ink-fg); }}
   .stats {{ display:flex; gap:10px; flex-wrap:wrap; }}
-  .stat {{ background:var(--card); border:1px solid var(--border); border-radius:10px;
-           padding:12px 18px; min-width:96px; text-align:center; }}
-  .num {{ font-size:26px; font-weight:700; }} .lbl {{ color:var(--muted); font-size:12px; }}
+  .stat {{ background:var(--card); border:1px solid var(--border); border-radius:14px;
+           padding:14px 18px; min-width:110px; text-align:center; animation:rise .32s cubic-bezier(.2,.8,.2,1) both; }}
+  .num {{ font-family:var(--display); font-size:26px; font-weight:700; }} .lbl {{ color:var(--muted); font-size:12px; }}
   .pills {{ margin:14px 0; display:flex; gap:8px; flex-wrap:wrap; }}
   .pill {{ color:#fff; border-radius:999px; padding:3px 11px; font-size:12px; font-weight:600; }}
-  .finding {{ background:var(--card); border:1px solid var(--border); border-left-width:5px;
-              border-radius:10px; padding:16px 18px; margin:14px 0; }}
-  .finding h3 {{ margin:0 0 8px; font-size:16px; }}
+  .finding {{ background:var(--paper); border:1px solid var(--border);
+              border-radius:14px; padding:18px 20px; margin:14px 0; break-inside:avoid;
+              animation:rise .32s cubic-bezier(.2,.8,.2,1) both; }}
+  .finding .fhead {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }}
+  .finding .fid {{ font-family:var(--mono-f); font-size:12px; color:var(--muted); }}
+  .finding h3 {{ margin:0 0 12px; font-size:18px; }}
   .kv {{ display:grid; grid-template-columns:130px 1fr; gap:4px 12px; font-size:14px; }}
   .kv b {{ color:var(--muted); font-weight:600; }}
   table {{ width:100%; border-collapse:collapse; font-size:13px; }}
@@ -261,23 +330,22 @@ def render_report(
   th,td {{ text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); }}
   th {{ color:var(--muted); font-weight:600; }}
   code {{ background:var(--code); padding:1px 5px; border-radius:4px; font-size:12.5px; }}
-  .res {{ font-weight:700; }} .ok {{ color:#2f855a; }}
-  .mono {{ font-family:ui-monospace,Menlo,Consolas,monospace; }}
+  .res {{ font-weight:700; }} .ok {{ color:var(--accent); }}
+  .mono {{ font-family:var(--mono-f); }}
   .bar {{ background:var(--border); border-radius:6px; height:10px; width:140px; overflow:hidden; }}
   .fill {{ height:100%; border-radius:6px; }}
   .backlink {{ display:inline-block; color:var(--muted); text-decoration:none; font-size:13px;
                font-weight:600; margin:0 0 14px; }}
-  .backlink:hover {{ color:#0d6e6e; }}
+  .backlink:hover {{ color:var(--accent); }}
   .jirabar {{ display:flex; align-items:center; gap:12px; margin:16px 0 26px; }}
-  .jirabar button {{ background:#0d6e6e; color:#fff; border:0; border-radius:8px; padding:9px 16px;
+  .jirabar button {{ background:var(--accent); color:var(--accent-ink); border:0; border-radius:8px; padding:9px 16px;
                       font:inherit; font-size:14px; font-weight:600; cursor:pointer; }}
   .jirabar button:disabled {{ opacity:.6; cursor:default; }}
   .jira-status {{ font-size:13px; color:var(--muted); }}
-  .jira-status.err {{ color:#b4232a; }}
+  .jira-status.err {{ color:#c8102e; }}
   .muted {{ color:var(--muted); }}
   details.resp summary {{ cursor:pointer; color:var(--muted); font-size:12.5px; user-select:none; }}
-  .glabel {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em;
-             margin:0 0 2px; }}
+  .glabel {{ color:var(--muted); font-size:12px; font-weight:600; margin:0 0 2px; }}
   .respbody {{ max-height:180px; overflow:auto; background:var(--code); padding:8px 10px;
                border-radius:6px; margin:2px 0 8px; white-space:pre-wrap; word-break:break-word;
                font-size:12px; }}
@@ -287,28 +355,27 @@ def render_report(
   .exchange-toggle {{ background:var(--card); color:inherit; border:1px solid var(--border);
                        border-radius:7px; padding:5px 11px; font:inherit; font-size:12.5px;
                        font-weight:600; cursor:pointer; white-space:nowrap; }}
-  .exchange-toggle:hover {{ border-color:#0d6e6e; color:#0d6e6e; }}
+  .exchange-toggle:hover {{ border-color:var(--accent); color:var(--accent); }}
   tr.exchange-row td {{ padding:0; border-bottom:1px solid var(--border); }}
   .exchange-panes {{ display:grid; grid-template-columns:1fr 1fr; }}
   @media (max-width:900px) {{ .exchange-panes {{ grid-template-columns:1fr; }} }}
   .exchange-pane {{ padding:16px 20px; border-right:1px solid var(--border); min-width:0; }}
   .exchange-pane:last-child {{ border-right:none; }}
-  .exchange-pane h4 {{ margin:0 0 10px; font-size:12.5px; text-transform:uppercase;
-                       letter-spacing:.04em; color:var(--muted); font-weight:700;
+  .exchange-pane h4 {{ margin:0 0 10px; font-size:13px; color:var(--muted); font-weight:600;
                        display:flex; justify-content:space-between; align-items:center; gap:10px; }}
   .exbody {{ max-height:55vh; overflow:auto; background:var(--code); padding:10px 12px;
              border-radius:8px; margin:2px 0 14px; white-space:pre-wrap; word-break:break-word;
              font-size:13px; line-height:1.55; }}
-  .curlbtn {{ background:#0d6e6e; color:#fff; border:0; border-radius:7px; padding:6px 13px;
+  .curlbtn {{ background:var(--accent); color:var(--accent-ink); border:0; border-radius:7px; padding:6px 13px;
               font:inherit; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }}
   .curlbtn:hover {{ opacity:.88; }} .curlbtn:disabled {{ opacity:.6; cursor:default; }}
   .curlnote {{ font-size:12px; color:var(--muted); min-height:1.4em; margin:0 0 8px; }}
-  .curlnote.err {{ color:#b4232a; }}
+  .curlnote.err {{ color:#c8102e; }}
   td.rerun {{ white-space:nowrap; vertical-align:top; }}
   .rerunbtn {{ background:var(--card); color:inherit; border:1px solid var(--border);
                border-radius:7px; padding:5px 11px; font:inherit; font-size:12.5px;
                font-weight:600; cursor:pointer; }}
-  .rerunbtn:enabled:hover {{ border-color:#0d6e6e; color:#0d6e6e; }}
+  .rerunbtn:enabled:hover {{ border-color:var(--accent); color:var(--accent); }}
   .rerunbtn:disabled {{ opacity:.55; cursor:default; }}
   .rerunout {{ font-size:12px; line-height:1.5; margin-top:6px; max-width:220px;
                white-space:normal; }}
@@ -317,35 +384,45 @@ def render_report(
   .adj {{ border-left:3px solid var(--border); background:var(--card); border-radius:0 6px 6px 0;
           padding:8px 10px; margin:8px 0 4px; font-size:12.5px; }}
   .adj ul {{ font-size:12px; }}
-  .rerunout .err {{ color:#b4232a; }}
-  .rerunout a {{ color:#0d6e6e; }}
+  .rerunout .err {{ color:#c8102e; }}
+  .rerunout a {{ color:var(--accent); }}
   .spin {{ display:inline-block; width:10px; height:10px; border:2px solid var(--border);
-           border-top-color:#0d6e6e; border-radius:50%; vertical-align:-1px;
+           border-top-color:var(--accent); border-radius:50%; vertical-align:-1px;
            animation:spin .7s linear infinite; }}
   @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-  @media (prefers-reduced-motion:reduce) {{ .spin {{ animation:none; }} }}
-</style></head><body><div class="wrap">
+  @media (prefers-reduced-motion:reduce) {{ *, *::before {{ animation:none !important; }} }}
+  @media (max-width:700px) {{ .doc-body, .cover, .toc {{ padding-left:16px; padding-right:16px; }}
+    .doc {{ margin:0; border-radius:0; }} .kv {{ grid-template-columns:1fr; }} }}
+  @media print {{
+    body {{ background:#fff; }} .doc {{ margin:0; border:0; box-shadow:none; max-width:none; }}
+    .toc, .jirabar, .langswitch, .backlink, .rerunbtn, .exchange-toggle, .curlbtn,
+    td.rerun, .rerunout {{ display:none !important; }}
+    .cover {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }}
+    * {{ animation:none !important; }}
+    h2 {{ break-after:avoid; }}
+  }}
+</style></head><body><article class="doc">
+{cover_html.replace("<!--lang-->", lang_switch)}
+<nav class="toc" aria-label="{t("Report Sections", lang)}">
+<a href="#summary">{t("Executive Summary", lang)}</a>
+<a href="#findings">{t("Findings", lang)}</a>
+{f'<a href="#coverage">{t("Coverage", lang)}</a>' if coverage_html else ''}
+<a href="#log">{t("Execution Log", lang)}</a>
+</nav>
+<div class="doc-body">
 {back_bar}
-<div class="titlebar">
-<div><h1>{_e(title)}</h1>
-<p class="sub">{t("Target", lang)}: <code>{_e(target)}</code> &middot; {t("Baseline", lang)}: OWASP API Security Top 10 (2023)</p></div>
-{lang_switch}
-</div>
 {jira_bar}
-{chain_banner}
-{quality_banner}
-{input_banner}
-{manifest_banner}
-<h2>{t("Executive Summary", lang)}</h2>
+<div class="integrity">{chain_banner}{quality_banner}{input_banner}{manifest_banner}</div>
+<h2 id="summary">{t("Executive Summary", lang)}</h2>
 <div class="stats">{summary_cells}</div>
 <div class="pills">{sev_cells}</div>
 {assessment_html}
-{coverage_html}
+<div id="coverage">{coverage_html}</div>
 {review_html}
-<h2>{t("Findings", lang)}</h2>
+<h2 id="findings">{t("Findings", lang)}</h2>
 {findings_html}
 
-<h2>{t("Execution Log", lang)}</h2>
+<h2 id="log">{t("Execution Log", lang)}</h2>
 {rerun_note}
 <div class="tblwrap"><table>
 <tr><th>{t("Test", lang)}</th><th>OWASP</th><th>{t("Result", lang)}</th><th>{t("Confidence", lang)}</th><th>{t("Status", lang)}</th>
@@ -354,7 +431,56 @@ def render_report(
 </table></div>
 {rerun_js}
 {exchange_js}
-</div></body></html>"""
+</div></article></body></html>"""
+
+
+def _cover(title: str, target: str, findings: list[Finding], result_counts: Counter,
+           sev_counts: Counter, coverage_rows: list[dict], lang: str) -> str:
+    """The dark band at the top: what was tested, and how bad it is, in one look.
+
+    `findings` arrives ranked worst-first, so the overall risk is simply the
+    first finding's severity. A run with no confirmed finding says so in words,
+    not with an empty colour.
+    """
+    if findings:
+        worst = findings[0].severity.value
+        risk = (f'<div class="v" style="color:{_SEV_COLOR.get(worst, "#e8edf3")};'
+                f'filter:brightness(1.6)">{t(worst.title(), lang)}</div>')
+    elif any(result_counts.get(k) for k in ("INCONCLUSIVE", "BLOCKED", "ERROR")):
+        # No finding is not the same as no risk: a run whose results were not
+        # decided has not shown the target is safe, and a green "None" on the
+        # cover would be read as exactly that.
+        risk = f'<div class="v" style="color:#f2c14e">{t("Undetermined", lang)}</div>'
+    else:
+        risk = f'<div class="v" style="color:#2ee6b6">{t("None Found", lang)}</div>'
+    applicable = [r for r in coverage_rows if r.get("applicable")]
+    covered = sum(1 for r in applicable if r.get("state") == "COVERED")
+    coverage = f"{covered} / {len(applicable)}" if applicable else "&mdash;"
+    total = sum(sev_counts.values())
+    bar = "".join(
+        f'<span style="width:{100 * sev_counts[k] / total:.1f}%;background:{_SEV_COLOR[k]};'
+        f'filter:brightness(1.35)"></span>'
+        for k in _SEV_ORDER if sev_counts.get(k)
+    ) if total else ""
+    # Every band in the bar has a legend entry; INFO only when it is there,
+    # so a normal report keeps the four that matter.
+    legend = "".join(
+        f"<span>{t(k.title(), lang)} {sev_counts.get(k, 0)}</span>"
+        for k in _SEV_ORDER if k != "INFO" or sev_counts.get(k)
+    )
+    return f"""<header class="cover">
+<div class="brand">{logo(28)}<span>Sentinel</span><span class="sp"></span><!--lang--></div>
+<p class="kicker">OWASP API Security Top 10 (2023)</p>
+<h1>{_e(title)}</h1>
+<p class="sub">{t("Target", lang)}: <code>{_e(target)}</code></p>
+<div class="risk">
+<div class="cell"><div class="k">{t("Overall Risk", lang)}</div>{risk}</div>
+<div class="cell"><div class="k">{t("Findings", lang)}</div><div class="v">{len(findings)}</div></div>
+<div class="cell"><div class="k">{t("Tests Run", lang)}</div><div class="v">{sum(result_counts.values())}</div></div>
+<div class="cell"><div class="k">{t("Coverage", lang)}</div><div class="v">{coverage}</div></div>
+</div>
+{f'<div class="sevbar">{bar}</div><div class="sevlegend">{legend}</div>' if bar else ''}
+</header>"""
 
 
 def _lang_switch(lang: str) -> str:
@@ -387,7 +513,7 @@ def _back_bar(assessment_id: str, lang: str) -> str:
     """
     return (
         f'<a class="backlink" href="/assessment/{_e(assessment_id)}?phase=results">'
-        f'&larr; {t("Back to the assessment", lang)}</a>'
+        f'&larr; {t("Back to the Assessment", lang)}</a>'
     )
 
 
@@ -395,7 +521,7 @@ def _jira_bar(assessment_id: str, issue_key: str, lang: str) -> str:
     """A one-click 'post this exact report's summary as a Jira comment' action.
     Uses fetch so the report — a standalone document, possibly opened in its
     own tab — never has to navigate away to post. Posts to the same endpoint
-    the assessment page's "Preview Jira comment" flow uses, so it always lands
+    the assessment page's "Preview Jira Comment" flow uses, so it always lands
     on assessment.issue_key: the ticket this report was generated from."""
     key = _e(issue_key)
     # aid is interpolated into a JS string literal inside <script>, not HTML —
@@ -403,7 +529,7 @@ def _jira_bar(assessment_id: str, issue_key: str, lang: str) -> str:
     # happens to be safe here today because assessment_id is always a
     # server-generated UUID hex, never attacker-influenced text).
     aid_js = json.dumps(assessment_id)
-    btn_label = t("Post this report to Jira ({key})", lang).format(key=key)
+    btn_label = t("Post This Report to Jira ({key})", lang).format(key=key)
     posting = t("Posting…", lang)
     posted = t("Posted to Jira", lang)
     failed = t("Failed to post — open the assessment page for details.", lang)
@@ -443,19 +569,19 @@ function postToJira() {{
 
 
 _COVERAGE_COLOR = {
-    "COVERED": "#2f855a", "PARTIAL": "#b8860b", "MISSING": "#b4232a",
-    "NOT_APPLICABLE": "#718096",
+    "COVERED": "#007a61", "PARTIAL": "#8a6400", "MISSING": "#c8102e",
+    "NOT_APPLICABLE": "#647083",
 }
 
 
 def _status_color(status_code: int) -> str:
     if status_code < 300:
-        return "#2f855a"
+        return "#007a61"
     if status_code < 400:
-        return "#4a5568"
+        return "#566173"
     if status_code < 500:
-        return "#b8860b"
-    return "#b4232a"
+        return "#8a6400"
+    return "#c8102e"
 
 
 def _coverage_section(rows: list[dict], lang: str) -> str:
@@ -463,7 +589,7 @@ def _coverage_section(rows: list[dict], lang: str) -> str:
     body = ""
     for r in rows:
         state = r.get("state", "UNKNOWN")
-        color = _COVERAGE_COLOR.get(state, "#718096")
+        color = _COVERAGE_COLOR.get(state, "#647083")
         pct = r.get("pct", 0)
         bar_w = pct if state != "NOT_APPLICABLE" else 0
         # "COVERED" is reached by one test in the category — this is depth, the
@@ -489,7 +615,7 @@ def _coverage_section(rows: list[dict], lang: str) -> str:
             f"background:{color}'></div></div></td>"
             f"<td>{depth_cell}</td></tr>"
         )
-    heading = t("OWASP API Security Coverage ({n} applicable)", lang).format(n=len(applicable))
+    heading = t("OWASP API Security Coverage ({n} Applicable)", lang).format(n=len(applicable))
     depth_th = (
         f'<th title="{t("What share of the known attack techniques for this category were actually tried — a category can read COVERED from a single test while most of its techniques were never attempted", lang)}">'
         f"{t('Depth', lang)}</th>"
@@ -505,15 +631,17 @@ def _finding_block(f: Finding, lang: str) -> str:
     repro = "".join(f"<li>{_e(s)}</li>" for s in f.reproduction)
     refs = " · ".join(f'<a href="{_e(r)}">{_e(r)}</a>' if r.startswith("http") else _e(r)
                       for r in f.references)
-    return f"""<div class="finding" style="border-left-color:{color}">
-<h3>{_e(f.finding_id)} — {_e(f.title)}
- <span class="pill" style="background:{color}">{t(f.severity.value, lang)}</span></h3>
+    score = cvss_score(f.severity)
+    return f"""<div class="finding">
+<div class="fhead"><span class="pill" style="background:{color}">{t(f.severity.value, lang)} &middot; {score}</span>
+<span class="fid">{_e(f.finding_id)} &middot; {_e(f.owasp_category.value)}</span></div>
+<h3>{_e(f.title)}</h3>
 <div class="kv">
 <b>OWASP</b><span>{_e(f.owasp_category.value)}</span>
 <b>{t("Endpoint", lang)}</b><span><code>{_e(f.endpoint)}</code></span>
 <b>{t("Confidence", lang)}</b><span>{t(f.confidence.value, lang)}</span>
 {f'<b>{t("CVSS (estimated)", lang)}</b><span class="mono" style="font-size:12px">{_e(f.cvss_vector)}</span>' if f.cvss_vector else ''}
-<b>{t("Affected tests", lang)}</b><span>{_e(', '.join(f.affected_tests))}</span>
+<b>{t("Affected Tests", lang)}</b><span>{_e(', '.join(f.affected_tests))}</span>
 <b>{t("Expected", lang)}</b><span>{_e(f.correlation.expected)}</span>
 <b>{t("Actual", lang)}</b><span>{_e(f.correlation.actual)}</span>
 <b>{t("Impact", lang)}</b><span>{_e(f.impact)}</span>
@@ -528,7 +656,7 @@ def _exec_row(test: TestCase | None, e: Execution, index: int = 0,
               colspan: int = 7, lang: str = DEFAULT_LANG,
               superseded_by: Execution | None = None,
               adjudication=None) -> str:
-    color = _RESULT_COLOR.get(e.verdict.result.value, "#4a5568")
+    color = _RESULT_COLOR.get(e.verdict.result.value, "#566173")
     title = _e(test.title) if test else _e(e.test_id)
     if e.response is not None:
         r = e.response
@@ -567,9 +695,9 @@ def _exec_row(test: TestCase | None, e: Execution, index: int = 0,
         f"<td>{status_cell}</td>"
         f"<td><button type='button' class='exchange-toggle' "
         f"data-exchange-toggle='{index}' aria-expanded='false' "
-        f"data-label-view=\"{_e(t('View exchange', lang))}\" "
-        f"data-label-hide=\"{_e(t('Hide exchange', lang))}\">"
-        f"{t('View exchange', lang)} &#9662;</button></td>"
+        f"data-label-view=\"{_e(t('View Exchange', lang))}\" "
+        f"data-label-hide=\"{_e(t('Hide Exchange', lang))}\">"
+        f"{t('View Exchange', lang)} &#9662;</button></td>"
         f"<td>{reason_cell}</td>{rerun_cell}</tr>"
     )
     # A full-width panel under the row, not a sliver squeezed into one table
@@ -680,7 +808,7 @@ def _rerun_cell(test: TestCase | None, e: Execution, index: int, lang: str,
         # a button that would re-send a request a later row has answered — and
         # do not restate the row's own verdict as if it were still open.
         later = superseded_by.verdict.result.value
-        color = _RESULT_COLOR.get(later, "#4a5568")
+        color = _RESULT_COLOR.get(later, "#566173")
         label = t("re-run below:", lang)
         return (f"<td class='rerun'><span class='muted' style='font-size:12px'>{label} "
                 f"<b style='color:{color}'>{t(later, lang)}</b></span></td>")
@@ -712,7 +840,7 @@ def _rerun_js(assessment_id: str, issue_key: str, lang: str) -> str:
     strings_js = json.dumps({
         "was": t("was", lang),
         "unchanged": t("unchanged", lang),
-        "reload": t("Reload the log", lang),
+        "reload": t("Reload the Log", lang),
         "refused": t("The platform refused this re-run.", lang),
         "destructive_confirm": t(
             "Re-running {test} sends a real state-changing request that can create, "
@@ -723,7 +851,7 @@ def _rerun_js(assessment_id: str, issue_key: str, lang: str) -> str:
             "trusted runner, with live persona credentials. This record is kept exactly "
             "as it is; the result is appended to the log as a new execution.", lang),
         "sending": t("Sending…", lang),
-        "rerun_again": t("Re-run again", lang),
+        "rerun_again": t("Re-run Again", lang),
         "unreachable": t(
             "Could not reach the platform. Re-running works from a report served by the "
             "app, not from a saved copy.", lang),
@@ -739,7 +867,7 @@ def _rerun_js(assessment_id: str, issue_key: str, lang: str) -> str:
   }}
 
   function render(out, data) {{
-    var color = COLOR[data.result] || '#4a5568';
+    var color = COLOR[data.result] || '#566173';
     var meta = [data.confidence];
     if (data.status_code !== null && data.status_code !== undefined) {{
       meta.push('HTTP ' + data.status_code);
@@ -934,8 +1062,8 @@ def _exchange_js(assessment_id: str | None, lang: str) -> str:
 
 
 _SUPPORTING_LABEL = {
-    "baseline": "Positive control",
-    "verification": "Verification read-back",
+    "baseline": "Positive Control",
+    "verification": "Verification Read-back",
 }
 
 
@@ -955,9 +1083,9 @@ def _supporting_html(e, lang: str) -> str:
             f"<p class='muted' style='margin:6px 0'>{_e(exchange.note)}</p>"
             f"<div class='glabel'>{t('Request', lang)}</div>"
             f"<pre class='respbody'>{_e(exchange.request.method)} {_e(exchange.request.url)}</pre>"
-            f"<div class='glabel'>{t('Response headers', lang)}</div>"
+            f"<div class='glabel'>{t('Response Headers', lang)}</div>"
             f"<pre class='respbody'>{_e(headers_text) or t('(none)', lang)}</pre>"
-            f"<div class='glabel'>{t('Response body', lang)}</div>"
+            f"<div class='glabel'>{t('Response Body', lang)}</div>"
             f"<pre class='respbody'>{_e(body_text)}</pre>"
             f"</details>"
         )
@@ -1005,7 +1133,7 @@ def _attack_html(test: TestCase | None, e: Execution, lang: str) -> str:
         parts.append(f"<code>{_e(kind)}</code>")
     if description:
         parts.append(_e(description))
-    out = (f"<div class='glabel'>{t('Attack performed', lang)}</div>"
+    out = (f"<div class='glabel'>{t('Attack Performed', lang)}</div>"
            f"<p style='margin:2px 0 6px'>{' &mdash; '.join(parts)}</p>")
     detail = test.attack_mutation.detail if test else None
     if detail:
@@ -1013,7 +1141,7 @@ def _attack_html(test: TestCase | None, e: Execution, lang: str) -> str:
             rendered = json.dumps(detail, sort_keys=True, default=str)
         except (TypeError, ValueError):
             rendered = str(detail)
-        out += (f"<div class='glabel'>{t('Attack parameters', lang)}</div>"
+        out += (f"<div class='glabel'>{t('Attack Parameters', lang)}</div>"
                 f"<pre class='respbody'>{_e(rendered)}</pre>")
     return out
 
@@ -1051,11 +1179,11 @@ def _adjudication_html(adjudication, lang: str) -> str:
     if adjudication is None:
         return ""
     result = adjudication.assessed_result
-    color = _RESULT_COLOR.get(result, "#4a5568")
-    who = t("AI reviewer", lang) if adjudication.adjudicator == "ai" else t("deterministic triage", lang)
+    color = _RESULT_COLOR.get(result, "#566173")
+    who = t("AI Reviewer", lang) if adjudication.adjudicator == "ai" else t("deterministic triage", lang)
     decided = result in ("PASS", "FAIL")
     if adjudication.needs_manual_review:
-        headline, color = t("Needs manual review", lang), "#b8860b"
+        headline, color = t("Needs Manual Review", lang), "#8a6400"
     elif decided:
         headline = t("Reviewed as {result}", lang).format(result=t(result, lang))
     else:
@@ -1063,7 +1191,7 @@ def _adjudication_html(adjudication, lang: str) -> str:
         # INCONCLUSIVE" claimed a reading that did not happen, and next to it a
         # confidence inherited from the sealed verdict read as confidence in that
         # non-reading.
-        headline, color = t("Still undecided — re-run this one", lang), "#b8860b"
+        headline, color = t("Still undecided — re-run this one", lang), "#8a6400"
     # Confidence is only meaningful about a decision. Printed beside a row that
     # decided nothing, it is noise at best and false assurance at worst.
     confidence = (f"{t(adjudication.confidence.value, lang)} {t('confidence', lang)} &middot; "
@@ -1073,7 +1201,7 @@ def _adjudication_html(adjudication, lang: str) -> str:
         "derived promotion is audited separately", lang,
     )
     cited = "".join(f"<li>{_e(c)}</li>" for c in adjudication.evidence_cited)
-    cited_html = (f"<div class='glabel'>{t('Evidence cited', lang)}</div>"
+    cited_html = (f"<div class='glabel'>{t('Evidence Cited', lang)}</div>"
                   f"<ul style='margin:2px 0 6px;padding-left:18px'>{cited}</ul>"
                   if cited else "")
     action = (f"<p class='muted' style='margin:4px 0 0'><b>{t('Next:', lang)}</b> "
@@ -1138,7 +1266,7 @@ def _signals_html(adjudication, lang: str) -> str:
     if not signals:
         return ""
     items = "".join(f"<li>{_e(line)}</li>" for line in signals)
-    return (f"<div class='glabel'>{t('Measured differential', lang)}</div>"
+    return (f"<div class='glabel'>{t('Measured Differential', lang)}</div>"
             f"<ul style='margin:2px 0 6px;padding-left:18px'>{items}</ul>")
 
 
@@ -1162,11 +1290,11 @@ def _run_assessment_section(run, lang: str) -> str:
     """
     if run is None:
         return ""
-    tone = {"PASSED": "#2f855a", "FAILED": "#b4232a", "INCOMPLETE": "#b8860b"}.get(
-        run.overall, "#4a5568")
+    tone = {"PASSED": "#007a61", "FAILED": "#c8102e", "INCOMPLETE": "#8a6400"}.get(
+        run.overall, "#566173")
     rows = ""
     for item in run.items:
-        color = _ITEM_COLOR.get(item.state, "#718096")
+        color = _ITEM_COLOR.get(item.state, "#647083")
         rows += (
             f"<tr><td class='mono'>{_e(item.item_id)}</td>"
             f"<td>{_e(item.text)}</td>"
@@ -1182,7 +1310,7 @@ def _run_assessment_section(run, lang: str) -> str:
         f"{rows}</table></div>"
         if rows else f"<p class='muted'>{t('No requirement items were extracted from the ticket.', lang)}</p>"
     )
-    who = t("AI reviewer", lang) if run.reviewer == "ai" else t("deterministic triage only", lang)
+    who = t("AI Reviewer", lang) if run.reviewer == "ai" else t("deterministic triage only", lang)
     degraded = (f"<p class='muted' style='margin:6px 0 0'>{_e(run.degraded_reason)}</p>"
                 if run.degraded_reason else "")
     reviewed_by = t("Reviewed by: {who}.", lang).format(who=_e(who))
@@ -1194,20 +1322,20 @@ def _run_assessment_section(run, lang: str) -> str:
         "requirement as covered only when a test for it reached a decisive result &mdash; a "
         "plan that touches everything and decides nothing scores zero here, deliberately.", lang
     )
-    return f"""<h2>{t("Assessment of this run", lang)}</h2>
+    return f"""<h2>{t("Assessment of This Run", lang)}</h2>
 <div class="stats">
 <div class="stat"><div class="num" style="color:{tone}">{t(run.overall, lang)}</div>
 <div class="lbl">{t("Overall", lang)}</div></div>
 <div class="stat"><div class="num">{run.coverage_pct}%</div>
-<div class="lbl">{t("Ticket requirements covered", lang)}</div>
-<div class="lbl">{run.n_items_decided}/{run.n_items_scored} {t("decided", lang)}</div></div>
+<div class="lbl">{t("Ticket Requirements Covered", lang)}</div>
+<div class="lbl">{run.n_items_decided}/{run.n_items_scored} {t("Decided", lang)}</div></div>
 <div class="stat"><div class="num">{run.decided_pct}%</div>
-<div class="lbl">{t("Executions decided", lang)}</div></div>
+<div class="lbl">{t("Executions Decided", lang)}</div></div>
 <div class="stat"><div class="num">{run.n_manual_review}</div>
-<div class="lbl">{t("Need a person", lang)}</div></div>
+<div class="lbl">{t("Need a Person", lang)}</div></div>
 <div class="stat"><div class="num">{run.n_auto_resolved}</div>
-<div class="lbl">{t("Settled by review", lang)}</div>
-<div class="lbl">{getattr(run, "n_measured", 0)} {t("by measurement", lang)}</div></div>
+<div class="lbl">{t("Settled by Review", lang)}</div>
+<div class="lbl">{getattr(run, "n_measured", 0)} {t("By Measurement", lang)}</div></div>
 </div>
 <p style="margin:14px 0 4px">{_e(run.summary)}</p>
 <p class="muted" style="margin:0 0 12px">{reviewed_by} {advisory_note}</p>
@@ -1225,9 +1353,9 @@ def _plan_review_section(review, lang: str) -> str:
     """
     if review is None:
         return ""
-    tone = {"APPROVE": "#2f855a", "REVISE": "#b8860b", "INSUFFICIENT": "#b4232a"}.get(
-        review.verdict, "#4a5568")
-    who = t("AI reviewer", lang) if review.reviewer == "ai" else t("structural review (no AI)", lang)
+    tone = {"APPROVE": "#007a61", "REVISE": "#8a6400", "INSUFFICIENT": "#c8102e"}.get(
+        review.verdict, "#566173")
+    who = t("AI Reviewer", lang) if review.reviewer == "ai" else t("structural review (no AI)", lang)
 
     def _gap_list(gaps) -> str:
         if not gaps:
@@ -1244,48 +1372,50 @@ def _plan_review_section(review, lang: str) -> str:
                 if review.degraded_reason else "")
     reviewed_by = t("Reviewed by {who}; {n} test(s) reviewed over {rounds} revision round(s).", lang).format(
         who=_e(who), n=review.tests_before, rounds=review.rounds)
-    return f"""<h2>{t("Plan review", lang)}</h2>
+    return f"""<h2>{t("Plan Review", lang)}</h2>
 <div class="stats">
 <div class="stat"><div class="num" style="color:{tone}">{t(review.verdict, lang)}</div>
-<div class="lbl">{t("Review verdict", lang)}</div></div>
+<div class="lbl">{t("Review Verdict", lang)}</div></div>
 <div class="stat"><div class="num">{review.coverage_score}%</div>
-<div class="lbl">{t("Plan coverage", lang)}</div></div>
+<div class="lbl">{t("Plan Coverage", lang)}</div></div>
 <div class="stat"><div class="num">{review.quality_score}%</div>
-<div class="lbl">{t("Decidable tests", lang)}</div></div>
+<div class="lbl">{t("Decidable Tests", lang)}</div></div>
 <div class="stat"><div class="num">{len(review.tests_added)}</div>
-<div class="lbl">{t("Added after review", lang)}</div></div>
+<div class="lbl">{t("Added After Review", lang)}</div></div>
 </div>
 <p style="margin:14px 0 4px">{_e(review.headline())} <span class="muted">{reviewed_by}</span></p>
 <p class="muted" style="margin:0 0 10px">{_e(review.notes)}</p>
 {degraded}
-<div class="glabel">{t("Gaps found at review time", lang)}</div>
+<div class="glabel">{t("Gaps Found at Review Time", lang)}</div>
 {_gap_list(review.gaps)}
-<div class="glabel" style="margin-top:10px">{t("Still unresolved", lang)}</div>
+<div class="glabel" style="margin-top:10px">{t("Still Unresolved", lang)}</div>
 {_gap_list(review.unresolved_gaps)}
 {f'<div class="glabel" style="margin-top:10px">{t("Strengths", lang)}</div>{strengths}' if strengths else ''}"""
 
 
 _ITEM_COLOR = {
-    "COVERED_PASS": "#2f855a", "COVERED_FAIL": "#b4232a", "PARTIAL": "#b8860b",
-    "NOT_COVERED": "#b8860b", "NOT_TESTED": "#718096",
+    "COVERED_PASS": "#007a61", "COVERED_FAIL": "#c8102e", "PARTIAL": "#8a6400",
+    "NOT_COVERED": "#8a6400", "NOT_TESTED": "#647083",
 }
 
 
 VI.update({
+    "Report Sections": "Mục Lục Báo Cáo", "Overall Risk": "Mức Rủi Ro", "Tests Run": "Số Test Đã Chạy",
+    "None Found": "Không Phát Hiện", "Undetermined": "Chưa Xác Định", "Critical": "Nghiêm Trọng", "High": "Cao", "Medium": "Trung Bình",
+    "Low": "Thấp", "Info": "Thông Tin",
     # -- headings / structure --
-    "Executive Summary": "Tổng quan",
-    "Findings": "Phát hiện",
-    "Execution Log": "Nhật ký thực thi",
-    "Assessment of this run": "Đánh giá lượt chạy này",
-    "Plan review": "Đánh giá kế hoạch",
-    "Target": "Mục tiêu",
-    "Baseline": "Chuẩn tham chiếu",
-    "Evidence chain verified": "Chuỗi bằng chứng đã xác minh",
-    "every execution's SHA-256 hash recomputes and links to the previous "
-    "one; nothing below has been edited since it was recorded.":
-        "hash SHA-256 của mọi lượt thực thi đều tính lại khớp và nối đúng với "
-        "hash trước đó; không có gì bên dưới bị chỉnh sửa kể từ khi ghi nhận.",
-    "Evidence chain FAILED verification": "Chuỗi bằng chứng KHÔNG xác minh được",
+    "Executive Summary": "Tổng Quan",
+    "Claims Verified": "Đã Kiểm Chứng Nội Dung",
+    "{f} findings, {r} evidence refs": "{f} Phát Hiện, {r} Tham Chiếu Bằng Chứng",
+    "Every execution hash recomputes and links to the previous one.":
+        "Mọi hash của lượt chạy đều khớp và liên kết với bản ghi trước.",
+    "Findings": "Phát Hiện",
+    "Execution Log": "Nhật Ký Thực Thi",
+    "Assessment of This Run": "Đánh Giá Lượt Chạy Này",
+    "Plan Review": "Đánh Giá Kế Hoạch",
+    "Target": "Mục Tiêu",
+    "Evidence Chain Verified": "Chuỗi Bằng Chứng Đã Xác Minh",
+    "Evidence chain FAILED verification": "Chuỗi Bằng Chứng KHÔNG Xác Minh Được",
     "at least one execution record's hash no longer matches its content, or the "
     "chain link to the previous record is broken. This report's evidence may have "
     "been altered after it was recorded; treat it as non-authoritative until "
@@ -1300,29 +1430,29 @@ VI.update({
     "ERROR": "LỖI HỆ THỐNG", "SKIPPED": "BỎ QUA", "TIMEOUT": "HẾT GIỜ",
     "CRITICAL": "NGHIÊM TRỌNG", "HIGH": "CAO", "MEDIUM": "TRUNG BÌNH",
     "LOW": "THẤP", "INFO": "THÔNG TIN",
-    "HIGH confidence": "độ tin cậy CAO",
+    "HIGH confidence": "Độ Tin Cậy CAO",
     "confidence": "độ tin cậy",
     # -- coverage section --
-    "OWASP API Security Coverage ({n} applicable)": "Độ phủ OWASP API Security ({n} áp dụng)",
-    "Category": "Danh mục", "Existing PoC": "PoC hiện có", "Generated": "Đã tạo",
-    "State": "Trạng thái", "Coverage": "Độ phủ",
+    "OWASP API Security Coverage ({n} Applicable)": "Độ Phủ OWASP API Security ({N} Áp Dụng)",
+    "Category": "Danh Mục", "Existing PoC": "PoC Hiện Có", "Generated": "Đã Tạo",
+    "State": "Trạng Thái", "Coverage": "Độ Phủ",
     "COVERED": "ĐÃ PHỦ", "PARTIAL": "MỘT PHẦN", "MISSING": "THIẾU",
     "NOT_APPLICABLE": "KHÔNG ÁP DỤNG",
     # -- findings block --
-    "Endpoint": "Endpoint", "Affected tests": "Test bị ảnh hưởng",
-    "Expected": "Kỳ vọng", "Actual": "Thực tế", "Impact": "Tác động",
-    "Recommendation": "Khuyến nghị", "Reproduction": "Cách tái hiện",
-    "References": "Tham chiếu",
+    "Endpoint": "Endpoint", "Affected Tests": "Test Bị Ảnh Hưởng",
+    "Expected": "Kỳ Vọng", "Actual": "Thực Tế", "Impact": "Tác Động",
+    "Recommendation": "Khuyến Nghị", "Reproduction": "Cách Tái Hiện",
+    "References": "Tham Chiếu",
     # -- execution log table --
-    "Test": "Test", "Result": "Kết quả", "Confidence": "Độ tin cậy",
-    "Status": "Trạng thái HTTP", "Exchange": "Trao đổi", "Reason": "Lý do",
-    "Re-run": "Chạy lại",
-    "View exchange": "Xem trao đổi", "Hide exchange": "Ẩn trao đổi",
-    "Response": "Phản hồi", "Request": "Yêu cầu",
+    "Test": "Test", "Result": "Kết Quả", "Confidence": "Độ Tin Cậy",
+    "Status": "Trạng Thái HTTP", "Exchange": "Trao Đổi", "Reason": "Lý Do",
+    "Re-run": "Chạy Lại",
+    "View Exchange": "Xem Trao Đổi", "Hide Exchange": "Ẩn Trao Đổi",
+    "Response": "Phản Hồi", "Request": "Yêu Cầu",
     "Headers": "Headers", "Body": "Body",
     "(empty body)": "(body rỗng)", "(no body)": "(không có body)",
     "(none)": "(không có)", "Blocked before send.": "Đã bị chặn trước khi gửi.",
-    "Copy cURL": "Copy cURL",
+    "Copy cURL": "Copy CURL",
     "Credentials are masked (<code>********</code>) above before anything is stored.":
         "Thông tin xác thực đã bị che (<code>********</code>) ở trên trước khi lưu trữ.",
     "<b>Copy cURL</b> resolves the real credential from the persona vault live "
@@ -1333,12 +1463,12 @@ VI.update({
         "chính nền tảng phục vụ, không phải một bản đã lưu.",
     "re-run below:": "đã chạy lại bên dưới:",
     "no longer in the plan": "không còn trong kế hoạch",
-    "Attack performed": "Đòn tấn công đã thực hiện", "Attack parameters": "Tham số tấn công",
-    "Observed": "Quan sát được",
+    "Attack Performed": "Đòn Tấn Công Đã Thực Hiện", "Attack Parameters": "Tham Số Tấn Công",
+    "Observed": "Quan Sát Được",
     "as": "với vai trò", "no response": "không có phản hồi",
     "(request did not complete)": "(request chưa hoàn tất)",
-    "Response headers": "Headers phản hồi", "Response body": "Body phản hồi",
-    "Positive control": "Đối chứng dương", "Verification read-back": "Đọc lại xác minh",
+    "Response Headers": "Headers Phản Hồi", "Response Body": "Body Phản Hồi",
+    "Positive Control": "Đối Chứng Dương", "Verification Read-back": "Đọc Lại Xác Minh",
     "Multi-request probe: {sent} sent {mode}, {ok} succeeded, throttling {throttle}. "
     "Status spread: {spread}.":
         "Thăm dò nhiều request: đã gửi {sent} request {mode}, {ok} thành công, "
@@ -1360,13 +1490,13 @@ VI.update({
         "chính xác từng byte. Không có gì bên dưới bị ghi đè: kết quả được thêm vào "
         "nhật ký này như một lượt thực thi mới, nối vào hash bằng chứng của lượt "
         "trước, nên cả hai lần thử đều còn trên hồ sơ. Tải lại báo cáo để thấy dòng mới.",
-    "Post this report to Jira ({key})": "Đăng báo cáo này lên Jira ({key})",
-    "Back to the assessment": "Quay lại assessment",
-    "Posting…": "Đang đăng…", "Posted to Jira": "Đã đăng lên Jira",
+    "Post This Report to Jira ({key})": "Đăng Báo Cáo Này Lên Jira ({Key})",
+    "Back to the Assessment": "Quay Lại Assessment",
+    "Posting…": "Đang Đăng…", "Posted to Jira": "Đã Đăng Lên Jira",
     "Failed to post — open the assessment page for details.":
         "Đăng thất bại — mở trang assessment để xem chi tiết.",
     "Network error — try again.": "Lỗi mạng — thử lại.",
-    "was": "trước đó là", "unchanged": "không đổi", "Reload the log": "Tải lại nhật ký",
+    "was": "trước đó là", "unchanged": "không đổi", "Reload the Log": "Tải Lại Nhật Ký",
     "The platform refused this re-run.": "Nền tảng từ chối lượt chạy lại này.",
     "Re-running {test} sends a real state-changing request that can create, "
     "modify or delete data on the target. Type {issue} to confirm.":
@@ -1380,13 +1510,13 @@ VI.update({
         "Chạy lại {test} riêng lẻ?\n\nGửi lại đúng request qua trusted runner, với "
         "thông tin xác thực persona còn hiệu lực. Bản ghi này được giữ nguyên; kết "
         "quả sẽ được thêm vào nhật ký như một lượt thực thi mới.",
-    "Sending…": "Đang gửi…", "Re-run again": "Chạy lại lần nữa",
+    "Sending…": "Đang Gửi…", "Re-run Again": "Chạy Lại Lần Nữa",
     "Could not reach the platform. Re-running works from a report served by the "
     "app, not from a saved copy.":
         "Không kết nối được nền tảng. Chạy lại chỉ hoạt động trên báo cáo do app "
         "đang phục vụ, không phải bản đã lưu.",
     # -- copy curl js --
-    "Fetching…": "Đang lấy dữ liệu…",
+    "Fetching…": "Đang Lấy Dữ Liệu…",
     "Could not build a curl command.": "Không tạo được lệnh curl.",
     "Copied — includes a live credential, handle it like one.":
         "Đã copy — có chứa thông tin xác thực còn hiệu lực, xử lý như một bí mật thật.",
@@ -1397,10 +1527,10 @@ VI.update({
         "Không kết nối được nền tảng — chỉ hoạt động trên báo cáo do app đang phục "
         "vụ, không phải bản đã lưu.",
     # -- adjudication --
-    "AI reviewer": "AI reviewer", "deterministic triage": "phân loại tất định",
-    "Needs manual review": "Cần người xem lại",
-    "Reviewed as {result}": "Được đánh giá là {result}",
-    "Still undecided — re-run this one": "Vẫn chưa quyết — chạy lại dòng này",
+    "AI Reviewer": "AI Reviewer", "deterministic triage": "phân loại tất định",
+    "Needs Manual Review": "Cần Người Xem Lại",
+    "Reviewed as {result}": "Được Đánh Giá Là {result}",
+    "Still undecided — re-run this one": "Vẫn Chưa Quyết — Chạy Lại Dòng Này",
     "advisory, does not change the sealed verdict or create a finding":
         "chỉ mang tính tham khảo, không thay đổi kết luận đã niêm phong hay tạo finding",
     "sealed verdict unchanged; derived promotion audited separately":
@@ -1409,11 +1539,11 @@ VI.update({
     "derived promotion is audited separately":
         "chỉ tham khảo: không thay đổi kết luận niêm phong hoặc trực tiếp tạo finding; "
         "việc nâng cấp dẫn xuất được audit riêng",
-    "Evidence cited": "Bằng chứng được trích dẫn", "Next:": "Tiếp theo:",
+    "Evidence Cited": "Bằng Chứng Được Trích Dẫn", "Next:": "Tiếp theo:",
     # -- run assessment section --
-    "Overall": "Tổng thể", "Ticket requirements covered": "Yêu cầu ticket đã phủ",
-    "decided": "đã quyết", "Executions decided": "Lượt thực thi đã quyết",
-    "Need a person": "Cần người xử lý", "Settled by review": "Đã giải quyết qua đánh giá",
+    "Overall": "Tổng Thể", "Ticket Requirements Covered": "Yêu Cầu Ticket Đã Phủ",
+    "Decided": "Đã Quyết", "By Measurement": "Bằng Đo Lường", "Executions Decided": "Lượt Thực Thi Đã Quyết",
+    "Need a Person": "Cần Người Xử Lý", "Settled by Review": "Đã Giải Quyết Qua Đánh Giá",
     "Reviewed by: {who}.": "Người đánh giá: {who}.",
     "A reviewed result is <b>advisory</b>: it never overwrites the verdict the runner "
     "sealed into the evidence chain, and never creates a finding. Coverage counts a "
@@ -1427,16 +1557,16 @@ VI.update({
     "PASSED": "ĐẠT", "FAILED": "LỖI", "INCOMPLETE": "CHƯA HOÀN TẤT",
     "No requirement items were extracted from the ticket.":
         "Không trích xuất được mục yêu cầu nào từ ticket.",
-    "Item": "Mục", "Requirement": "Yêu cầu", "Tests": "Test", "Note": "Ghi chú",
+    "Item": "Mục", "Requirement": "Yêu Cầu", "Tests": "Test", "Note": "Ghi Chú",
     # -- plan review section --
     "structural review (no AI)": "đánh giá cấu trúc (không AI)",
     "None.": "Không có.",
-    "Review verdict": "Kết luận đánh giá", "Plan coverage": "Độ phủ kế hoạch",
-    "Decidable tests": "Test có thể quyết", "Added after review": "Đã thêm sau đánh giá",
+    "Review Verdict": "Kết Luận Đánh Giá", "Plan Coverage": "Độ Phủ Kế Hoạch",
+    "Decidable Tests": "Test Có Thể Quyết", "Added After Review": "Đã Thêm Sau Đánh Giá",
     "Reviewed by {who}; {n} test(s) reviewed over {rounds} revision round(s).":
         "Người đánh giá: {who}; đã xem {n} test qua {rounds} vòng chỉnh sửa.",
-    "Gaps found at review time": "Lỗ hổng phát hiện lúc đánh giá",
-    "Still unresolved": "Vẫn chưa xử lý", "Strengths": "Điểm mạnh",
+    "Gaps Found at Review Time": "Lỗ Hổng Phát Hiện Lúc Đánh Giá",
+    "Still Unresolved": "Vẫn Chưa Xử Lý", "Strengths": "Điểm Mạnh",
     "APPROVE": "DUYỆT", "REVISE": "CẦN SỬA", "INSUFFICIENT": "CHƯA ĐỦ",
     "blocking": "chặn", "advisory": "khuyến nghị",
     # -- item states (run assessment table) --

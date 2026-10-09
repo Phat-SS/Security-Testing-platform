@@ -28,6 +28,15 @@ class RunnerLimits:
     # flaky target can't turn a retry into an extra POST/DELETE.
     retry_max_attempts: int = 2  # 1 = no retry; 2 = one retry
     retry_backoff_ms: int = 200
+    # A ceiling on the run's overall request rate, across every test in
+    # flight. 0 = no ceiling (the previous behaviour). A multi-request probe's
+    # own burst is exempt — a rate-limit or race probe paced to 2/s tests
+    # nothing — but the burst still waits its turn to start.
+    max_requests_per_second: float = 0.0
+    # When the target answers 429/503, every later request waits for its
+    # Retry-After (or 2s without one), capped here. The 429 itself is still
+    # recorded as the answer; nothing is resent.
+    max_throttle_pause_s: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,8 @@ class Settings:
                 max_concurrent_tests=int(os.getenv("RUNNER_MAX_CONCURRENT_TESTS", "1")),
                 retry_max_attempts=int(os.getenv("RUNNER_RETRY_MAX_ATTEMPTS", "2")),
                 retry_backoff_ms=int(os.getenv("RUNNER_RETRY_BACKOFF_MS", "200")),
+                max_requests_per_second=float(os.getenv("RUNNER_MAX_RPS", "0") or 0),
+                max_throttle_pause_s=float(os.getenv("RUNNER_MAX_THROTTLE_PAUSE_S", "30") or 30),
             ),
         )
 
@@ -76,6 +87,7 @@ def settings_with_overrides(overrides: dict) -> Settings:
         "max_concurrent_tests": int,
         "retry_max_attempts": int,
         "retry_backoff_ms": int,
+        "max_requests_per_second": float,
     }
     applied = {}
     for key, cast in fields.items():
@@ -85,7 +97,9 @@ def settings_with_overrides(overrides: dict) -> Settings:
             value = cast(overrides[key])
         except (TypeError, ValueError):
             continue
-        if value <= 0:
+        # 0 is meaningful for the rate ceiling ("none", overriding a .env cap);
+        # for every other limit it would disable execution, so it is ignored.
+        if value < 0 or (value == 0 and key != "max_requests_per_second"):
             continue
         applied[key] = value
     if not applied:

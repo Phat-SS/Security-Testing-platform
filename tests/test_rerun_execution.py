@@ -519,7 +519,7 @@ def test_button_in_the_report_settles_an_undecided_row_end_to_end(live_api):
     # it has been answered, and the log says by what.
     settled = live_api.get("/assessment/A-live/report").text
     assert 'data-rerun="' not in settled
-    assert "re-run below: <b style='color:#b4232a'>FAIL</b>" in settled
+    assert "re-run below: <b style='color:#c8102e'>FAIL</b>" in settled
 
 
 def test_an_older_undecided_row_says_what_the_re_run_came_back_with():
@@ -533,7 +533,7 @@ def test_an_older_undecided_row_says_what_the_re_run_came_back_with():
 
     html = _report(orch)
     assert f'data-rerun="{first.execution_id}"' not in html
-    assert "re-run below: <b style='color:#b4232a'>FAIL</b>" in html
+    assert "re-run below: <b style='color:#c8102e'>FAIL</b>" in html
 
 
 def test_endpoint_refuses_an_environment_name_it_does_not_know(api):

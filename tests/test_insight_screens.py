@@ -243,7 +243,7 @@ def test_marking_a_finding_false_positive_hides_it_by_default(client):
 
     with_fp = client.get("/findings?fp=1").text
     assert finding.finding_id in with_fp
-    assert "False positive" in with_fp
+    assert "False Positive" in with_fp
 
     # Reopening brings it back to the default view.
     client.post(f"/assessment/{aid}/findings/{finding.finding_id}/triage",

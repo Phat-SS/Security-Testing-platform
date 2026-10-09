@@ -20,6 +20,7 @@ openpyxl==3.1.5         # XLSX export
 fpdf2==2.8.8            # PDF export (pure Python, no native deps)
 psutil==7.2.2           # process enumeration for the UI's shutdown-server action
 defusedxml==0.7.1       # safe XML parsing for Burp/JMeter imports (entity-expansion DoS)
+cryptography==50.0.0    # interactsh OAST: RSA-OAEP + AES-CFB to read callbacks.
 pyyaml==6.0.3           # OpenAPI/Swagger specs, which are usually YAML. Parsed with
                         # safe_load only — the full loader constructs arbitrary Python
                         # objects, and these documents come from outside.

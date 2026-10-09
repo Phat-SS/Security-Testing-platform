@@ -58,90 +58,52 @@ def config_page(
 
     state_cls = _READY_CLASS[readiness.state]
     if readiness.n_blocking:
-        counts = _t("{n} blocking").format(n=readiness.n_blocking)
+        counts = _t("{n} Blocking").format(n=readiness.n_blocking)
     elif readiness.n_warnings:
-        counts = _t("{n} to check").format(n=readiness.n_warnings)
+        counts = _t("{n} To Check").format(n=readiness.n_warnings)
     else:
-        counts = _t("all checks pass")
+        counts = _t("All Checks Pass")
 
-    buttons = "".join(
-        f"<button class='{'active' if key == tab else ''}' data-tab='cfg-{key}'>{_t(label)}"
-        + (f" <span class='pill {state_cls}' style='margin-left:6px'>{readiness.n_blocking or ''}</span>"
-           if key == "readiness" and readiness.n_blocking else "")
-        + "</button>"
-        for key, label in _CONFIG_TABS
-    )
     bodies = "".join(
         f"<div class='tabpane {'active' if key == tab else ''}' id='cfg-{key}'>{panes[key]}</div>"
         for key, _label in _CONFIG_TABS
     )
 
-    # The sidebar already names the section; the app bar carries the one thing
-    # it cannot fit — the readiness verdict — and the standfirst is gone. It
-    # said "Everything a run depends on, in one place", which the page itself
-    # demonstrates.
-    bar = appbar(_t("Configuration"), actions=(
+    # The sidebar is the nav for these panes, so there is no second tab bar
+    # here: the app bar names the open pane (in the sidebar's own words) and
+    # carries the one thing the sidebar cannot fit, the readiness verdict.
+    title = _t(dict(_CONFIG_TABS)[tab])
+    bar = appbar(title, actions=(
         f'<span class="chip">{_t("Status")} '
         f'<b class="pill {state_cls}" style="margin-left:6px">{_e(counts)}</b></span>'
     ))
 
-    return page(_t("Configuration"), f"""
+    return page(title, f"""
 {flash_html}{error_html}
-<div class="tabbar" id="config-tabs">{buttons}</div>
-<div style="padding-top:16px">{bodies}</div>
+<div>{bodies}</div>
 <script>
 (function () {{
-  var bar = document.getElementById('config-tabs');
-  function show(id) {{
-    bar.querySelectorAll('button').forEach(function (b) {{
-      b.classList.toggle('active', b.dataset.tab === id);
-    }});
-    document.querySelectorAll('.tabpane').forEach(function (p) {{
-      p.classList.toggle('active', p.id === id);
-    }});
-  }}
-  bar.querySelectorAll('button').forEach(function (b) {{
-    b.addEventListener('click', function () {{
-      show(b.dataset.tab);
-      // Keep the open pane in the URL so a save (which round-trips through a
-      // redirect) comes back to the pane the tester was working in.
-      history.replaceState(null, '', '/config?tab=' + b.dataset.tab.slice(4));
-    }});
-  }});
   document.querySelectorAll('.confirm-delete').forEach(function (f) {{
     f.addEventListener('submit', function (e) {{
-      if (!confirm('Delete ' + f.dataset.what + '? This rewrites the engagement config.')) {{
-        e.preventDefault();
-      }}
+      stpConfirmSubmit(f, e, 'Delete ' + f.dataset.what + '? This rewrites the engagement config.',
+                       {{ danger: true }});
     }});
   }});
 }})();
 </script>
-""", active=tab, appbar_html=bar, narrow=True)
+""", active=tab, appbar_html=bar)
 
 
 VI.update({
     # -- shared chrome (topbar, present on every page) --
-    "API Security Testing Platform": "Nền tảng kiểm thử bảo mật API",
-    "Dashboard": "Trang chủ",
-    "Configuration": "Cấu hình",
-    "Log in": "Đăng nhập",
-    "Log out": "Đăng xuất",
-    "Shutdown server": "Tắt server",
-    "Shutting down…": "Đang tắt…",
-    "Server is shutting down": "Server đang tắt",
-    "All processes for this project have been stopped. Start it again from a "
-    "terminal to continue.":
-        "Mọi tiến trình của dự án này đã dừng. Khởi động lại từ terminal để tiếp tục.",
-    "Shut down the server?\n\nThis stops this app AND any other process running "
-    "from this project (the demo target, stray CLI/pytest runs) — including ones "
-    "started in other terminals. You will need to start it again manually.":
-        "Tắt server?\n\nThao tác này dừng app này VÀ mọi tiến trình khác của dự án "
-        "(demo target, các lệnh CLI/pytest đang chạy lẻ) — kể cả những tiến trình "
-        "khởi động từ terminal khác. Bạn sẽ phải tự khởi động lại.",
+    "API Security Testing Platform": "Nền Tảng Kiểm Thử Bảo Mật API",
+    "Dashboard": "Trang Chủ",
+    "Configuration": "Cấu Hình",
+    "Log in": "Đăng Nhập",
+    "Shutting down…": "Đang Tắt…",
     # -- dashboard --
-    "Assessments": "Assessment", "Imported": "Đã nhập", "Designed": "Đã lên kế hoạch",
-    "Executed": "Đã chạy",
+    "Assessments": "Assessment", "Imported": "Đã Nhập", "Designed": "Đã Lên Kế Hoạch",
+    "Executed": "Đã Chạy",
     "Analyzed, no plan generated yet.": "Đã phân tích, chưa có kế hoạch.",
     "A plan exists; it may not be approved.": "Đã có kế hoạch; có thể chưa được duyệt.",
     "At least one run has happened.": "Đã có ít nhất một lượt chạy.",
@@ -149,13 +111,10 @@ VI.update({
     "No assessments yet — import a Jira issue above.":
         "Chưa có assessment nào — nhập một issue Jira ở trên.",
     "not configured — execution disabled": "chưa cấu hình — không thể chạy test",
-    "AI (Claude)": "AI (Claude)", "deterministic (heuristic)": "tất định (heuristic)",
-    "importable now:": "có thể nhập ngay:",
-    "enter any issue key your Jira account can read":
-        "nhập bất kỳ issue key nào tài khoản Jira của bạn đọc được",
-    "Analyzer": "Bộ phân tích", "Target": "Mục tiêu",
-    "Import a Jira issue": "Nhập một issue Jira",
-    "Depth": "Độ sâu", "Standard": "Tiêu chuẩn", "Aggressive": "Nâng cao",
+    "AI (Claude)": "AI (Claude)",
+    "Analyzer": "Bộ Phân Tích", "Target": "Mục Tiêu",
+    "Import a Jira Issue": "Nhập Một Issue Jira",
+    "Depth": "Độ Sâu", "Standard": "Tiêu Chuẩn", "Aggressive": "Nâng Cao",
     "Analyze the ticket and its embedded PoC, design a plan, let the AI planner add "
     "depth, then have a reviewing agent audit the plan against the ticket's requirements "
     "and send its gaps back for one revision round. You land on the plan with something "
@@ -166,40 +125,68 @@ VI.update({
         "hổng cho một vòng chỉnh sửa. Bạn sẽ đến thẳng trang kế hoạch để duyệt. Không có "
         "gì được chạy: mọi test đều ở trạng thái PENDING. Bỏ chọn để chỉ phân tích — dùng "
         "khi cần sửa lại danh sách endpoint trước.",
-    "Plan &amp; review on import": "Lên kế hoạch &amp; đánh giá khi nhập",
-    "Import": "Nhập", "Recent assessments": "Assessment gần đây",
-    "Working…": "Đang xử lý…", "Running…": "Đang chạy…",
+    "Plan &amp; review on import": "Lên Kế Hoạch &Amp; Đánh Giá Khi Nhập",
+    "Import": "Nhập", "Recent Assessments": "Assessment Gần Đây",
+    "Working…": "Đang Xử Lý…", "Running…": "Đang Chạy…",
     "Delete this assessment? This cannot be undone.":
         "Xoá assessment này? Không thể hoàn tác.",
-    "Re-import {issue} from Jira?\n\nCreates a new assessment from the ticket as it "
-    "reads now. No tests are generated and nothing runs.":
-        "Nhập lại {issue} từ Jira?\n\nTạo một assessment mới từ nội dung ticket hiện tại. "
-        "Không tạo test nào và không chạy gì cả.",
-    "Re-run {issue}?\n\nCreates a new assessment with the same plan and approvals, "
-    "then runs the approved non-destructive tests. Destructive tests are never "
-    "included in a re-run. The previous run is kept as the baseline.":
-        "Chạy lại {issue}?\n\nTạo một assessment mới với cùng kế hoạch và các duyệt hiện "
-        "có, rồi chạy các test không phá huỷ đã duyệt. Test phá huỷ không bao giờ được "
-        "đưa vào lượt chạy lại. Lượt chạy trước được giữ làm mốc so sánh.",
     # -- dashboard search + filter bar --
-    "Newest first": "Mới nhất trước",
-    "Oldest first": "Cũ nhất trước", "Issue key": "Issue key",
-    "Most findings": "Nhiều phát hiện nhất",
-    "Search issue key or assessment id": "Tìm theo issue key hoặc mã assessment",
+    "Newest First": "Mới Nhất Trước",
+    "Oldest First": "Cũ Nhất Trước", "Issue Key": "Issue Key",
+    "Most Findings": "Nhiều Phát Hiện Nhất",
+    "Search Issue Key or Assessment Id": "Tìm Theo Issue Key Hoặc Mã Assessment",
     "Search issue key or assessment id — e.g. BH-142":
-        "Tìm theo issue key hoặc mã assessment — ví dụ BH-142",
-    "Status": "Trạng thái", "Sort": "Sắp xếp", "Show": "Hiển thị",
-    "Search": "Tìm kiếm", "Clear": "Xoá bộ lọc",
-    "Clear filters": "Xoá bộ lọc", "Clear search": "Xoá từ khoá",
-    "{n} of {total}": "{n} trên {total}", "{n} assessments": "{n} assessment",
+        "Tìm Theo Issue Key Hoặc Mã Assessment — Ví Dụ BH-142",
+    "Status": "Trạng Thái", "Sort": "Sắp Xếp", "Show": "Hiển Thị",
+    "Search": "Tìm Kiếm", "Clear": "Xoá Bộ Lọc",
+    "Clear Filters": "Xoá Bộ Lọc", "Clear Search": "Xoá Từ Khoá",
+    "{n} of {total}": "{n} Trên {total}", "{n} assessments": "{n} Assessment",
     "page {n}": "trang {n}",
     # -- sidebar --
-    "Collapse sidebar": "Thu gọn thanh bên", "Expand sidebar": "Mở rộng thanh bên",
+    "New Assessment": "Assessment Mới", "Deterministic": "Tất Định", "Available:": "Có sẵn:",
+    "Any issue key your Jira account can read.":
+        "Bất kỳ issue key nào tài khoản Jira của bạn đọc được.",
+    "On Import": "Khi Nhập", "Analyze Only": "Chỉ Phân Tích", "Auto-Plan (AI)": "Tự Lập Kế Hoạch (AI)",
+    "Ticket PoC Only": "Chỉ PoC Của Ticket",
+    "Analyze Only: map endpoints. Auto-Plan: rules + AI planner + review. "
+    "Ticket PoC Only: just the ticket's script. Nothing runs on import.":
+        "Chỉ Phân Tích: liệt kê endpoint. Tự Lập Kế Hoạch: rule + AI planner + đánh giá. "
+        "Chỉ PoC Của Ticket: chỉ script trong ticket. Không có gì chạy khi nhập.",
+    "Re-import {issue} from Jira as a new assessment? Nothing runs.":
+        "Nhập lại {issue} từ Jira thành assessment mới? Không chạy gì.",
+    "Re-run {issue}? Runs the approved non-destructive tests as a new assessment.":
+        "Chạy lại {issue}? Chạy các test không phá huỷ đã duyệt thành assessment mới.",
+    "Open": "Mở", "Open Report": "Mở Báo Cáo", "Re-Run Plan": "Chạy Lại Kế Hoạch",
+    "Re-Import From Jira": "Nhập Lại Từ Jira", "Select {name}": "Chọn {name}",
+    "Selected": "Đã Chọn", "Select All on Page": "Chọn Tất Cả Trên Trang",
+    "Select": "Chọn", "Selection": "Mục Đã Chọn", "Clear Selection": "Bỏ Chọn",
+    "Delete Selected": "Xoá Mục Đã Chọn",
+    "Delete {n} assessment(s)? This cannot be undone.":
+        "Xoá {n} assessment? Không thể hoàn tác.",
+    "Findings by Severity": "Phát Hiện Theo Mức Độ",
+    "Recent Assessments With Findings": "Assessment Gần Đây Có Phát Hiện",
+    "Show as Table": "Xem Dạng Bảng", "No confirmed findings yet.": "Chưa có phát hiện nào được xác nhận.",
+    "Test Outcomes per Run": "Kết Quả Test Mỗi Lượt Chạy",
+    "Latest Executed Assessments": "Assessment Đã Chạy Gần Nhất",
+    "Nothing has run yet.": "Chưa có gì được chạy.", "Fail": "Lỗi", "Pass": "Đạt",
+    "Blocked / Error": "Bị Chặn / Lỗi",
+    "Search Options": "Tìm Lựa Chọn", "No Matches": "Không Có Kết Quả",
+    "Confirm": "Xác Nhận", "Actions for {name}": "Thao Tác Cho {name}", "Attacker": "Kẻ Tấn Công", "Victim": "Nạn Nhân", "Default": "Mặc Định",
+    "Jira Offline": "Jira Ngoại Tuyến", "Offline": "Ngoại Tuyến",
+    "Collapse Sidebar": "Thu Gọn Thanh Bên", "Expand Sidebar": "Mở Rộng Thanh Bên",
+    "Workspace": "Không Gian Làm Việc", "Engagement": "Engagement", "System": "Hệ Thống",
+    "Scope & Targets": "Phạm Vi & Mục Tiêu", "Audit Log": "Nhật Ký Kiểm Toán",
+    "Settings": "Cài Đặt", "Log In": "Đăng Nhập", "Log Out": "Đăng Xuất",
+    "Shut Down Server": "Tắt Server", "Server Stopped": "Server Đã Dừng",
+    "Start it again from a terminal.": "Khởi động lại từ terminal.",
+    "Shut down the server?\n\nStops this app and every process started from this "
+    "project, in any terminal.":
+        "Tắt server?\n\nDừng app này và mọi tiến trình của dự án, ở mọi terminal.",
     # -- assessment card --
-    "{n} test(s)": "{n} test", "{n} approved": "{n} đã duyệt", "{n} run": "{n} lượt chạy",
-    "Re-run": "Chạy lại", "Re-import": "Nhập lại", "Delete": "Xoá",
+    "{n} Test(s)": "{n} Test", "{n} Approved": "{n} Đã Duyệt", "{n} Run": "{n} Lượt Chạy",
+    "Re-run": "Chạy Lại", "Re-import": "Nhập Lại", "Delete": "Xoá",
     # -- login / error pages --
-    "API key": "API key",
+    "API Key": "API Key",
     "Multi-user auth is enabled. Paste the API key printed by "
     "<code>python -m app.core.auth add &lt;name&gt; &lt;role&gt;</code> to authenticate "
     "this browser for actions like designing tests, approving, and executing. Reads "
@@ -208,31 +195,31 @@ VI.update({
         "<code>python -m app.core.auth add &lt;name&gt; &lt;role&gt;</code> để xác thực "
         "trình duyệt này cho các thao tác như thiết kế test, duyệt và chạy test. Xem dữ "
         "liệu vẫn luôn mở dù có xác thực hay không.",
-    "← Back to dashboard": "← Về trang chủ",
-    "← Back to assessment": "← Về assessment",
-    "← Back to the new assessment": "← Về assessment mới",
+    "← Back to dashboard": "← Về Trang Chủ",
+    "← Back to Assessment": "← Về Assessment",
+    "← Back to the new assessment": "← Về Assessment Mới",
     # -- main.py flash messages (static ones only — dynamic ones with names/counts
     # baked into the string are left in English, since a template-less lookup
     # cannot translate a value it has already been substituted into) --
-    "Invalid API key": "API key không hợp lệ", "Logged out": "Đã đăng xuất",
-    "Deleted assessment": "Đã xoá assessment", "Assessment not found": "Không tìm thấy assessment",
-    "Test plan generated": "Đã tạo kế hoạch test", "Unknown action": "Hành động không xác định",
-    "No tests selected": "Chưa chọn test nào",
-    "Execution disabled: no engagement configured": "Không thể chạy: chưa cấu hình engagement",
-    "Scope saved": "Đã lưu phạm vi",
-    "Saved — approval reset to PENDING": "Đã lưu — duyệt được đặt lại về PENDING",
-    "Posted to Jira": "Đã đăng lên Jira",
+    "Invalid API key": "API Key Không Hợp Lệ", "Logged out": "Đã Đăng Xuất",
+    "Deleted assessment": "Đã Xoá Assessment", "Assessment not found": "Không Tìm Thấy Assessment",
+    "Test plan generated": "Đã Tạo Kế Hoạch Test", "Unknown action": "Hành Động Không Xác Định",
+    "No tests selected": "Chưa Chọn Test Nào",
+    "Execution disabled: no engagement configured": "Không Thể Chạy: Chưa Cấu Hình Engagement",
+    "Scope saved": "Đã Lưu Phạm Vi",
+    "Saved — approval reset to PENDING": "Đã Lưu — Duyệt Được Đặt Lại Về PENDING",
+    "Posted to Jira": "Đã Đăng Lên Jira",
     # -- main.py error_page titles --
-    "Invalid environment name": "Tên môi trường không hợp lệ", "Invalid URL": "URL không hợp lệ",
-    "Import failed": "Nhập thất bại", "Re-analysis failed": "Phân tích lại thất bại",
-    "Planning agent failed": "Agent lên kế hoạch thất bại",
-    "Result review failed": "Đánh giá kết quả thất bại",
-    "Execution failed": "Chạy test thất bại", "Re-import failed": "Nhập lại thất bại",
-    "Re-run failed": "Chạy lại thất bại", "Posting to Jira failed": "Đăng lên Jira thất bại",
+    "Invalid environment name": "Tên Môi Trường Không Hợp Lệ", "Invalid URL": "URL Không Hợp Lệ",
+    "Import failed": "Nhập Thất Bại", "Re-analysis failed": "Phân Tích Lại Thất Bại",
+    "Planning agent failed": "Agent Lên Kế Hoạch Thất Bại",
+    "Result review failed": "Đánh Giá Kết Quả Thất Bại",
+    "Execution failed": "Chạy Test Thất Bại", "Re-import failed": "Nhập Lại Thất Bại",
+    "Re-run failed": "Chạy Lại Thất Bại", "Posting to Jira failed": "Đăng Lên Jira Thất Bại",
     # -- config page shell --
     "Everything a run depends on, in one place.": "Mọi thứ một lượt chạy cần, ở một nơi.",
-    "{n} blocking": "{n} chặn", "{n} to check": "{n} cần kiểm tra",
-    "all checks pass": "mọi kiểm tra đều đạt",
+    "{n} Blocking": "{n} Chặn", "{n} To Check": "{n} Cần Kiểm Tra",
+    "All Checks Pass": "Mọi Kiểm Tra Đều Đạt",
     # -- readiness pane --
     "No environments to check.": "Không có môi trường nào để kiểm tra.",
     "Ready to run.": "Sẵn sàng chạy.",
@@ -243,24 +230,23 @@ VI.update({
     "setting and the pane that fixes it.":
         "Nếu chạy ngay bây giờ, kết quả sẽ toàn BỊ CHẶN hoặc LỖI. Mỗi dòng dưới đây nêu "
         "rõ cấu hình và tab cần sửa.",
-    "State": "Trạng thái", "Check": "Kiểm tra",
-    "Scope verdict per environment": "Kết luận phạm vi theo từng môi trường",
+    "State": "Trạng Thái", "Check": "Kiểm Tra",
+    "Scope Verdict per Environment": "Kết Luận Phạm Vi Theo Từng Môi Trường",
     "Each base URL run through the same <code>ScopeValidator</code> the runner calls, DNS "
     "lookup included. Whatever this table says here is exactly what the execution log will say.":
         "Mỗi base URL được chạy qua đúng <code>ScopeValidator</code> mà runner gọi, kể cả "
         "tra cứu DNS. Bảng này nói gì thì nhật ký thực thi cũng sẽ nói y hệt vậy.",
-    "Environment": "Môi trường", "Base URL": "Base URL", "Verdict": "Kết luận",
-    "Reason": "Lý do", "Config file:": "File cấu hình:",
+    "Environment": "Môi Trường", "Base URL": "Base URL", "Verdict": "Kết Luận",
+    "Reason": "Lý Do", "Config file:": "File cấu hình:",
     "default": "mặc định", "ALLOWED": "CHO PHÉP", "BLOCKED": "BỊ CHẶN",
     # -- environments pane --
-    "Make default": "Đặt làm mặc định",
     "No environments configured yet.": "Chưa cấu hình môi trường nào.",
     "Named target URLs. Only the path/method/body of a pasted PoC survive transpiling, "
     "so whichever base URL is picked here is what actually gets called.":
         "Các URL mục tiêu có tên. Chỉ path/method/body của PoC dán vào còn giữ lại sau "
         "khi transpile, nên base URL chọn ở đây chính là URL thật sự được gọi.",
     "Name": "Tên",
-    "make default": "đặt làm mặc định", "authorize its host": "cấp phép host này",
+    "Make Default": "Đặt Làm Mặc Định", "Authorize Its Host": "Cấp Phép Host Này",
     "Save": "Lưu",
     "<b>Authorize its host</b> adds the hostname to <b>Scope &rarr; approved hosts</b> "
     "in the same step. Leave it off for a target the engagement does not actually cover "
@@ -278,9 +264,9 @@ VI.update({
         "khi gửi, và hostname phải khớp chính xác trong <b>approved hosts</b> — không có "
         "wildcard, vì wildcard trong danh sách cấp phép pentest chính là cách một host "
         "không được phép bị test nhầm.",
-    "Approved hosts — one per line": "Host được cấp phép — mỗi dòng một host",
-    "Blocked hosts — one per line (always wins)": "Host bị chặn — mỗi dòng một host (luôn ưu tiên)",
-    "Allow private / loopback ranges": "Cho phép dải IP nội bộ / loopback",
+    "Approved Hosts — One per Line": "Host Được Cấp Phép — Mỗi Dòng Một Host",
+    "Blocked hosts — one per line (always wins)": "Host Bị Chặn — Mỗi Dòng Một Host (Luôn Ưu Tiên)",
+    "Allow Private / Loopback Ranges": "Cho Phép Dải IP Nội Bộ / Loopback",
     "Off by default. When off, a host that <i>resolves</i> to 127.0.0.0/8, 10/8, "
     "172.16/12, 192.168/16 or 169.254/16 (cloud metadata) is refused even if its name "
     "is on the approved list — that check is what stops a DNS-based SSRF from reaching "
@@ -289,7 +275,7 @@ VI.update({
         "172.16/12, 192.168/16 hoặc 169.254/16 (cloud metadata) sẽ bị từ chối dù tên nó "
         "có trong danh sách cấp phép — kiểm tra này ngăn SSRF qua DNS chạm tới dịch vụ "
         "nội bộ. Chỉ bật khi mục tiêu là lab nội bộ.",
-    "Save scope": "Lưu phạm vi",
+    "Save Scope": "Lưu Phạm Vi",
     "Hostnames only — no scheme, no port, no path. A port is not part of the check "
     "(<code>api.example.com:8443</code> is authorized by <code>api.example.com</code>), "
     "and DNS is resolved and the resulting IP re-checked on every request, so a name "
@@ -300,12 +286,11 @@ VI.update({
         "trỏ đến nơi mới sẽ bị phát hiện ngay lúc gửi.",
     # -- personas pane --
     "attacker": "kẻ tấn công", "victim": "nạn nhân",
-    "Role label": "Nhãn vai trò",
-    "Owned object ids — key=value per line": "ID object sở hữu — mỗi dòng key=value",
-    "Auth headers — Header: value per line": "Auth headers — mỗi dòng Header: value",
-    "Secret markers — one per line": "Dấu hiệu bí mật — mỗi dòng một dấu hiệu",
-    "Scoping headers to strip on privilege-escalation tests — one per line":
-        "Header scoping cần loại bỏ khi test leo thang đặc quyền — mỗi dòng một header",
+    "Role Label": "Nhãn Vai Trò",
+    "Owned Object Ids — Key=Value per Line": "ID Object Sở Hữu — Mỗi Dòng Key=Value",
+    "Auth Headers — Header: Value per Line": "Auth Headers — Mỗi Dòng Header: Value",
+    "Secret Markers — One per Line": "Dấu Hiệu Bí Mật — Mỗi Dòng Một Dấu Hiệu",
+    "Scoping Headers to Strip on Privilege-Escalation Tests — One per Line": "Header Scoping Cần Loại Bỏ Khi Test Leo Thang Đặc Quyền — Mỗi Dòng Một Header",
     "Save {name}": "Lưu {name}",
     "No personas defined yet — add one below.": "Chưa có persona nào — thêm một cái bên dưới.",
     "not defined!": "chưa định nghĩa!", "no personas defined": "chưa có persona nào",
@@ -318,16 +303,16 @@ VI.update({
         'được object của B", cần hai tài khoản thật cộng với biết rõ mỗi bên sở hữu gì. '
         'Test tham chiếu persona <i>bằng tên</i>, nên token không bao giờ xuất hiện trong '
         'test case, file export hay báo cáo.',
-    "Attacker persona": "Persona kẻ tấn công", "Victim persona": "Persona nạn nhân",
-    "Save roles": "Lưu vai trò",
+    "Attacker Persona": "Persona Kẻ Tấn Công", "Victim Persona": "Persona Nạn Nhân",
+    "Save Roles": "Lưu Vai Trò",
     "The attacker sends the requests; generated BOLA cases aim it at ids the victim "
     "owns. Point these at two <i>different</i> personas or the results are "
     "inconclusive by construction.":
         "Kẻ tấn công là bên gửi request; các case BOLA được tạo sẽ nhắm vào id mà nạn "
         "nhân sở hữu. Chọn hai persona <i>khác nhau</i>, nếu không kết quả sẽ luôn chưa "
         "rõ ràng do bản chất thiết kế.",
-    "Defined personas": "Persona đã định nghĩa", "Add a persona": "Thêm persona",
-    "Add persona": "Thêm persona",
+    "Defined Personas": "Persona Đã Định Nghĩa", "Add a Persona": "Thêm Persona",
+    "Add Persona": "Thêm Persona",
     "Use dedicated test accounts. Credentials are written to the engagement config in "
     "plain text and every response is passed through secret redaction before it reaches "
     "a report — but a real user's token does not belong in either.":
@@ -341,15 +326,15 @@ VI.update({
         'Giới hạn cứng mà trusted runner áp dụng cho mọi request gửi đi. Để trống nghĩa '
         'là "dùng giá trị <code>.env</code>" hiển thị làm placeholder; điền giá trị ở '
         'đây sẽ ghi đè chỉ cho engagement này, không cần restart.',
-    "Request timeout (s)": "Timeout request (giây)",
+    "Request Timeout (s)": "Timeout Request (Giây)",
     "Raise it for a slow staging host.": "Tăng lên nếu host staging phản hồi chậm.",
-    "Max requests per test": "Số request tối đa mỗi test",
+    "Max Requests per Test": "Số Request Tối Đa Mỗi Test",
     "Caps a single test's fan-out, race windows included.":
         "Giới hạn số request một test có thể gửi, kể cả trong race window.",
-    "Max response bytes": "Số byte phản hồi tối đa",
+    "Max Response Bytes": "Số Byte Phản Hồi Tối Đa",
     "Body larger than this is truncated before storage.":
         "Body lớn hơn mức này sẽ bị cắt bớt trước khi lưu.",
-    "Save limits": "Lưu giới hạn", "Reset to .env defaults": "Khôi phục mặc định .env",
+    "Save Limits": "Lưu Giới Hạn", "Reset to .env Defaults": "Khôi Phục Mặc Định .env",
     "The runner never auto-follows a redirect: a 302 to an internal host is the same "
     "SSRF wearing a hat, and blindly chasing it would let the HTTP client re-resolve DNS "
     "outside the scope gate. A 3xx response is captured and evaluated exactly as received "
@@ -370,8 +355,8 @@ VI.update({
         "báo cáo. <b>Reconnect</b> đọc lại <code>.env</code> và gắn lại client tại chỗ, "
         "đúng bằng những gì một lần restart sẽ làm — hữu ích ngay sau khi làm mới token "
         "OAuth ngắn hạn.",
-    "Reconnect": "Kết nối lại",
-    "Environment variable": "Biến môi trường", "Purpose": "Mục đích",
+    "Reconnect": "Kết Nối Lại",
+    "Environment Variable": "Biến Môi Trường", "Purpose": "Mục Đích",
     "To refresh an expired token: authorize once with "
     "<code>npx -y mcp-remote https://mcp.atlassian.com/v1/mcp</code> (opens the Atlassian "
     "OAuth login in your browser — only needed again once the refresh token itself is "
@@ -382,7 +367,7 @@ VI.update({
         "nhập OAuth của Atlassian trên trình duyệt — chỉ cần lặp lại khi refresh token bị "
         "thu hồi hoặc hết hạn), sau đó chạy <code>npm run jira:token</code> để lấy token "
         "mới vào <code>.env</code>, rồi bấm <b>Kết nối lại</b> ở trên.",
-    "Other connectors": "Kết nối khác", "NOT CONFIGURED": "CHƯA CẤU HÌNH",
+    "Other Connectors": "Kết Nối Khác", "NOT CONFIGURED": "CHƯA CẤU HÌNH",
     "No MCP integration is wired up for this platform — there is nothing here yet to "
     "connect or reconnect. (Separately, a completed assessment can already export a "
     "Postman collection from its report page — a one-way file export, unrelated to this "
@@ -400,7 +385,7 @@ VI.update({
         "được đọc lúc khởi động, và cần restart server để thay đổi — nên chỉ hiển thị ở "
         "đây thay vì cho sửa, vì nút lưu sẽ âm thầm không có tác dụng gì cho tới lần "
         "khởi động sau.",
-    "Setting": "Cấu hình", "Current": "Giá trị hiện tại",
+    "Setting": "Cấu Hình", "Current": "Giá Trị Hiện Tại",
     "Secrets are never echoed here — only whether one is present. Keep tokens in "
     "<code>.env</code>, never in <code>engagement.json</code>.":
         "Bí mật không bao giờ hiển thị ở đây — chỉ báo có tồn tại hay không. Giữ token "
@@ -412,7 +397,7 @@ VI.update({
         "Ghi vào <code>.env</code> và áp dụng ngay, không cần restart. Cần vai trò "
         "<b>admin</b> khi bật xác thực.",
     # "Analyzer" and "Save" are already mapped above — same words, same meaning.
-    "Evidence keys": "Khoá bằng chứng", "Optional integration": "Tích hợp tuỳ chọn",
+    "Evidence Keys": "Khoá Bằng Chứng", "Optional Integration": "Tích Hợp Tuỳ Chọn",
     "ON": "BẬT", "OFF": "TẮT", "ACTIVE": "ĐANG DÙNG",
     "CLI NOT FOUND": "KHÔNG TÌM THẤY CLI",
     "CONFIGURED": "ĐÃ CẤU HÌNH", "NOT SET UP": "CHƯA THIẾT LẬP",
@@ -432,39 +417,38 @@ VI.update({
     "Leave blank unless you need a specific one. An alias, or a full versioned id.":
         "Để trống trừ khi bạn cần một model cụ thể. Có thể là alias hoặc id đầy đủ "
         "có version.",
-    "Effort": "Mức suy luận", "CLI default": "Mặc định của CLI",
+    "Effort": "Mức Suy Luận", "CLI Default": "Mặc Định Của CLI",
     "How much reasoning each call is allowed. Higher costs more and takes longer.":
         "Cho phép mỗi lần gọi suy luận tới đâu. Cao hơn thì tốn hơn và lâu hơn.",
-    "Spend cap per call (USD)": "Trần chi phí mỗi lần gọi (USD)",
+    "Spend Cap per Call (USD)": "Trần Chi Phí Mỗi Lần Gọi (USD)",
     "no cap": "không giới hạn",
     "A hard stop, not a target. Blank lets the CLI decide.":
         "Đây là mức chặn cứng, không phải mục tiêu. Để trống thì CLI tự quyết.",
-    "Compliance option": "Tuỳ chọn tuân thủ",
-    "Refuse to run unless the model above is a full versioned id":
-        "Không chạy nếu model ở trên không phải id đầy đủ có version",
+    "Compliance Option": "Tuỳ Chọn Tuân Thủ",
+    "Refuse to Run Unless the Model Above Is a Full Versioned Id": "Không Chạy Nếu Model Ở Trên Không Phải Id Đầy Đủ Có Version",
     "For deployments that must be able to say which exact model produced a report. An "
     "alias like <code>sonnet</code> moves between releases, so it is rejected here — with "
     "this on, a blank model field stops the AI path entirely.":
         "Dành cho triển khai cần nói được chính xác model nào đã tạo ra báo cáo. Alias như "
         "<code>sonnet</code> thay đổi theo từng bản phát hành nên bị từ chối ở đây — bật "
         "tuỳ chọn này mà để trống ô model thì hướng AI dừng hẳn.",
-    "Cross-identity correlation": "Đối chiếu chéo danh tính",
+    "Cross-identity Correlation": "Đối Chiếu Chéo Danh Tính",
     "HMACs identity values so a BOLA finding can show the attacker saw the victim's own "
     "data. Without it that comparison is skipped and those verdicts come back "
     "INCONCLUSIVE.":
         "Băm HMAC các giá trị định danh để một phát hiện BOLA chứng minh được kẻ tấn công "
         "đã thấy đúng dữ liệu của nạn nhân. Không có nó thì phép so sánh bị bỏ qua và các "
         "kết luận đó trả về INCONCLUSIVE.",
-    "Report manifest signing": "Ký manifest báo cáo",
+    "Report Manifest Signing": "Ký Manifest Báo Cáo",
     "Signs each report manifest, so it can be shown not to have been edited after "
     "the run. Without it manifests are still written, just unsigned.":
         "Ký từng manifest báo cáo để chứng minh nó không bị sửa sau khi chạy. Không có nó "
         "manifest vẫn được ghi, chỉ là không có chữ ký.",
-    "Generate the missing keys": "Tạo các khoá còn thiếu",
+    "Generate the Missing Keys": "Tạo Các Khoá Còn Thiếu",
     "Generated in your browser, stored when you save.":
         "Sinh ngay trên trình duyệt của bạn, chỉ lưu lại khi bạn bấm Lưu.",
     "Nothing to do here.": "Không còn gì phải làm ở đây.",
-    "Enter keys by hand": "Nhập khoá thủ công",
+    "Enter Keys by Hand": "Nhập Khoá Thủ Công",
     "For restoring a key from a secret manager, or rotating one. Stored values are never "
     "sent back to the browser: blank keeps the current key, and removing one takes the "
     "explicit checkbox.":
@@ -472,40 +456,35 @@ VI.update({
         "không bao giờ được gửi lại về trình duyệt: để trống là giữ nguyên khoá hiện tại, "
         "và muốn xoá thì phải tick ô xác nhận.",
     "stored — blank keeps it": "đã lưu — để trống là giữ nguyên", "not set": "chưa đặt",
-    "Clear the stored value": "Xoá giá trị đã lưu",
-    "Signing key id": "Mã khoá ký",
+    "Clear the Stored Value": "Xoá Giá Trị Đã Lưu",
+    "Signing Key Id": "Mã Khoá Ký",
     "A label recorded in the manifest, so a verifier knows which key to reach for.":
         "Một nhãn được ghi vào manifest để bên kiểm chứng biết cần dùng khoá nào.",
-    "Out-of-band collaborator": "Collaborator ngoài luồng",
+    "Out-of-band Collaborator": "Collaborator Ngoài Luồng",
     "Blind and out-of-band tests can be confirmed.":
         "Các test blind và ngoài luồng có thể được xác nhận.",
     "Blind SSRF and other out-of-band tests report INCONCLUSIVE — there is nowhere "
     "for the target's callback to land.":
         "Blind SSRF và các test ngoài luồng khác sẽ trả về INCONCLUSIVE — callback từ mục "
         "tiêu không có chỗ nào để đáp xuống.",
-    "Public callback base URL": "URL gốc nhận callback công khai",
-    "Authenticated polling base URL": "URL gốc để poll có xác thực",
-    "Polling API token": "Token API để poll",
-    "Polling timeout (s)": "Timeout poll (giây)",
+    "Public Callback Base URL": "URL Gốc Nhận Callback Công Khai",
+    "Authenticated Polling Base URL": "URL Gốc Để Poll Có Xác Thực",
+    "Polling API Token": "Token API Để Poll",
+    "Polling Timeout (s)": "Timeout Poll (Giây)",
     "Both URLs must be HTTPS and are set together. The token is sent only to the polling "
     "endpoint — never into the callback URL handed to the target.":
         "Cả hai URL phải là HTTPS và được đặt cùng lúc. Token chỉ gửi tới endpoint poll — "
         "không bao giờ nhét vào URL callback đưa cho mục tiêu.",
     # -- gaps this tab already had -------------------------------------------
-    "Everything here already has a working default — a normal engagement never "
-    "needs to open this tab. Full reference: <code>docs/configuration.md</code>.":
-        "Mọi thứ ở đây đều đã có giá trị mặc định chạy được — một engagement bình thường "
-        "không bao giờ cần mở tab này. Tham khảo đầy đủ: "
-        "<code>docs/configuration.md</code>.",
-    "Tests in flight at once": "Số test chạy song song",
+    "Tests in Flight at Once": "Số Test Chạy Song Song",
     "1 runs a plan one test at a time. Higher finishes a long plan faster, at "
     "proportionally higher request rate against the target — a blast-radius decision, "
     "so it is not raised for you.":
         "Để 1 thì kế hoạch chạy tuần tự từng test. Cao hơn thì xong nhanh hơn, đổi lại "
         "tần suất request lên mục tiêu tăng tương ứng — đây là quyết định về mức độ ảnh "
         "hưởng, nên hệ thống không tự nâng giúp bạn.",
-    "Refresh token": "Làm mới token",
+    "Refresh Token": "Làm Mới Token",
     # -- readiness: the relocated session-cookie check ------------------------
-    "Login session cookie": "Cookie phiên đăng nhập",
-    "Mark the cookie Secure": "Đánh dấu cookie là Secure",
+    "Login Session Cookie": "Cookie Phiên Đăng Nhập",
+    "Mark the Cookie Secure": "Đánh Dấu Cookie Là Secure",
 })

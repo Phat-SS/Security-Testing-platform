@@ -94,7 +94,7 @@ def _readiness_pane(readiness, engagement_path: str, show_wizard: bool = False) 
     env_rows = ""
     for env in readiness.environments:
         cls = _READY_CLASS[env.state]
-        star = f" <span class='pill low'>{_t('default')}</span>" if env.is_active else ""
+        star = f" <span class='pill ok'>{_t('Default')}</span>" if env.is_active else ""
         ip = (f"<div class='muted mono' style='font-size:11.5px'>{_e(env.resolved_ip)}</div>"
               if env.resolved_ip else "")
         verdict_word = _t("ALLOWED") if env.state == "ok" else _t("BLOCKED")
@@ -122,7 +122,7 @@ def _readiness_pane(readiness, engagement_path: str, show_wizard: bool = False) 
 <div class="card" style="margin-bottom:22px"><div class="tblwrap"><table>
 <tr><th style="width:110px">{_t("State")}</th><th>{_t("Check")}</th></tr>{rows}</table></div></div>
 
-<h2 class="section">{_t("Scope verdict per environment")}</h2>
+<h2 class="section">{_t("Scope Verdict per Environment")}</h2>
 <p class="muted" style="margin:-4px 0 10px">{_t(
     'Each base URL run through the same <code>ScopeValidator</code> the runner calls, DNS '
     'lookup included. Whatever this table says here is exactly what the execution log will say.'

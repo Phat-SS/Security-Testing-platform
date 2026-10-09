@@ -324,7 +324,7 @@ def test_the_run_assessment_reaches_the_report_and_the_jira_comment():
     run = orch.adjudicate(aid)
 
     html = orch.build_report_html(aid)
-    assert "Assessment of this run" in html
+    assert "Assessment of This Run" in html
     assert f"{run.coverage_pct}%" in html
 
     comment = orch.comment_preview(aid)

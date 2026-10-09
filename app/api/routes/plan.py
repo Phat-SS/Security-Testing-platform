@@ -169,6 +169,55 @@ async def adjudicate(request: Request, aid: str, user: User = Depends(require("t
                             status_code=303)
 
 
+@router.post("/assessment/{aid}/copilot")
+async def copilot(aid: str, question: str = Form(""), phase: str = Form(""),
+                  user: User = Depends(require("tester")),
+                  idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    """Refresh the Copilot brief, optionally asking it a question.
+
+    Reads what the assessment already holds and sends nothing to the target.
+    A job like the other agent calls, so a double-submit does not pay for the
+    same CLI call twice.
+    """
+    back = f"/assessment/{aid}?phase={quote(phase or 'results')}"
+    job, created = create_operation_job(aid, "copilot", idempotency_key)
+    if not created:
+        return RedirectResponse(f"{back}&flash={quote(f'Existing job {job.job_id}: {job.state}')}",
+                                status_code=303)
+    try:
+        brief = await run_operation_job(
+            job, partial(state.orch.copilot_brief, aid, question=question[:1000],
+                         actor=user.name),
+        )
+    except ValueError as exc:
+        return RedirectResponse(f"{back}&flash={quote(str(exc))}", status_code=303)
+    flash = ("Copilot updated" if not brief.degraded_reason
+             else f"Copilot updated (deterministic only: {brief.degraded_reason})")
+    return RedirectResponse(f"{back}&flash={quote(flash)}#copilot", status_code=303)
+
+
+@router.post("/assessment/{aid}/copilot/accept")
+async def copilot_accept(aid: str, step: int = Form(...), brief: str = Form(""),
+                         user: User = Depends(require("tester")),
+                         idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    """Hand one Copilot next step to the planner. Whatever it proposes is
+    validated like any planner output and lands PENDING: nothing runs."""
+    job, created = create_operation_job(aid, "copilot_accept", idempotency_key)
+    if not created:
+        return RedirectResponse(
+            f"/assessment/{aid}?phase=plan&flash={quote(f'Existing job {job.job_id}: {job.state}')}",
+            status_code=303)
+    try:
+        added, rejected = await run_operation_job(
+            job, partial(state.orch.copilot_accept, aid, step, actor=user.name, brief_id=brief),
+        )
+    except (ValueError, RuntimeError) as exc:
+        return RedirectResponse(f"/assessment/{aid}?phase=plan&flash={quote(str(exc))}",
+                                status_code=303)
+    flash = f"{added} test(s) added for review" + (f", {len(rejected)} rejected" if rejected else "")
+    return RedirectResponse(f"/assessment/{aid}?phase=plan&flash={quote(flash)}", status_code=303)
+
+
 @router.post("/assessment/{aid}/plan")
 async def plan_action(request: Request, aid: str, user: User = Depends(require("tester"))):
     form = await request.form()

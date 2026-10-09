@@ -21,7 +21,7 @@ import json
 
 from app.core.i18n import get_lang, tt as _t
 
-from . import base, icons, tokens
+from . import base, charts, icons, menu, select, tokens
 from .base import attr, e
 
 CSS = """
@@ -30,11 +30,11 @@ CSS = """
   background:var(--sidebar);border-right:1px solid var(--border);
   position:sticky;top:0;height:100vh;overflow-y:auto;overflow-x:hidden;
   transition:width .16s ease;}
-.sb-top{display:flex;align-items:center;gap:6px;padding:14px 12px 10px;}
+.sb-top{display:flex;align-items:center;gap:6px;padding:18px 14px 14px;}
 .sb-brand{display:flex;align-items:center;gap:9px;flex:1;min-width:0;text-decoration:none;
   color:var(--fg);}
-.sb-brand svg{color:var(--accent);flex:none;}
-.sb-brand b{font-size:14.5px;letter-spacing:-.01em;
+.sb-brand svg{flex:none;}
+.sb-brand b{font-family:var(--display);font-size:18px;font-weight:700;letter-spacing:-.01em;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .sb-collapse{flex:none;padding:5px;border-radius:var(--radius);border:1px solid transparent;
   background:none;color:var(--faint);cursor:pointer;line-height:0;}
@@ -43,18 +43,20 @@ CSS = """
 /* The engagement card. `.txt` is a flex column and `.name`/`.url` are BLOCKS:
    `text-overflow:ellipsis` is ignored on an inline box, which is how a long
    target URL used to paint straight through the sidebar's right edge. */
-.sb-eng{display:flex;align-items:center;gap:9px;margin:0 12px 14px;padding:9px 11px;
-  border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);
+.sb-eng{display:flex;align-items:center;gap:9px;margin:0 12px 16px;padding:10px 12px;
+  border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--raised);
+  transition:border-color var(--t-med) var(--ease);
   text-decoration:none;color:var(--fg);min-width:0;overflow:hidden;}
 .sb-eng:hover{border-color:var(--accent-border);}
 .sb-pick{padding:6px 8px;}
-.sb-pick select{flex:1;min-width:0;width:auto;max-width:100%;border:0;background:none;
+.sb-pick select{flex:1;min-width:0;width:auto;max-width:100%;border:0;background-color:transparent;
   padding:2px 4px;font-size:12.5px;font-weight:600;color:var(--fg);
   text-overflow:ellipsis;}
 .sb-eng .dot{width:7px;height:7px;border-radius:50%;flex:none;}
-.sb-eng .dot.ok{background:var(--low);box-shadow:0 0 0 3px var(--low-soft);}
+.sb-eng .dot.ok{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft);}
 .sb-eng .dot.warn{background:var(--med);box-shadow:0 0 0 3px var(--med-soft);}
-.sb-eng .dot.bad{background:var(--crit);box-shadow:0 0 0 3px var(--crit-soft);}
+.sb-eng .dot.bad{background:var(--crit);box-shadow:0 0 0 3px var(--crit-soft);
+  animation:pulse 1.8s ease-out infinite;}
 .sb-eng .txt{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
 .sb-eng .name{font-size:12.5px;font-weight:600;}
 .sb-eng .url{font-size:11px;color:var(--faint);font-family:var(--mono);}
@@ -63,12 +65,12 @@ CSS = """
 .sb-eng>svg{color:var(--faint);flex:none;}
 
 .sb-nav{display:flex;flex-direction:column;gap:2px;padding:0 12px;}
-.sb-h{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);
-  font-weight:700;padding:6px 10px 5px;}
+.sb-h{font-size:11.5px;color:var(--faint);font-weight:600;padding:6px 10px 5px;}
 .sb-h+.sb-h,.sb-nav .sb-h:not(:first-child){padding-top:16px;}
-.sb-item{position:relative;display:flex;align-items:center;gap:9px;padding:7px 10px;
-  border-radius:var(--radius);font-size:13px;color:var(--muted);text-decoration:none;}
-.sb-item:hover{background:var(--bg);color:var(--fg);}
+.sb-item{position:relative;display:flex;align-items:center;gap:10px;padding:8px 10px;
+  border-radius:10px;font-size:13.5px;color:var(--muted);text-decoration:none;
+  transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease);}
+.sb-item:hover{background:var(--raised);color:var(--fg);}
 .sb-item.on{background:var(--accent-soft);color:var(--accent);font-weight:600;}
 .sb-item svg{flex:none;}
 .sb-item .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -76,8 +78,8 @@ CSS = """
 .sb-foot{margin-top:auto;display:flex;align-items:center;gap:8px;padding:12px 14px 14px;
   border-top:1px solid var(--border);flex-wrap:wrap;}
 .sb-who{display:flex;align-items:center;gap:7px;flex:1;min-width:0;}
-.sb-av{width:24px;height:24px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
-  font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;}
+.sb-av{width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
+  font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;}
 .sb-name{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .sb-foot .btn.ghost{padding:5px 6px;}
 
@@ -113,13 +115,16 @@ CSS = """
 }
 
 .main{flex:1;min-width:0;display:flex;flex-direction:column;}
-.appbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 24px;
-  background:var(--surface);border-bottom:1px solid var(--border);}
-.appbar h1{font-size:18px;margin:0;}
+.appbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:16px 32px;min-height:var(--appbar-h);
+  background:var(--bg);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:40;
+  backdrop-filter:saturate(1.4) blur(8px);}
+.appbar h1{font-size:24px;margin:0;}
 .appbar .spacer{flex:1;}
 .appbar .note{font-size:12.5px;color:var(--muted);}
-.content{padding:18px 24px 72px;}
-.content.narrow{max-width:1180px;}
+.content{padding:22px 32px 72px;}
+/* Every page uses the full width, Engagement and System included. Prose is
+   what gets a measure, not the page: an intro line across 1800px is unreadable. */
+.tabpane>p.muted,.tabpane .card>p.muted{max-width:90ch;}
 
 @media (max-width:900px){
   .app{flex-direction:column;}
@@ -133,11 +138,15 @@ CSS = """
   .sb-foot{margin:0;border-top:0;}
   .content{padding:14px 16px 56px;}
 }
+@media print{
+  .app>.sidebar,.appbar .btn,.stepnav{display:none !important;}
+  *{animation:none !important;}
+}
 """
 
 # The whole stylesheet, in the one order that makes the theme toggle work:
 # tokens first (every colour), then components, then the shell.
-FULL_CSS = tokens.CSS + base.CSS + CSS
+FULL_CSS = tokens.CSS + base.CSS + menu.CSS + select.CSS + charts.CSS + CSS
 
 # Both preferences are applied to <html> BEFORE the first paint. The theme
 # already had to be, and the sidebar width has the same problem: restoring it
@@ -182,7 +191,7 @@ SIDEBAR_JS = """
 """
 
 _SHARED_JS = (f"<script>{base.TOOLTIP_JS}{base.THEME_JS}{SIDEBAR_JS}"
-              f"{base.SECTION_JS}{base.LANG_JS}</script>")
+              f"{base.SECTION_JS}{base.LANG_JS}{base.DIALOG_JS}{menu.JS}{select.JS}</script>")
 
 
 class Nav:
@@ -198,19 +207,25 @@ class Nav:
         return active == self.key or active in self.aliases
 
 
-# Setup entries deep-link into the config page's existing panes, so the sidebar
-# is a real table of contents today rather than a promise about a later refactor.
-WORK_NAV = [
+# Three groups, by what a tester is doing rather than by which page renders it:
+# the WORK (assessments and what they found), the ENGAGEMENT the work is
+# authorized under (where requests go and as whom), and the SYSTEM around it
+# (who did what, and how the platform itself is set up). Engagement and System
+# entries deep-link into the config page's panes, so the sidebar is the table
+# of contents and the config page needs no second nav of its own.
+WORKSPACE_NAV = [
     Nav("dashboard", "Assessments", "/", "list", aliases=("assessment",)),
     Nav("findings", "Findings", "/findings", "alert"),
-    Nav("activity", "Activity", "/activity", "clock"),
 ]
-SETUP_NAV = [
+ENGAGEMENT_NAV = [
     Nav("readiness", "Readiness", "/config?tab=readiness", "check", aliases=("config",)),
-    Nav("target", "Target & scope", "/config?tab=target", "globe",
+    Nav("target", "Scope & Targets", "/config?tab=target", "globe",
         aliases=("environments", "scope")),
     Nav("identities", "Identities", "/config?tab=identities", "identity", aliases=("personas",)),
-    Nav("advanced", "Advanced", "/config?tab=advanced", "sliders",
+]
+SYSTEM_NAV = [
+    Nav("activity", "Audit Log", "/activity", "clock"),
+    Nav("advanced", "Settings", "/config?tab=advanced", "settings",
         aliases=("runner", "ai-evidence", "mcp", "runtime")),
 ]
 
@@ -256,14 +271,14 @@ def _engagement_card(engagement_name: str, engagement_url: str, readiness_state:
     if engagements and len(engagements) > 1:
         options = "".join(
             f'<option value="{attr(key)}"{" selected" if key == current_engagement else ""}>'
-            f"{e(key)}{f' — {e(target)}' if target else ''}</option>"
+            f"{e(base.titleize(key))}{f' — {e(target)}' if target else ''}</option>"
             for key, target in engagements
         )
         return (
             f'<form method="get" class="sb-eng sb-pick" data-tip="'
             f'{attr(_t("Which client this work is authorized under"))}">'
             f'<span class="dot {tone}"></span>'
-            f'<select name="engagement" onchange="this.form.submit()"'
+            f'<select name="engagement" data-native onchange="this.form.submit()"'
             f' aria-label="{attr(_t("Engagement"))}">{options}</select></form>'
         )
 
@@ -284,17 +299,18 @@ def sidebar(active: str, *, engagement_name: str = "", engagement_url: str = "",
             user_name: str = "", auth_enabled: bool = False,
             engagements: list[tuple[str, str]] | None = None,
             current_engagement: str = "") -> str:
-    work = "".join(_nav_item(i, active) for i in WORK_NAV)
+    work = "".join(_nav_item(i, active) for i in WORKSPACE_NAV)
     setup = "".join(
         _nav_item(i, active, tag=readiness_tag if i.key == "readiness" else "")
-        for i in SETUP_NAV
+        for i in ENGAGEMENT_NAV
     )
+    system = "".join(_nav_item(i, active) for i in SYSTEM_NAV)
     auth = ""
     if auth_enabled:
         auth = (
-            f'<a href="/login" class="btn ghost" data-tip="{attr(_t("Log in"))}">{_t("Log in")}</a>'
+            f'<a href="/login" class="btn ghost" data-tip="{attr(_t("Log In"))}">{_t("Log In")}</a>'
             '<form method="post" action="/logout" style="margin:0">'
-            f'<button type="submit" class="btn ghost">{_t("Log out")}</button></form>'
+            f'<button type="submit" class="btn ghost">{_t("Log Out")}</button></form>'
         )
     # No name means there is no real signed-in identity to show, and the chrome
     # middleware suppresses it in both cases that produce one: auth on with no
@@ -308,12 +324,12 @@ def sidebar(active: str, *, engagement_name: str = "", engagement_url: str = "",
                f'<span class="sb-name">{e(user_name)}</span></span>')
     else:
         who = '<span class="sb-who"></span>'  # keeps the footer's spacing
-    collapse_label = _t("Collapse sidebar")
-    expand_label = _t("Expand sidebar")
+    collapse_label = _t("Collapse Sidebar")
+    expand_label = _t("Expand Sidebar")
     return f"""<aside class="sidebar">
 <div class="sb-top">
-<a href="/" class="sb-brand">
-{icons.icon("shield", 20)}<b>{_t("API Security")}</b></a>
+<a href="/" class="sb-brand" aria-label="Sentinel">
+{icons.logo(30)}<b>Sentinel</b></a>
 <button type="button" class="sb-collapse" id="sb-toggle" aria-controls="sb-nav"
  aria-expanded="true" aria-label="{attr(collapse_label)}" data-tip="{attr(collapse_label)}"
  data-label-collapse="{attr(collapse_label)}" data-label-expand="{attr(expand_label)}"
@@ -321,8 +337,9 @@ def sidebar(active: str, *, engagement_name: str = "", engagement_url: str = "",
 </div>
 {_engagement_card(engagement_name, engagement_url, readiness_state, engagements, current_engagement)}
 <nav class="sb-nav" id="sb-nav">
-<div class="sb-h">{_t("Work")}</div>{work}
-<div class="sb-h">{_t("Setup")}</div>{setup}
+<div class="sb-h">{_t("Workspace")}</div>{work}
+<div class="sb-h">{_t("Engagement")}</div>{setup}
+<div class="sb-h">{_t("System")}</div>{system}
 </nav>
 <div class="sb-foot">
 {who}
@@ -330,7 +347,7 @@ def sidebar(active: str, *, engagement_name: str = "", engagement_url: str = "",
 {base.THEME_TOGGLE_HTML}
 {auth}
 <button type="button" class="btn ghost danger iconbtn"
- data-tip="{attr(_t("Shut down the server"))}" aria-label="{attr(_t("Shut down the server"))}"
+ data-tip="{attr(_t("Shut Down Server"))}" aria-label="{attr(_t("Shut Down Server"))}"
  onclick="shutdownServer()">{icons.icon("power", 15)}</button>
 </div>
 </aside>"""
@@ -353,32 +370,31 @@ def _shutdown_js() -> str:
     accident than the old top-right corner.
     """
     confirm_msg = _t(
-        "Shut down the server?\n\nThis stops this app AND any other process running "
-        "from this project (the demo target, stray CLI/pytest runs) — including ones "
-        "started in other terminals. You will need to start it again manually."
+        "Shut down the server?\n\nStops this app and every process started from this "
+        "project, in any terminal."
     )
     return f"""
 function shutdownServer() {{
-  if (!confirm({json.dumps(confirm_msg)})) return;
-  document.querySelectorAll('.danger').forEach(function (b) {{ b.disabled = true; }});
-  fetch('/admin/shutdown', {{
-    method: 'POST',
-    headers: {{ 'X-Confirm-Shutdown': 'security-testing-platform-ui' }},
-  }}).then(_shutdownDone).catch(_shutdownDone);
+  stpConfirm({json.dumps(confirm_msg)}, {{ danger: true }}).then(function (yes) {{
+    if (!yes) return;
+    document.querySelectorAll('.danger').forEach(function (b) {{ b.disabled = true; }});
+    fetch('/admin/shutdown', {{
+      method: 'POST',
+      headers: {{ 'X-Confirm-Shutdown': 'security-testing-platform-ui' }},
+    }}).then(_shutdownDone).catch(_shutdownDone);
+  }});
 }}
 function _shutdownDone() {{
   document.body.innerHTML =
     '<div style="max-width:520px;margin:80px auto;padding:24px">' +
-    '<h1 style="font-size:18px;margin:0 0 8px">' + {json.dumps(_t("Server is shutting down"))} + '</h1>' +
-    '<p style="color:#5b6b6d">' + {json.dumps(_t(
-        "All processes for this project have been stopped. Start it again from a "
-        "terminal to continue."))} + '</p></div>';
+    '<h1 style="font-size:18px;margin:0 0 8px">' + {json.dumps(_t("Server Stopped"))} + '</h1>' +
+    '<p style="color:var(--muted)">' + {json.dumps(_t("Start it again from a terminal."))} + '</p></div>';
 }}
 """
 
 
 def page(title: str, body: str, active: str = "", *, chrome: dict | None = None,
-         appbar_html: str = "", narrow: bool = False) -> str:
+         appbar_html: str = "") -> str:
     """A complete document: shell chrome around `body`.
 
     `chrome` is what the sidebar needs to say (engagement, readiness, user) and
@@ -391,15 +407,17 @@ def page(title: str, body: str, active: str = "", *, chrome: dict | None = None,
     same shell.
     """
     chrome = chrome or {}
-    content_cls = "content narrow" if narrow else "content"
-    return f"""<!doctype html><html lang="{get_lang()}"><head><meta charset="utf-8">
+    labels = (f'data-lbl-ok="{attr(_t("Confirm"))}" data-lbl-cancel="{attr(_t("Cancel"))}" '
+              f'data-lbl-search="{attr(_t("Search Options"))}" '
+              f'data-lbl-nomatch="{attr(_t("No Matches"))}"')
+    return f"""<!doctype html><html lang="{get_lang()}" {labels}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)}</title>
 {_THEME_BOOT}<style>{FULL_CSS}</style></head><body>
 <div class="app">
 {sidebar(active, **chrome)}
 <div class="main">
 {appbar_html}
-<div class="{content_cls}">
+<div class="content">
 {body}
 </div></div></div>
 {_SHARED_JS}<script>{_shutdown_js()}</script>

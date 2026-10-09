@@ -5,6 +5,8 @@ from __future__ import annotations
 
 
 
+from app.api import ui
+
 from ..shell import _e
 from .shared import _kv_textarea_value
 from app.core.i18n import tt as _t
@@ -20,35 +22,43 @@ def _personas_pane(personas: list[dict], attacker: str, victim: str) -> str:
         name = p.get("name", "")
         roles = ""
         if name == attacker:
-            roles += f" <span class='pill med'>{_t('attacker')}</span>"
+            roles += f" <span class='pill med'>{_t('Attacker')}</span>"
         if name == victim:
-            roles += f" <span class='pill high'>{_t('victim')}</span>"
+            roles += f" <span class='pill high'>{_t('Victim')}</span>"
         headers = _kv_textarea_value(p.get("auth_headers") or {}, ": ")
         owns = _kv_textarea_value(p.get("owns") or {}, "=")
         markers = "\n".join(p.get("secret_markers") or [])
         scoping = "\n".join(p.get("scoping_headers") or [])
-        save_label = _t("Save {name}").format(name=_e(name))
+        # The name is an identifier (tests, `owns` and the engagement file refer
+        # to it exactly), so it is never rewritten — only DISPLAYED as a Title
+        # Case label, with the identifier itself beside it in mono.
+        display = ui.titleize(name)
+        save_label = _t("Save {name}").format(name=_e(display))
+        ident = (f' <span class="mono muted" style="font-size:12px">{_e(name)}</span>'
+                 if display != name else "")
+        menu = ui.action_menu([ui.Item(
+            _t("Delete"), action=f"/config/personas/{name}/delete",
+            form_class="confirm-delete", form_data={"what": f"persona {name}"}, danger=True,
+        )], _t("Actions for {name}").format(name=display))
         cards += f"""<div class="card pad" style="margin-bottom:12px">
 <div class="row" style="justify-content:space-between;margin-bottom:10px">
-<div><b>{_e(name)}</b>{roles}</div>
-<form method="post" action="/config/personas/{_e(name)}/delete" style="margin:0"
- class="confirm-delete" data-what="persona {_e(name)}">
-<button class="btn ghost">{_t("Delete")}</button></form>
+<div><b>{_e(display)}</b>{ident}{roles}</div>
+{menu}
 </div>
 <form method="post" action="/config/personas">
 <input type="hidden" name="name" value="{_e(name)}">
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-<label class="field"><span>{_t("Role label")}</span>
+<label class="field"><span>{_t("Role Label")}</span>
 <input name="role" value="{_e(p.get('role', 'user'))}"></label>
-<label class="field"><span>{_t("Owned object ids — key=value per line")}</span>
+<label class="field"><span>{_t("Owned Object Ids — Key=Value per Line")}</span>
 <textarea name="owns" rows="3" placeholder="customer_id=2002">{_e(owns)}</textarea></label>
 </div>
-<label class="field" style="margin-top:12px"><span>{_t("Auth headers — Header: value per line")}</span>
+<label class="field" style="margin-top:12px"><span>{_t("Auth Headers — Header: Value per Line")}</span>
 <textarea name="auth_headers" rows="3" placeholder="Authorization: Bearer eyJ...">{_e(headers)}</textarea></label>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
-<label class="field"><span>{_t("Secret markers — one per line")}</span>
+<label class="field"><span>{_t("Secret Markers — One per Line")}</span>
 <textarea name="secret_markers" rows="2" placeholder="beth.victim@example.com">{_e(markers)}</textarea></label>
-<label class="field"><span>{_t("Scoping headers to strip on privilege-escalation tests — one per line")}</span>
+<label class="field"><span>{_t("Scoping Headers to Strip on Privilege-Escalation Tests — One per Line")}</span>
 <textarea name="scoping_headers" rows="2" placeholder="entity-context">{_e(scoping)}</textarea></label>
 </div>
 <div style="margin-top:12px"><button class="btn">{save_label}</button></div>
@@ -57,7 +67,8 @@ def _personas_pane(personas: list[dict], attacker: str, victim: str) -> str:
 
     def opts(selected: str) -> str:
         out = "".join(
-            f"<option value='{_e(n)}' {'selected' if n == selected else ''}>{_e(n)}</option>"
+            f"<option value='{_e(n)}' data-hint='{_e(n)}' {'selected' if n == selected else ''}>"
+            f"{_e(ui.titleize(n))}</option>"
             for n in names
         )
         if selected and selected not in names:
@@ -86,38 +97,38 @@ def _personas_pane(personas: list[dict], attacker: str, victim: str) -> str:
 
 <div class="card pad" style="margin-bottom:18px">
 <form method="post" action="/config/identities" class="row" style="align-items:flex-end">
-<label class="field" style="max-width:220px"><span>{_t("Attacker persona")}</span>
+<label class="field" style="max-width:220px"><span>{_t("Attacker Persona")}</span>
 <select name="attacker">{opts(attacker)}</select></label>
-<label class="field" style="max-width:220px"><span>{_t("Victim persona")}</span>
+<label class="field" style="max-width:220px"><span>{_t("Victim Persona")}</span>
 <select name="victim">{opts(victim)}</select></label>
-<button class="btn">{_t("Save roles")}</button>
+<button class="btn">{_t("Save Roles")}</button>
 </form>
 <p class="muted" style="margin:10px 0 0">{roles_note}</p>
 </div>
 
-<h2 class="section">{_t("Defined personas")}</h2>
+<h2 class="section">{_t("Defined Personas")}</h2>
 {cards}
 
-<h2 class="section">{_t("Add a persona")}</h2>
+<h2 class="section">{_t("Add a Persona")}</h2>
 <div class="card pad">
 <form method="post" action="/config/personas">
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
 <label class="field"><span>{_t("Name")}</span>
 <input name="name" placeholder="agent_A" required></label>
-<label class="field"><span>{_t("Role label")}</span>
+<label class="field"><span>{_t("Role Label")}</span>
 <input name="role" placeholder="agent" value="user"></label>
 </div>
-<label class="field" style="margin-top:12px"><span>{_t("Auth headers — Header: value per line")}</span>
+<label class="field" style="margin-top:12px"><span>{_t("Auth Headers — Header: Value per Line")}</span>
 <textarea name="auth_headers" rows="3" placeholder="Authorization: Bearer eyJ..."></textarea></label>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
-<label class="field"><span>{_t("Owned object ids — key=value per line")}</span>
+<label class="field"><span>{_t("Owned Object Ids — Key=Value per Line")}</span>
 <textarea name="owns" rows="2" placeholder="customer_id=1001"></textarea></label>
-<label class="field"><span>{_t("Secret markers — one per line")}</span>
+<label class="field"><span>{_t("Secret Markers — One per Line")}</span>
 <textarea name="secret_markers" rows="2" placeholder="alice.buyer@example.com"></textarea></label>
 </div>
-<label class="field" style="margin-top:12px"><span>{_t("Scoping headers to strip on privilege-escalation tests — one per line")}</span>
+<label class="field" style="margin-top:12px"><span>{_t("Scoping Headers to Strip on Privilege-Escalation Tests — One per Line")}</span>
 <textarea name="scoping_headers" rows="2" placeholder="entity-context"></textarea></label>
-<div style="margin-top:12px"><button class="btn">{_t("Add persona")}</button></div>
+<div style="margin-top:12px"><button class="btn">{_t("Add Persona")}</button></div>
 </form>
 <p class="muted" style="margin:10px 0 0">{add_footer}</p>
 </div>"""

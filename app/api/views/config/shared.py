@@ -12,7 +12,7 @@ from app.core.i18n import VI, tt as _t
 # states and approval statuses reuse the same 5-color vocabulary as severity
 # (crit/high/med/low/info) so a reader only has to learn one palette.
 
-_READY_CLASS = {"ok": "low", "warn": "med", "fail": "crit"}
+_READY_CLASS = {"ok": "ok", "warn": "med", "fail": "crit"}
 _READY_ICON = {"ok": "&#10003;", "warn": "&#9888;", "fail": "&#10007;"}
 _READY_WORD = {"ok": "READY", "warn": "CHECK", "fail": "BLOCKING"}
 
@@ -22,11 +22,15 @@ _READY_WORD = {"ok": "READY", "warn": "CHECK", "fail": "BLOCKING"}
 # authorizes, and the four panes nobody opens during a normal engagement (runner
 # limits, AI/evidence secrets, the MCP connector, the read-only runtime facts)
 # now share one "Advanced" tab instead of each advertising itself as a step.
+#
+# The labels match the sidebar entries word for word: the sidebar IS the nav
+# for these panes now, so a pane titled differently from the link that opened
+# it reads as having landed somewhere else.
 _CONFIG_TABS = [
     ("readiness", "Readiness"),
-    ("target", "Target"),
+    ("target", "Scope & Targets"),
     ("identities", "Identities"),
-    ("advanced", "Advanced"),
+    ("advanced", "Settings"),
 ]
 
 # Old tab names stay valid: they are in bookmarks, in older reports, and in the
@@ -51,12 +55,23 @@ def resolve_config_tab(tab: str) -> str:
 
 
 VI.update({
-    "Readiness": "Sẵn sàng", "Target": "Mục tiêu", "Identities": "Danh tính",
-    "Advanced": "Nâng cao",
-    "Environments": "Môi trường", "Scope": "Phạm vi",
-    "Personas": "Persona", "Runner limits": "Giới hạn runner", "MCP": "MCP",
-    "AI & Evidence": "AI & Bằng chứng",
+    "Readiness": "Sẵn Sàng", "Target": "Mục Tiêu", "Identities": "Danh Tính",
+    "Advanced": "Nâng Cao",
+    "Environments": "Môi Trường", "Scope": "Phạm Vi",
+    "Personas": "Persona", "Runner Limits": "Giới Hạn Runner", "MCP": "MCP",
+    "AI & Evidence": "AI & Bằng Chứng",
     "Runtime (.env)": "Runtime (.env)",
+    "Jira Connector (MCP)": "Kết Nối Jira (MCP)",
+    "Max Requests per Second": "Số Request Tối Đa Mỗi Giây",
+    "Interactsh Server": "Máy Chủ Interactsh", "Interactsh Token": "Token Interactsh",
+    "Or a generic collector:": "Hoặc một collector chung:",
+    "Budget per Assessment (USD)": "Ngân Sách Mỗi Assessment (USD)",
+    "Ceiling on the whole run's request rate. Blank or 0 means no ceiling. Probe bursts are exempt.":
+        "Giới hạn tốc độ request của cả lượt chạy. Để trống hoặc 0 là không giới hạn. "
+        "Các loạt request của probe được miễn.",
+    "Everything here has a working default. Reference: "
+    "<code>docs/configuration.md</code>.":
+        "Mọi mục ở đây đều có giá trị mặc định. Tham khảo: <code>docs/configuration.md</code>.",
 })
 
 

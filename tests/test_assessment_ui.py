@@ -76,7 +76,7 @@ def test_within_scope_the_surface_comes_before_the_coverage_derived_from_it(clie
 def test_within_plan_the_design_control_comes_before_the_plan_it_produces(client):
     page = client.get(f"/assessment/{_import(client)}?phase=plan").text
 
-    assert page.index("Generate test plan") < page.index('id="s-plan"')
+    assert page.index("Generate Test Plan") < page.index('id="s-plan"')
 
 
 def test_an_old_section_anchor_still_lands_on_the_phase_that_absorbed_it(client):
@@ -135,8 +135,8 @@ def test_a_collapsed_section_still_states_what_it_holds(client):
 
     page = client.get(f"/assessment/{aid}").text
 
-    assert "of" in page and "approved" in page
-    assert "endpoint(s)" in client.get(f"/assessment/{aid}?phase=scope").text
+    assert "of" in page and "Approved" in page
+    assert "Endpoint(s)" in client.get(f"/assessment/{aid}?phase=scope").text
 
 
 # -- explanations -----------------------------------------------------------
@@ -153,8 +153,8 @@ def test_every_coverage_column_carries_its_own_explanation(client):
         assert header in coverage
     # One ⓘ per header, each with a real explanation attached.
     assert coverage.count('class="i"') >= 4
-    assert "COVERED &mdash;" in coverage or "COVERED —" in coverage
-    assert "NOT APPLICABLE" in coverage or "not applicable" in coverage
+    assert "Covered · Partial · Missing" in coverage
+    assert "Not Applicable" in coverage
 
 
 def test_the_from_poc_column_says_it_is_not_a_safety_score(client):
@@ -163,13 +163,13 @@ def test_the_from_poc_column_says_it_is_not_a_safety_score(client):
 
     page = client.get(f"/assessment/{aid}?phase=scope").text
 
-    assert "NOT a" in page and "how secure" in page
+    assert "Not a security score" in page
 
 
 def test_the_endpoint_columns_explain_what_they_drive(client):
     page = client.get(f"/assessment/{_import(client)}").text
 
-    assert "BOLA/BOPLA surface" in page          # object ids
+    assert "BOLA id-swap" in page                # object ids
     assert "API3" in page                        # writes_properties
     assert "API7" in page or "SSRF" in page      # url fields
 
@@ -289,7 +289,7 @@ def test_verdicts_are_shown_so_blocked_does_not_read_as_clean(client):
 
     assert "Verdicts" in page
     assert _repo().execution_verdicts(aid), "the run should have produced verdicts"
-    assert "BLOCKED" in page or "ERROR" in page or "PASS" in page
+    assert any(v in page for v in ("BLOCKED", "ERROR", "PASS", "INCONCLUSIVE", "FAIL"))
 
 
 def test_the_page_head_does_not_reuse_the_app_chrome_class(client):

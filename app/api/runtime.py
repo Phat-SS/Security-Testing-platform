@@ -27,6 +27,7 @@ from typing import Any
 from app.analysis import TestDesigner, build_analyzer
 from app.analysis.attack_planner import build_planner
 from app.analysis.adjudicator import build_adjudicator
+from app.analysis.copilot import build_copilot
 from app.analysis.plan_reviewer import build_reviewer
 from app.api import views
 from app.core.auth import AuthManager
@@ -110,6 +111,7 @@ class State:
         self.orch.set_planner(planner)
         self.orch.set_reviewer(build_reviewer())
         self.orch.set_adjudicator(build_adjudicator())
+        self.orch.set_copilot(build_copilot())
         views.configure(auth_enabled=self.auth.enabled, planner_enabled=planner is not None)
 
 
