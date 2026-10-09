@@ -18,11 +18,26 @@ its own heading keeps working while the screens are migrated one at a time.
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from app.core.i18n import get_lang, tt as _t
 
 from . import base, charts, icons, menu, select, tokens
 from .base import attr, e
+
+# The tab icon is the Sentinel mark — the same drawing as docs/assets/favicon.svg
+# (scripts/brand/build_assets.py), inlined so it needs no static route.
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 40 40">'
+    '<rect x="1" y="1" width="38" height="38" rx="10" fill="#0d141b" stroke="#2ee6b6" stroke-opacity=".45"/>'
+    '<circle cx="20" cy="20" r="12" fill="none" stroke="#2ee6b6" stroke-width="1.4" opacity=".45"/>'
+    '<circle cx="20" cy="20" r="6" fill="none" stroke="#2ee6b6" stroke-width="1.6"/>'
+    '<path d="M20 20 L20 7 A13 13 0 0 1 31.3 13.5 Z" fill="#2ee6b6" opacity=".32"/>'
+    '<circle cx="20" cy="20" r="2" fill="#2ee6b6"/>'
+    '<circle cx="28" cy="12.5" r="1.8" fill="#ff5468"></circle></svg>'
+)
+_FAVICON = ('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,'
+            + quote(_FAVICON_SVG) + '">')
 
 CSS = """
 .app{display:flex;min-height:100vh;}
@@ -411,7 +426,7 @@ def page(title: str, body: str, active: str = "", *, chrome: dict | None = None,
               f'data-lbl-search="{attr(_t("Search Options"))}" '
               f'data-lbl-nomatch="{attr(_t("No Matches"))}"')
     return f"""<!doctype html><html lang="{get_lang()}" {labels}><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)}</title>{_FAVICON}
 {_THEME_BOOT}<style>{FULL_CSS}</style></head><body>
 <div class="app">
 {sidebar(active, **chrome)}
